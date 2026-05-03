@@ -9,17 +9,15 @@
 
 ---
 
-## 功能特性
+## 为什么选择 ScanSci PDF？
 
-- **13+ 下载源** — arXiv、Sci-Hub、LibGen、Unpaywall、OpenAlex、Semantic Scholar、DOAJ、EuropePMC、CORE、PMC、出版商直链等
-- **100+ 高校 WebVPN** — 中国高校机构代理访问论文全文
-- **并行竞速引擎** — 多数据源同时尝试，最快可用源获胜
-- **智能列表解析** — APA 引文、BibTeX、DOI 列表，自动补全缺失 DOI
-- **自动重命名** — PDF 自动重命名为 `作者年份_标题.pdf` 格式
-- **引文导出** — BibTeX、RIS、EndNote 格式
-- **Zotero 集成** — 下载后直接推送到 Zotero
-- **Tor 支持** — 通过内嵌 Tor 匿名访问 Sci-Hub/LibGen
-- **网络诊断** — 自动检测 DNS 封锁、代理问题、连接故障并给出修复建议
+- **一个工具，13+ 数据源** — arXiv、Sci-Hub、LibGen、Unpaywall、OpenAlex、Semantic Scholar、DOAJ、EuropePMC、CORE、PMC、出版商直链等，自动选择最快可用源
+- **100+ 高校 WebVPN** — 通过中国高校机构代理访问付费论文全文，CAS 认证，密码不经过工具
+- **并行竞速引擎** — 多数据源同时尝试，首个成功立即返回，无需逐个等待
+- **智能列表解析** — 支持 APA 引文、BibTeX、DOI 列表，自动补全缺失 DOI 后批量下载
+- **自动重命名** — PDF 自动重命名为 `作者年份_标题.pdf` 格式，告别杂乱文件名
+- **引文导出** — 一键获取 BibTeX、RIS、EndNote 格式引文
+- **网络诊断** — 自动检测 DNS 封锁、代理配置、Tor 连接问题，给出针对性修复建议
 
 ---
 
@@ -47,25 +45,10 @@ pip install scansci-pdf
 ```
 
 <details>
-<summary>HTTP 模式</summary>
+<summary>HTTP 模式（Web 调用）</summary>
 
 ```bash
 scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
-```
-</details>
-
-<details>
-<summary>Docker 部署</summary>
-
-```json
-{
-  "mcpServers": {
-    "scansci-pdf": {
-      "command": "docker",
-      "args": ["compose", "-f", "path/to/docker-compose.yml", "run", "--rm", "scansci-pdf"]
-    }
-  }
-}
 ```
 </details>
 
@@ -100,7 +83,6 @@ scansci-pdf check
 |------|------|
 | `scansci_pdf_citation` | 获取论文引文（BibTeX/RIS/EndNote） |
 | `scansci_pdf_import_bib` | 导入 .bib 文件并下载全部论文 |
-| `scansci_pdf_zotero_push` | 推送论文到 Zotero |
 
 ### WebVPN
 
@@ -145,7 +127,7 @@ scansci-pdf check
 
 ## WebVPN 设置
 
-通过中国高校机构代理访问论文全文：
+通过中国高校机构代理访问论文全文。适用于所在网络无法直连 Sci-Hub 但有高校账号的场景。
 
 ```
 1. scansci_pdf_config_set(key="vpnsci_enabled", value="true")
@@ -176,7 +158,13 @@ scansci-pdf check
 
 ---
 
-## Docker 部署
+## 高级功能（可选）
+
+以下功能为可选项，适用于特定网络环境或高级需求。
+
+### Docker 部署
+
+适用于需要将 scansci-pdf 作为长期运行服务的场景，或不想在本机安装 Python 环境的用户。Docker 容器内置 MCP 服务器和 Tor 代理，数据通过 Docker 卷持久化。
 
 ```bash
 docker compose up -d
@@ -187,23 +175,35 @@ docker compose up -d
 | `scansci-pdf` | MCP 服务器 | 8000 |
 | `tor` | Tor SOCKS5 代理 | 1080 |
 
-数据持久化在 Docker 卷 `scansci-pdf-data` 中。
+Docker 配置方式：
 
----
+```json
+{
+  "mcpServers": {
+    "scansci-pdf": {
+      "command": "docker",
+      "args": ["compose", "-f", "path/to/docker-compose.yml", "run", "--rm", "scansci-pdf"]
+    }
+  }
+}
+```
 
-## Tor 设置
+### Tor 匿名代理
 
-Tor 用于在 Sci-Hub/LibGen 被封锁的地区匿名访问。
+Tor 用于在 Sci-Hub、LibGen 等网站被网络封锁的地区匿名访问。如果你的网络可以直连 Sci-Hub，则不需要 Tor。内嵌 Tor 会自动下载 Tor Expert Bundle（约 30MB），无需 Docker 或系统级安装。
 
 ```bash
-# 自动安装 Tor（约 30MB）
+# 首次使用：自动下载安装 Tor
 scansci_pdf_tor_install
 
-# 启动 Tor 代理
+# 启动 Tor SOCKS5 代理
 scansci_pdf_tor_start
 
-# 受限网络（防火墙封锁 Tor）使用 obfs4 桥接
+# 如果 Tor 本身也被封锁（连接超时），启用 obfs4 桥接绕过
 scansci_pdf_tor_start(use_bridges=true)
+
+# 下载时通过 Tor 访问
+scansci_pdf_download(identifier="10.1038/nature12373", use_tor=true)
 ```
 
 二进制文件存储在 `~/.scansci-pdf/tor/`，不污染系统环境。
@@ -214,11 +214,11 @@ scansci_pdf_tor_start(use_bridges=true)
 
 **Sci-Hub 下载失败** — 运行 `scansci_pdf_health_check(detailed=true)` 查看数据源状态，域名轮换自动处理。
 
-**Tor 连接失败** — 确认 Tor 运行在 `socks5h://127.0.0.1:1080`。Docker 部署时 Tor 自动启动。
+**Tor 连接失败** — 确认 Tor 运行在 `socks5h://127.0.0.1:1080`。如 Tor 也被封锁，使用 `scansci_pdf_tor_start(use_bridges=true)` 启用桥接。
 
 **WebVPN 登录失败** — 需要 Chrome/ChromeDriver。登录在你的浏览器中完成，密码不经过本工具。
 
-**下载速度慢** — 运行 `scansci_pdf_health_check(detailed=true)` 检查数据源延迟。如 Sci-Hub 在你的网络被封锁，尝试 `legal_only` 策略。
+**下载速度慢** — 运行 `scansci_pdf_health_check(detailed=true)` 检查数据源延迟。如 Sci-Hub 在你的网络被封锁，尝试 `legal_only` 策略或配置代理。
 
 **网络问题** — 运行 `scansci_pdf_network_diagnose` 获取全面的连接诊断报告和针对性修复建议。
 
@@ -238,7 +238,7 @@ scansci_pdf_tor_start(use_bridges=true)
 
 ---
 
-## 贡献者
+## 赞助者
 
 <a href="https://github.com/qwlei328-maker"><img src="https://avatars.githubusercontent.com/u/257463305?v=4" width="50" height="50" alt="qwlei328-maker" title="Natasha"/></a>
 <a href="https://github.com/jingqingqiu1"><img src="https://avatars.githubusercontent.com/u/87510394?v=4" width="50" height="50" alt="jingqingqiu1" title="jingqingqiu1"/></a>
