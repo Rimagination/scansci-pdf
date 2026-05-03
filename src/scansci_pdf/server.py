@@ -240,7 +240,8 @@ def scansci_pdf_import_bib(
     def _bib_progress(current: int, total: int, identifier: str, result: dict[str, Any]) -> None:
         ok = result.get("success", False)
         src = result.get("source", "?")
-        _log.info(f"   [{current}/{total}] {\"OK\" if ok else \"FAIL\"} {src} {identifier}")
+        status = "OK" if ok else "FAIL"
+        _log.info(f"   [{current}/{total}] {status} {src} {identifier}")
 
     result = batch_download(identifiers, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, progress_callback=_bib_progress)
     result["bib_entries"] = len(entries)
@@ -520,7 +521,8 @@ def scansci_pdf_resolve_and_download(
     def _resolve_progress(current: int, total: int, identifier: str, result: dict[str, Any]) -> None:
         ok = result.get("success", False)
         src = result.get("source", "?")
-        _log.info(f"   [{current}/{total}] {\"OK\" if ok else \"FAIL\"} {src} {identifier}")
+        status = "OK" if ok else "FAIL"
+        _log.info(f"   [{current}/{total}] {status} {src} {identifier}")
 
     dl_result = batch_download(
         unique_dois, output_dir,
