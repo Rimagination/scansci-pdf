@@ -79,7 +79,7 @@ def _try_source(
         error_type = classify_error(exception=e)
         record_result(label, False, latency_ms, error_type)
         advice = get_user_advice(error_type, label)
-        log.info(f"   Exception in {label}: {e} ({advice})")
+        log.info(f"   FAIL {label}: {error_type} — {advice}")
         return None
 
 
@@ -474,10 +474,61 @@ def download(
             result["bibtex"] = fetch_bibtex(doi, config)
         return result
 
-    hint: dict[str, Any] = {"manual_url": f"https://sci-hub.st/{doi}"}
+    # Build actionable guidance based on what was tried
+    guidance = _build_failure_guidance(doi, config)
+    hint: dict[str, Any] = {"manual_url": f"https://sci-hub.st/{doi}", "guidance": guidance}
     result = fail(identifier, "no PDF found", hint)
     result["source"] = "none"
     return result
+
+
+def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
+    """Build actionable guidance when all download sources fail."""
+    import os
+    tips = []
+
+    # Check scansci-pdf proxy config
+    cfg_proxy = config.get("network_proxy", "")
+    env_proxy = os.environ.get("SCANSCI_PDF_PROXY", "")
+
+    if cfg_proxy or env_proxy:
+        active = env_proxy or cfg_proxy
+        tips.append(f"当前代理: {active} — 如果 Sci-Hub 仍不通，尝试更换代理地址")
+    else:
+        # Check if system has proxy that scansci-pdf ignores
+        sys_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+        if sys_proxy:
+            tips.append(f"检测到系统代理 {sys_proxy}，但 scansci-pdf 未使用")
+            tips.append(f"→ 运行: scansci-pdf config_set network_proxy \"{sys_proxy}\"")
+        else:
+            tips.append("未配置代理 — 如果网络受限，运行: scansci-pdf config_set network_proxy \"socks5://127.0.0.1:1080\"")
+
+    # Check strategy
+    strategy = config.get("download_strategy", "fastest")
+    if strategy == "fastest":
+        tips.append("仅用合法源重试: scansci-pdf download <doi> --strategy legal_only")
+    elif strategy == "legal_only":
+        tips.append("含 Sci-Hub 重试: scansci-pdf download <doi> --strategy fastest")
+
+    # Check Tor
+    try:
+        from ..tor import check_tor_circuit
+        if not check_tor_circuit(config):
+            tips.append("Tor 未运行 → 运行: scansci-pdf tor_start（匿名访问 Sci-Hub/LibGen）")
+    except Exception:
+        pass
+
+    # Check WebVPN
+    if not config.get("vpnsci_enabled"):
+        tips.append("有高校账号？运行: scansci-pdf config_set vpnsci_enabled true")
+
+    # Manual fallback
+    tips.append(f"手动下载: https://sci-hub.st/{doi}")
+
+    # Network diagnostic
+    tips.append("运行网络诊断: scansci-pdf network_diagnose")
+
+    return tips
 
 
 def _get_progress_file(batch_id: str) -> Path:
@@ -485,8 +536,11 @@ def _get_progress_file(batch_id: str) -> Path:
     return DATA_DIR / "batch_progress" / f"{batch_id}.jsonl"
 
 
+_progress_lock = threading.Lock()
+
+
 def _save_progress(batch_id: str, identifier: str, result: dict[str, Any]) -> None:
-    """Append a single result to the progress file."""
+    """Append a single result to the progress file (thread-safe)."""
     progress_file = _get_progress_file(batch_id)
     progress_file.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -496,8 +550,10 @@ def _save_progress(batch_id: str, identifier: str, result: dict[str, Any]) -> No
         "file": result.get("file", ""),
         "doi": result.get("doi", ""),
     }
-    with progress_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    with _progress_lock:
+        with progress_file.open("a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def _load_progress(batch_id: str) -> dict[str, dict[str, Any]]:
@@ -691,17 +747,20 @@ def batch_download(
     # Reload progress to include newly-saved invalid results
     final_map = _load_progress(batch_id)
 
-    # Merge completed_map with new results
+    # Build a lookup from pending_identifiers → download results
+    pending_results = dict(zip(pending_identifiers, results))
+
+    # Merge completed_map with new results (dict lookup, no fragile index counter)
     all_results = []
-    new_idx = 0
     for ident in unique_identifiers:
         if ident in final_map:
             all_results.append(final_map[ident])
         elif ident in completed_map:
             all_results.append(completed_map[ident])
+        elif ident in pending_results:
+            all_results.append(pending_results[ident])
         else:
-            all_results.append(results[new_idx])
-            new_idx += 1
+            all_results.append(fail(ident, "missing result"))
 
     succeeded = sum(1 for r in all_results if r and r.get("success"))
     failed_dois = [r["identifier"] for r in all_results if r and not r.get("success")]

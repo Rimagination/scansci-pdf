@@ -17,3 +17,8 @@ piao_top30.json
 piao_top30_dois.txt
 webvpn.dat
 =3.0
+
+# Cython build artifacts (generated locally, not tracked)
+*.c
+*.pyd
+*.so

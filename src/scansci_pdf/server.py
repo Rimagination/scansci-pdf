@@ -214,6 +214,19 @@ def scansci_pdf_source_scores() -> str:
 
 
 @mcp_app.tool()
+def scansci_pdf_network_diagnose() -> str:
+    """Diagnose network connectivity and provide actionable fix suggestions.
+
+    Tests DNS resolution, TCP connectivity, proxy, Tor, and FlareSolverr status.
+    Returns specific configuration commands to fix detected issues.
+    """
+    from .sources.scoring import diagnose_network
+    config = load_config()
+    report = diagnose_network(config)
+    return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
 def scansci_pdf_config_get() -> str:
     """Get current scansci-pdf configuration (sensitive values masked)."""
     return json.dumps(get_config_safe(), ensure_ascii=False, indent=2)

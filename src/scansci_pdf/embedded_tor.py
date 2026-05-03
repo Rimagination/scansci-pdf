@@ -99,13 +99,17 @@ def download_tor(config: dict[str, Any]) -> Path | None:
     is_zip = filename.endswith(".zip")
     is_targz = filename.endswith(".tar.gz")
 
-    # Try mirrors
+    # Try mirrors, using proxy if configured
     import requests as req
+    proxies = {}
+    proxy = os.environ.get("SCANSCI_PDF_PROXY") or os.environ.get("HTTPS_PROXY") or config.get("network_proxy")
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
     for mirror in TOR_DOWNLOAD_MIRRORS:
         url = f"{mirror}/{filename}"
         try:
             log.info(f"Downloading Tor from {url}")
-            resp = req.get(url, timeout=300, stream=True)
+            resp = req.get(url, timeout=300, stream=True, proxies=proxies)
             if resp.status_code != 200:
                 continue
 

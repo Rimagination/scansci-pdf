@@ -1,0 +1,15 @@
+# Compiled Cython extensions (built by CI, distributed via PyPI)
+*.pyd
+*.so
+*.pyd.*
+*.so.*
+
+# Cython generated C files
+*.c
+
+# Cython source files (core IP, not public)
+*.pyx
+
+# Keep only __init__.py and this .gitignore
+!__init__.py
+!.gitignore
