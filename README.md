@@ -13,9 +13,11 @@
 
 - **一个工具，13+ 数据源** — arXiv、Sci-Hub、LibGen、Unpaywall、OpenAlex、Semantic Scholar、DOAJ、EuropePMC、CORE、PMC、出版商直链等，自动选择最快可用源
 - **100+ 高校 WebVPN** — 通过中国高校机构代理访问付费论文全文，CAS 认证，密码不经过工具
+- **CARSI 联邦认证** — 支持 ScienceDirect、Springer、Wiley、IEEE、Taylor & Francis、Nature 等出版商的机构登录
+- **Cloudflare 绕过** — curl_cffi TLS 指纹模拟 + FlareSolverr 浏览器引擎双层策略
 - **并行竞速引擎** — 多数据源同时尝试，首个成功立即返回，无需逐个等待
 - **智能列表解析** — 支持 APA 引文、BibTeX、DOI 列表，自动补全缺失 DOI 后批量下载
-- **自动重命名** — PDF 自动重命名为 `作者年份_标题.pdf` 格式，告别杂乱文件名
+- **自动重命名** — PDF 自动重命名为 `作者年份_标题.pdf` 格式
 - **引文导出** — 一键获取 BibTeX、RIS、EndNote 格式引文
 - **网络诊断** — 自动检测 DNS 封锁、代理配置、Tor 连接问题，给出针对性修复建议
 
@@ -75,6 +77,22 @@ scansci-pdf check
 
 ---
 
+## 工作原理
+
+下载一篇论文时，ScanSci PDF 会同时启动多个数据源，按优先级分层竞速：
+
+```
+Tier 1 (4s)  ─ 出版商直链（OA/机构访问）
+Tier 2 (5s)  ─ OpenAlex / Unpaywall / DOAJ
+Tier 3 (8s)  ─ EuropePMC / CORE / PMC / arXiv
+Tier 4 (25s) ─ LibGen / Sci-Hub（带 FlareSolverr 绕过）
+Tier 5 (20s) ─ WebVPN / CARSI 机构代理
+```
+
+首个成功下载的源立即返回，其余自动取消。自适应评分系统会根据历史成功率和延迟动态调整源的优先级。
+
+---
+
 ## MCP 工具
 
 ### 论文下载
@@ -99,7 +117,7 @@ scansci-pdf check
 | `scansci_pdf_citation` | 获取论文引文（BibTeX/RIS/EndNote） |
 | `scansci_pdf_import_bib` | 导入 .bib 文件并下载全部论文 |
 
-### WebVPN
+### WebVPN / CARSI
 
 | 工具 | 描述 |
 |------|------|
@@ -140,7 +158,9 @@ scansci-pdf check
 
 ---
 
-## WebVPN 设置
+## WebVPN / CARSI 设置
+
+### WebVPN（高校代理）
 
 通过中国高校机构代理访问论文全文。适用于所在网络无法直连 Sci-Hub 但有高校账号的场景。
 
@@ -153,6 +173,16 @@ scansci-pdf check
 ```
 
 支持 100+ 所高校，使用 `scansci_pdf_vpnsci_schools` 搜索。
+
+### CARSI（出版商联邦认证）
+
+CARSI/Shibboleth 联邦认证，直接通过出版商的机构登录页面认证，无需 WebVPN 中转。支持 ScienceDirect、Springer Nature、Wiley、IEEE、Taylor & Francis、Nature。
+
+```
+1. scansci_pdf_config_set(key="carsi_enabled", value="true")
+2. scansci_pdf_config_set(key="carsi_idp_name", value="中国海洋大学")
+3. 下载时自动通过 CARSI 认证访问出版商全文
+```
 
 ---
 
@@ -169,6 +199,10 @@ scansci-pdf check
 | `network_proxy` | （空） | HTTP/SOCKS 代理地址 |
 | `batch_workers` | `10` | 批量下载并发数 |
 | `vpnsci_enabled` | `false` | 启用 WebVPN |
+| `vpnsci_school` | （空） | WebVPN 学校名称 |
+| `carsi_enabled` | `false` | 启用 CARSI 联邦认证 |
+| `carsi_idp_name` | （空） | CARSI 机构名称 |
+| `flaresolverr_url` | `http://localhost:8191/v1` | FlareSolverr 服务地址 |
 | `use_tor_for_scihub` | `false` | Sci-Hub 使用 Tor |
 
 ---
@@ -223,11 +257,21 @@ scansci_pdf_download(identifier="10.1038/nature12373", use_tor=true)
 
 二进制文件存储在 `~/.scansci-pdf/tor/`，不污染系统环境。
 
+### FlareSolverr（Cloudflare 绕过）
+
+当 Sci-Hub、LibGen 等站点触发 Cloudflare 防护时，FlareSolverr 可以自动绕过。需要 Docker 运行 FlareSolverr 服务：
+
+```bash
+docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr
+```
+
+ScanSci PDF 会自动检测 Cloudflare 并回退到 FlareSolverr，无需手动配置。如果已安装 curl_cffi，会优先使用 TLS 指纹模拟（更快，无需 Docker）。
+
 ---
 
 ## 故障排查
 
-**Sci-Hub 下载失败** — 运行 `scansci_pdf_health_check(detailed=true)` 查看数据源状态，域名轮换自动处理。
+**Sci-Hub 下载失败** — 运行 `scansci_pdf_health_check(detailed=true)` 查看数据源状态。域名轮换自动处理。如果遇到 Cloudflare 防护，安装 FlareSolverr 或 curl_cffi。
 
 **Tor 连接失败** — 确认 Tor 运行在 `socks5h://127.0.0.1:1080`。如 Tor 也被封锁，使用 `scansci_pdf_tor_start(use_bridges=true)` 启用桥接。
 
