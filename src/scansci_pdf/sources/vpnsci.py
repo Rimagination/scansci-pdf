@@ -484,7 +484,8 @@ def try_vpnsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str,
         html_str = html.decode("utf-8", errors="ignore")
 
         # Check for Cloudflare block
-        if _is_cloudflare_block(html_str):
+        from ..network import _is_cloudflare_block
+        if any(sig in html_str.lower() for sig in ("cf-browser-verification", "challenge-platform", "just a moment")):
             log.info("   [WebVPN] Cloudflare detected, trying FlareSolverr...")
             flaresolverr_html = _try_flaresolverr_via_webvpn(doi_url, config)
             if flaresolverr_html:
@@ -567,29 +568,13 @@ def _save_pdf_response(resp: requests.Response, output_path: Path, doi: str, sou
     return None
 
 
-def _is_cloudflare_block(html: str) -> bool:
-    """Check if HTML response is a Cloudflare challenge page."""
-    lower = html.lower()
-    return any(sig in lower for sig in (
-        "cf-browser-verification",
-        "cloudflare",
-        "cf_chl_opt",
-        "challenge-platform",
-        "just a moment",
-        "checking your browser",
-    ))
-
-
 def _try_flaresolverr_via_webvpn(url: str, config: dict[str, Any]) -> str | None:
     """Try fetching a URL through FlareSolverr, using WebVPN proxy."""
     try:
-        from .flaresolverr import get_flaresolverr
-        client = get_flaresolverr(config)
-        if not client:
-            return None
+        from ..flaresolverr import get_html
         base = _get_webvpn_base(config)
         proxied_url = convert_url(url, base, config)
-        return client.get(proxied_url)
+        return get_html(proxied_url, config)
     except Exception as e:
         log.info(f"   [FlareSolverr] {e}")
         return None
