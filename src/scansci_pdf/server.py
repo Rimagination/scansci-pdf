@@ -20,26 +20,7 @@ from .tor import check_tor_circuit
 
 mcp_app = FastMCP(
     name="scansci-pdf",
-    instructions="""Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support.
-
-## Download workflow
-1. For a single paper: call `scansci_pdf_download` with the DOI or arXiv ID.
-2. For multiple papers: call `scansci_pdf_batch_download` with a list of identifiers.
-3. For a paper list file: call `scansci_pdf_resolve_and_download`.
-
-## WebVPN workflow (for papers behind paywall)
-When the user wants to use their university WebVPN to access paid papers:
-1. Call `scansci_pdf_vpnsci_status` to check current state.
-2. If not configured: call `scansci_pdf_vpnsci_set_school` with the university name.
-3. If session is not valid: call `scansci_pdf_vpnsci_login` — this opens a browser for CAS login. Tell the user to complete login in the browser, then wait for the tool to return.
-4. Once session is valid: call `scansci_pdf_download` with `use_vpnsci=true`.
-
-IMPORTANT: Do NOT ask the user to manually open URLs, copy cookies, or inspect browser storage. The tools handle everything automatically. Just call the tools in order.
-
-## Troubleshooting
-- If download fails: call `scansci_pdf_network_diagnose` for network issues, or `scansci_pdf_health_check` for source availability.
-- If Sci-Hub is blocked: try `use_tor=true` or `strategy=legal_only`.
-""",
+    instructions="Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. Supports DOI, arXiv ID, keyword search, and resumable batch downloads.",
 )
 
 
@@ -54,11 +35,6 @@ def scansci_pdf_download(
     strategy: str | None = None,
 ) -> str:
     """Download a single academic paper by DOI or arXiv ID.
-
-    For papers behind a paywall, set use_vpnsci=true. Before first use, ensure WebVPN is set up:
-    1. scansci_pdf_vpnsci_set_school (set university)
-    2. scansci_pdf_vpnsci_login (browser CAS login)
-    3. Then call this tool with use_vpnsci=true
 
     Args:
         identifier: DOI (e.g. 10.1038/nature12373), DOI URL, or arXiv ID (e.g. 2301.00001)
@@ -385,16 +361,6 @@ def scansci_pdf_vpnsci_login() -> str:
 
     Login happens in your browser - passwords never pass through this program.
     Only session cookies are saved. Run this before using use_vpnsci=true.
-
-    Workflow:
-    1. First check status with scansci_pdf_vpnsci_status
-    2. If school not set, call scansci_pdf_vpnsci_set_school first
-    3. Call this tool — it opens a browser for CAS login
-    4. Tell the user to complete login in the browser
-    5. Wait for this tool to return success
-    6. Then call scansci_pdf_download with use_vpnsci=true
-
-    Do NOT ask the user to manually copy cookies or open URLs. This tool handles everything.
     """
     config = load_config()
     if not config.get("vpnsci_enabled"):
