@@ -36,9 +36,9 @@ $PYTHON -m venv "$VENV_DIR"
 
 # Activate and install
 source "$VENV_DIR/bin/activate"
-echo "Installing scansci-pdf with all optional dependencies ..."
-pip install --upgrade pip -q
-pip install ".[tor]" -q
+echo "Installing scansci-pdf with recommended optional dependencies (fast + vpnsci) ..."
+"$VENV_DIR/bin/python" -m pip install --upgrade pip -q
+"$VENV_DIR/bin/python" -m pip install ".[fast,vpnsci]" -q
 
 echo ""
 echo "=== Installation Complete ==="
@@ -61,4 +61,4 @@ echo "  docker compose up -d"
 echo ""
 
 # Check dependencies
-scansci-pdf check
+"$VENV_DIR/bin/scansci-pdf" check

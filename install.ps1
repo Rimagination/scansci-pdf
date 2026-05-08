@@ -36,9 +36,9 @@ New-Item -ItemType Directory -Force -Path (Split-Path $venvDir) | Out-Null
 
 # Activate and install
 & "$venvDir\Scripts\Activate.ps1"
-Write-Host "Installing scansci-pdf with all optional dependencies ..."
-pip install --upgrade pip -q
-pip install ".[tor]" -q
+Write-Host "Installing scansci-pdf with recommended optional dependencies (fast + vpnsci) ..."
+& "$venvDir\Scripts\python.exe" -m pip install --upgrade pip -q
+& "$venvDir\Scripts\python.exe" -m pip install ".[fast,vpnsci]" -q
 
 Write-Host ""
 Write-Host "=== Installation Complete ===" -ForegroundColor Green
@@ -61,4 +61,4 @@ Write-Host "  docker compose up -d"
 Write-Host ""
 
 # Check dependencies
-scansci-pdf check
+& "$venvDir\Scripts\scansci-pdf.exe" check

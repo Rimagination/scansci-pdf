@@ -50,6 +50,14 @@ scansci_pdf_citation(identifier="10.1038/nature12373", format="bibtex")
 
 format 可选：`bibtex`、`ris`、`endnote`
 
+## 推送到 Zotero
+
+```
+scansci_pdf_zotero_push(identifier="10.1038/nature12373")
+```
+
+要求：该论文已被下载到本地缓存。
+
 ---
 
 ## WebVPN 高校代理（付费文献）
@@ -103,6 +111,7 @@ scansci_pdf_download(identifier="...", use_tor=true)
 
 ```
 scansci_pdf_health_check(detailed=true)   → 检查所有数据源状态
+scansci_pdf_source_scores                 → 查看各下载源健康评分
 scansci_pdf_network_diagnose              → 网络诊断报告
 scansci_pdf_config_get                    → 查看当前配置
 scansci_pdf_config_set(key="scihub_enabled", value="true")
