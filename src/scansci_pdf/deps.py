@@ -108,6 +108,6 @@ def print_status() -> None:
         log.info(f"  [{status}] {module} - {info['description']}")
 
     if has_optional:
-        log.info("  Install optional deps: pip install scansci-pdf[tor,redis]")
+        log.info("  Install optional deps: pip install scansci-pdf[fast,vpnsci]")
 
     log.info("========================")

@@ -27,8 +27,16 @@
 
 ### 安装
 
+最小安装：
+
 ```bash
 pip install scansci-pdf
+```
+
+推荐安装（启用更快的 HTML 解析和 WebVPN 登录依赖）：
+
+```bash
+pip install "scansci-pdf[fast,vpnsci]"
 ```
 
 ### MCP 配置
@@ -95,6 +103,8 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 
 ## MCP 工具
 
+以下名称是 MCP 工具调用名，不是终端命令。批量下载、BibTeX 导入和列表解析下载会通过 MCP progress 返回进度，客户端无需也不应传入内部 `ctx` 参数。
+
 ### 论文下载
 
 | 工具 | 描述 |
@@ -116,6 +126,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 |------|------|
 | `scansci_pdf_citation` | 获取论文引文（BibTeX/RIS/EndNote） |
 | `scansci_pdf_import_bib` | 导入 .bib 文件并下载全部论文 |
+| `scansci_pdf_zotero_push` | 将已下载论文推送到 Zotero |
 
 ### WebVPN / CARSI
 
@@ -133,6 +144,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 |------|------|
 | `scansci_pdf_health_check` | 检查所有数据源可用性 |
 | `scansci_pdf_setup_check` | 检测系统环境并给出安装建议 |
+| `scansci_pdf_source_scores` | 查看各数据源的自适应健康评分 |
 | `scansci_pdf_config_get` / `config_set` | 查看/修改配置 |
 | `scansci_pdf_cache_clear` | 清除下载缓存 |
 | `scansci_pdf_network_diagnose` | 网络诊断（DNS、代理、Tor、FlareSolverr） |
@@ -241,7 +253,9 @@ Docker 配置方式：
 
 Tor 用于在 Sci-Hub、LibGen 等网站被网络封锁的地区匿名访问。如果你的网络可以直连 Sci-Hub，则不需要 Tor。内嵌 Tor 会自动下载 Tor Expert Bundle（约 30MB），无需 Docker 或系统级安装。
 
-```bash
+下面是 MCP 工具调用示例（在 Agent/MCP 客户端中调用，不是在 shell 中直接执行）：
+
+```text
 # 首次使用：自动下载安装 Tor
 scansci_pdf_tor_install
 
