@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .cache import cache_clear, cache_get
 from .config import get_config_safe, load_config, update_config
@@ -20,8 +20,38 @@ from .tor import check_tor_circuit
 
 mcp_app = FastMCP(
     name="scansci-pdf",
-    instructions="Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. Supports DOI, arXiv ID, keyword search, and resumable batch downloads.",
+    instructions=(
+        "Academic paper downloader MCP server with 13+ sources, WebVPN/CARSI institutional access, "
+        "Tor, Sci-Hub/LibGen fallback, citation export, and resumable batch downloads. "
+        "Use scansci_pdf_search before downloading when the user provides only a title or broad topic. "
+        "Ask the user to choose papers before batch-downloading search results. "
+        "For paywalled papers, configure WebVPN with scansci_pdf_vpnsci_set_school, then scansci_pdf_vpnsci_login, "
+        "then call download with use_vpnsci=true. For network failures, call scansci_pdf_network_diagnose."
+    ),
 )
+
+
+def _safe_report_progress(ctx: Context | None, current: int, total: int, identifier: str, result: dict[str, Any]) -> None:
+    """Report MCP progress from sync download callbacks without exposing ctx in tool schemas."""
+    if ctx is None:
+        return
+    try:
+        import anyio
+
+        ok = result.get("success", False)
+        source = result.get("source", "?")
+        status = "OK" if ok else "FAIL"
+        anyio.from_thread.run(
+            ctx.report_progress,
+            current,
+            total,
+            f"{status} {source} {identifier}",
+        )
+    except Exception:
+        # Progress notifications are best-effort; never fail a download because
+        # the client does not support progress or the callback is running outside
+        # an anyio worker thread (for example in direct tests).
+        pass
 
 
 @mcp_app.tool()
@@ -58,7 +88,7 @@ def scansci_pdf_batch_download(
     use_vpnsci: bool = False,
     batch_id: str | None = None,
     resume: bool = True,
-    ctx: Any = None,
+    ctx: Context | None = None,
 ) -> str:
     """Download multiple papers by DOI or arXiv ID.
 
@@ -79,11 +109,7 @@ def scansci_pdf_batch_download(
         src = result.get("source", "?")
         status = "OK" if ok else "FAIL"
         _log.info(f"   [{current}/{total}] {status} {src} {identifier}")
-        if ctx and hasattr(ctx, "report_progress"):
-            try:
-                ctx.report_progress(current, total)
-            except Exception:
-                pass
+        _safe_report_progress(ctx, current, total, identifier, result)
 
     result = batch_download(
         identifiers, output_dir,
@@ -265,7 +291,7 @@ def scansci_pdf_import_bib(
     output_dir: str | None = None,
     scihub_enabled: bool | None = None,
     use_tor: bool = False,
-    ctx: Any = None,
+    ctx: Context | None = None,
 ) -> str:
     """Import DOIs from a .bib file and download all papers.
 
@@ -276,6 +302,9 @@ def scansci_pdf_import_bib(
         use_tor: Route through Tor
     """
     from .bibparser import parse_bib_file
+    from .log import get_logger
+    _log = get_logger()
+
     entries = parse_bib_file(bib_file)
     if not entries:
         return json.dumps({"success": False, "error": "No entries with DOI found in .bib file"})
@@ -287,11 +316,7 @@ def scansci_pdf_import_bib(
         src = result.get("source", "?")
         status = "OK" if ok else "FAIL"
         _log.info(f"   [{current}/{total}] {status} {src} {identifier}")
-        if ctx and hasattr(ctx, "report_progress"):
-            try:
-                ctx.report_progress(current, total)
-            except Exception:
-                pass
+        _safe_report_progress(ctx, current, total, identifier, result)
 
     result = batch_download(identifiers, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, progress_callback=_bib_progress)
     result["bib_entries"] = len(entries)
@@ -517,7 +542,7 @@ def scansci_pdf_resolve_and_download(
     use_tor: bool = False,
     use_vpnsci: bool = False,
     resolve_titles: bool = True,
-    ctx: Any = None,
+    ctx: Context | None = None,
 ) -> str:
     """Parse paper list → fix DOI format → resolve missing DOIs by title search → batch download.
 
@@ -532,6 +557,9 @@ def scansci_pdf_resolve_and_download(
         use_vpnsci: Try WebVPN institutional proxy as last resort
         resolve_titles: Search OpenAlex for papers without DOI (default true)
     """
+    from .log import get_logger
+    _log = get_logger()
+
     try:
         entries = parse_paper_list(file_path)
     except FileNotFoundError as e:
@@ -574,11 +602,7 @@ def scansci_pdf_resolve_and_download(
         src = result.get("source", "?")
         status = "OK" if ok else "FAIL"
         _log.info(f"   [{current}/{total}] {status} {src} {identifier}")
-        if ctx and hasattr(ctx, "report_progress"):
-            try:
-                ctx.report_progress(current, total)
-            except Exception:
-                pass
+        _safe_report_progress(ctx, current, total, identifier, result)
 
     dl_result = batch_download(
         unique_dois, output_dir,

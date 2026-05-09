@@ -103,6 +103,8 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 
 ## MCP 工具
 
+以下名称是 MCP 工具调用名，不是终端命令。批量下载、BibTeX 导入和列表解析下载会通过 MCP progress 返回进度，客户端无需也不应传入内部 `ctx` 参数。
+
 ### 论文下载
 
 | 工具 | 描述 |
@@ -251,7 +253,9 @@ Docker 配置方式：
 
 Tor 用于在 Sci-Hub、LibGen 等网站被网络封锁的地区匿名访问。如果你的网络可以直连 Sci-Hub，则不需要 Tor。内嵌 Tor 会自动下载 Tor Expert Bundle（约 30MB），无需 Docker 或系统级安装。
 
-```bash
+下面是 MCP 工具调用示例（在 Agent/MCP 客户端中调用，不是在 shell 中直接执行）：
+
+```text
 # 首次使用：自动下载安装 Tor
 scansci_pdf_tor_install
 
