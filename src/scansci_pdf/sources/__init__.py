@@ -42,6 +42,7 @@ from .scihub import try_scihub
 from .semantic_scholar import try_semanticscholar
 from .unpaywall import try_unpaywall
 from .vpnsci import try_vpnsci
+from .ezproxy import try_ezproxy
 
 __all__ = ["download", "batch_download"]
 
@@ -254,6 +255,8 @@ def _build_tiers(doi: str, config: dict[str, Any], strategy: str, *, use_vpnsci:
     tier5_scihub = [(try_scihub, "Sci-Hub")] if config.get("scihub_enabled", False) else []
     # WebVPN is last resort - requires use_vpnsci=True and valid session
     tier6_vpnsci = [(try_vpnsci, "WebVPN")] if use_vpnsci and config.get("vpnsci_enabled", False) else []
+    # EZProxy institutional proxy - separate from WebVPN, uses library proxy
+    tier6b_ezproxy = [(try_ezproxy, "EZProxy")] if use_vpnsci and config.get("ezproxy_enabled", False) else []
 
     from .scoring import sort_sources
 
@@ -270,16 +273,19 @@ def _build_tiers(doi: str, config: dict[str, Any], strategy: str, *, use_vpnsci:
         return [(tier5_scihub, "Sci-Hub", 30)] if tier5_scihub else []
 
     if strategy == "legal_only":
-        return [
+        result = [
             (tier1_oa, "Fast-OA", 5),
             (tier2_discovery, "Discovery", 10),
             (tier3_oa, "OA", 8),
             (tier3b_content, "ContentAPI", 10),
             (tier6_vpnsci, "WebVPN", 20),
         ]
+        if tier6b_ezproxy:
+            result.append((tier6b_ezproxy, "EZProxy", 25))
+        return result
 
     if strategy == "oa_first":
-        return [
+        result = [
             (tier1_oa, "Fast-OA", 5),
             (tier2_discovery, "Discovery", 10),
             (tier3_oa, "OA", 8),
@@ -288,6 +294,9 @@ def _build_tiers(doi: str, config: dict[str, Any], strategy: str, *, use_vpnsci:
             (tier5_scihub, "Sci-Hub", 45),
             (tier6_vpnsci, "WebVPN", 25),
         ]
+        if tier6b_ezproxy:
+            result.append((tier6b_ezproxy, "EZProxy", 25))
+        return result
 
     tier3_more_oa = sort_sources([
         (try_europepmc, "EuropePMC"),
@@ -305,6 +314,8 @@ def _build_tiers(doi: str, config: dict[str, Any], strategy: str, *, use_vpnsci:
     tiers.append((tier4_grey, "Grey", 45))
     if tier6_vpnsci:
         tiers.append((tier6_vpnsci, "WebVPN", 20))
+    if tier6b_ezproxy:
+        tiers.append((tier6b_ezproxy, "EZProxy", 25))
     return tiers
 
 
@@ -527,8 +538,43 @@ def download(
 
     # Build actionable guidance based on what was tried
     guidance = _build_failure_guidance(doi, config)
+
+    # Check if browser strategy detected a specific error
+    try:
+        from ..publisher_strategies import get_last_error
+        error_type, error_action = get_last_error()
+    except Exception:
+        error_type, error_action = "", ""
+
     hint: dict[str, Any] = {"manual_url": f"https://sci-hub.st/{doi}", "guidance": guidance}
-    result = fail(identifier, "no PDF found", hint)
+
+    reason = "no PDF found"
+    if error_type == "paywall":
+        reason = "paywall — requires institutional access"
+    elif error_type == "cloudflare_blocked":
+        reason = "Cloudflare anti-bot protection blocked access"
+
+    # Add agent hint for paywall - clear instruction on what to do next
+    if error_type == "paywall" or error_action == "login_required":
+        result = fail(
+            identifier,
+            reason,
+            hint,
+            error_type=error_type or "paywall",
+            action=error_action or "login_required",
+        )
+        result["agent_hint"] = (
+            f"此论文需要机构登录才能下载。请运行 scansci_pdf_login(identifier=\"{doi}\") "
+            "打开浏览器让用户登录机构账号，登录后关闭浏览器，然后重试下载。"
+        )
+    else:
+        result = fail(
+            identifier,
+            reason,
+            hint,
+            error_type=error_type or "not_found",
+            action=error_action or "",
+        )
     result["source"] = "none"
     return result
 
@@ -537,6 +583,27 @@ def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
     """Build actionable guidance when all download sources fail."""
     import os
     tips = []
+
+    # Check if browser strategy detected a paywall
+    try:
+        from ..publisher_strategies import get_last_error
+        error_type, _ = get_last_error()
+    except Exception:
+        error_type = ""
+
+    if error_type == "paywall":
+        tips.append("此论文需要机构订阅才能下载")
+        tips.append(f"→ 运行 scansci_pdf_login(identifier=\"{doi}\") 打开浏览器登录")
+        tips.append("→ 在浏览器中点击 'Access through your institution' 选择你的机构")
+        tips.append("→ 登录后关闭浏览器，cookies 自动保存")
+        tips.append("→ 重新运行下载命令即可")
+    elif error_type == "cloudflare_blocked":
+        tips.append("Cloudflare 防护阻止了访问")
+        tips.append("→ 启动 camofox-browser（默认端口 9377）绕过反爬")
+        tips.append("→ 或配置代理: scansci_pdf config_set network_proxy \"socks5://127.0.0.1:1080\"")
+    elif error_type == "camofox_unavailable":
+        tips.append("camofox-browser 未运行，无法使用浏览器下载策略")
+        tips.append("→ 启动 camofox-browser（默认端口 9377）")
 
     # Check scansci-pdf proxy config
     cfg_proxy = config.get("network_proxy", "")

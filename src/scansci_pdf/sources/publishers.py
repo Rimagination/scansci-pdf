@@ -13,6 +13,33 @@ from typing import Any
 import requests
 
 from .crossref import try_crossref
+
+
+def _load_publisher_cookies(session: requests.Session, config: dict[str, Any]) -> None:
+    """Load saved publisher cookies into a session."""
+    try:
+        from ..browser_cookies import inject_cookies
+        inject_cookies(session, config)
+    except Exception:
+        pass
+    # Also load CARSI/institutional login cookies
+    try:
+        from ..config import DATA_DIR
+        import json as _json
+        cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+        carsi_dir = cache_dir / "carsi_cookies"
+        if carsi_dir.is_dir():
+            for cf in carsi_dir.glob("*.json"):
+                try:
+                    for c in _json.loads(cf.read_text(encoding="utf-8")):
+                        session.cookies.set(
+                            c.get("name", ""), c.get("value", ""),
+                            domain=c.get("domain", ""), path=c.get("path", "/"),
+                        )
+                except Exception:
+                    pass
+    except Exception:
+        pass
 from .nature import try_nature_direct
 from .openalex import try_openalex_oa
 from .semantic_scholar import try_semanticscholar
@@ -54,11 +81,18 @@ DOI_PREFIX_TO_PUBLISHER: dict[str, str] = {
     "10.1111/": "Wiley",
     "10.1145/": "ACM",
     "10.1109/": "IEEE",
+    "10.1364/": "OSA",
+    "10.1080/": "Tandfonline",
+    "10.1116/": "AIP",  # AVS (pubs.aip.org)
+    "10.1146/": "AnnualReviews",
     "10.31219/": "Research Square",
     "10.21203/": "Research Square",
     "10.20944/": "Preprints.org",
     "10.26434/": "chemRxiv",
     "10.48550/": "arXiv",
+    "10.1143/": "IOP",  # JJAP (IOP-hosted)
+    "10.3938/": "KPS",
+    "10.3762/": "Beilstein",
 }
 
 PREPRINT_PREFIXES: dict[str, str] = {
@@ -71,32 +105,37 @@ PREPRINT_PREFIXES: dict[str, str] = {
 }
 
 # Fast sources per publisher (used by tiered racing)
-# Only Nature has working direct download; others use Crossref/Unpaywall/OpenAlex
+# Browser strategies (ElsevierBrowser, etc.) use camofox for anti-bot bypass
 PUBLISHER_TOOL_MAP: dict[str, list[str]] = {
-    "Nature": ["NatureDirect", "PublisherDirect", "Crossref", "Unpaywall"],
+    "Nature": ["NatureDirect", "PublisherDirect", "NatureBrowser", "Crossref", "Unpaywall"],
     "MDPI": ["MDPIDirect", "Crossref", "Unpaywall"],
     "arXiv": ["arXiv"],
     "bioRxiv": ["arXiv", "Unpaywall"],
-    "Elsevier": ["Crossref", "Unpaywall"],
-    "Wiley": ["Crossref", "Unpaywall"],
-    "Science": ["ScienceDirect", "Crossref", "Unpaywall"],
+    "Elsevier": ["ElsevierBrowser", "Crossref", "Unpaywall"],
+    "Wiley": ["WileyBrowser", "Crossref", "Unpaywall"],
+    "Science": ["ScienceDirect", "ScienceBrowser", "Crossref", "Unpaywall"],
     "PNAS": ["PNASDirect", "Crossref", "Unpaywall"],
-    "Oxford": ["Crossref", "Unpaywall"],
-    "ACS": ["Crossref", "Unpaywall"],
-    "Springer": ["Crossref", "Unpaywall"],
-    "APS": ["Crossref", "Unpaywall"],
-    "IOP": ["Crossref", "Unpaywall"],
+    "Oxford": ["OxfordBrowser", "Crossref", "Unpaywall"],
+    "ACS": ["ACSBrowser", "Crossref", "Unpaywall"],
+    "Springer": ["SpringerBrowser", "Crossref", "Unpaywall"],
+    "APS": ["APSBrowser", "Crossref", "Unpaywall"],
+    "IOP": ["IOPBrowser", "Crossref", "Unpaywall"],
     "PLOS": ["PLOSDirect", "Crossref", "Unpaywall"],
     "Frontiers": ["FrontiersDirect", "Crossref", "Unpaywall"],
     "BMC": ["BMCDirect", "Crossref", "Unpaywall"],
-    "RSC": ["Crossref", "Unpaywall"],
-    "AIP": ["Crossref", "Unpaywall"],
-    "ACM": ["Crossref", "Unpaywall"],
-    "IEEE": ["Crossref", "Unpaywall"],
+    "RSC": ["RSCBrowser", "Crossref", "Unpaywall"],
+    "AIP": ["AIPBrowser", "Crossref", "Unpaywall"],
+    "ACM": ["ACMBrowser", "Crossref", "Unpaywall"],
+    "IEEE": ["IEEEBrowser", "Crossref", "Unpaywall"],
+    "OSA": ["Crossref", "Unpaywall"],
+    "Tandfonline": ["TandFBrowser", "Crossref", "Unpaywall"],
+    "AnnualReviews": ["Crossref", "Unpaywall"],
+    "KPS": ["Crossref", "Unpaywall"],
+    "Beilstein": ["Crossref", "Unpaywall"],
+    "EMBO": ["Crossref", "Unpaywall"],
     "Research Square": ["Crossref", "Unpaywall"],
     "chemRxiv": ["Crossref", "Unpaywall"],
     "Preprints.org": ["Crossref", "Unpaywall"],
-    "AnnualReviews": ["Crossref", "Unpaywall"],
     "WorldScientific": ["Crossref", "Unpaywall"],
 }
 
@@ -175,7 +214,7 @@ def resolve_doi(doi: str, config: dict[str, Any]) -> str | None:
 # ============================================================
 
 def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
-    """Try publisher direct download (Nature only, others fall through to OA sources)."""
+    """Try publisher direct download with HTTP first, then browser fallback."""
     from ..network import USER_AGENT, polite_delay
     from ..pdf_utils import is_pdf_file, success, _response_looks_pdf
 
@@ -183,6 +222,7 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
     resolved_url = resolve_doi(doi, config)
     log.info(f"   [PublisherDirect] Resolved URL: {resolved_url}")
 
+    # Phase 1: HTTP-based direct download (fast path)
     for pub in PUBLISHERS:
         name, template, matches, gdpr, _ = pub
 
@@ -200,6 +240,7 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
             s = requests.Session()
             s.trust_env = False
             s.headers.update({"User-Agent": USER_AGENT})
+            _load_publisher_cookies(s, config)
             resp = s.get(pdf_url, timeout=15, stream=True,
                          headers={"Accept": "application/pdf,*/*"},
                          allow_redirects=True)
@@ -220,6 +261,21 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
 
         except Exception as e:
             log.info(f"   [Publisher] {name}: {e}")
+
+    # Phase 2: Browser-based download via camofox (handles anti-bot)
+    publisher = get_publisher(doi)
+    if publisher and config.get("camofox_enabled", True):
+        from ..camofox import is_available as _camofox_avail
+        if _camofox_avail(config):
+            log.info(f"   [PublisherDirect] Trying browser strategy for {publisher}")
+            fn = _FN_MAP.get(f"{publisher}Browser") or _FN_MAP.get("GenericBrowser")
+            if fn:
+                try:
+                    result = fn(doi, output_path, config)
+                    if result:
+                        return result
+                except Exception as e:
+                    log.info(f"   [PublisherDirect] Browser strategy failed: {e}")
 
     return None
 
@@ -298,10 +354,22 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
     from ..network import polite_delay
     from ..pdf_utils import is_pdf_file, success, _response_looks_pdf
 
-    try:
-        from curl_cffi import requests as cffi_requests
-    except ImportError:
-        return None
+    def _fetch_pdf_camofox(pdf_url: str) -> "requests.Response | None":  # type: ignore[name-defined]
+        from ..camofox import is_available as _camofox_avail, solve_url as _camofox_solve
+        if not _camofox_avail(config):
+            return None
+        result = _camofox_solve(pdf_url, config)
+        if not result:
+            return None
+        solution = result.get("solution", {})
+        if solution.get("status", 0) >= 400:
+            return None
+        import requests as _req
+        resp = _req.Response()
+        resp.status_code = solution.get("status", 200)
+        resp._content = solution.get("response", "").encode("utf-8")
+        resp.url = solution.get("url", pdf_url)
+        return resp
 
     # Extract article ID from DOI (e.g., sciadv.1600983 -> 1600983)
     doi_suffix = doi.split("10.1126/")[-1]
@@ -320,9 +388,8 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
     for pdf_url in pdf_urls:
         try:
             polite_delay(config)
-            resp = cffi_requests.get(pdf_url, impersonate="chrome", timeout=15, stream=True)
-
-            if resp.status_code >= 400:
+            resp = _fetch_pdf_camofox(pdf_url)
+            if resp is None:
                 continue
 
             iterator = resp.iter_content(chunk_size=8192)
@@ -537,6 +604,34 @@ def get_publisher(doi: str) -> str:
     return ""
 
 
+def _browser_strategy(publisher: str) -> Any:
+    """Create a browser download function for a publisher."""
+    from ..publisher_strategies import (
+        try_elsevier_browser, try_wiley_browser, try_ieee_browser,
+        try_acs_browser, try_rsc_browser, try_aip_browser,
+        try_springer_browser, try_aps_browser, try_tandfonline_browser,
+        try_iop_browser, try_oxford_browser, try_acm_browser,
+        try_nature_browser, try_science_browser, try_generic_browser,
+    )
+    mapping = {
+        "Elsevier": try_elsevier_browser,
+        "Wiley": try_wiley_browser,
+        "IEEE": try_ieee_browser,
+        "ACS": try_acs_browser,
+        "RSC": try_rsc_browser,
+        "AIP": try_aip_browser,
+        "Springer": try_springer_browser,
+        "APS": try_aps_browser,
+        "Tandfonline": try_tandfonline_browser,
+        "IOP": try_iop_browser,
+        "Oxford": try_oxford_browser,
+        "ACM": try_acm_browser,
+        "Nature": try_nature_browser,
+        "Science": try_science_browser,
+    }
+    return mapping.get(publisher, try_generic_browser)
+
+
 def get_publisher_fast_sources(doi: str) -> list[tuple[Any, str]]:
     publisher = get_publisher(doi)
     if not publisher:
@@ -571,4 +666,20 @@ _FN_MAP.update({
     "PLOSDirect": try_plos_direct,
     "FrontiersDirect": try_frontiers_direct,
     "BMCDirect": try_bmc_direct,
+    # Browser strategies via camofox
+    "ElsevierBrowser": _browser_strategy("Elsevier"),
+    "WileyBrowser": _browser_strategy("Wiley"),
+    "IEEEBrowser": _browser_strategy("IEEE"),
+    "ACSBrowser": _browser_strategy("ACS"),
+    "RSCBrowser": _browser_strategy("RSC"),
+    "AIPBrowser": _browser_strategy("AIP"),
+    "SpringerBrowser": _browser_strategy("Springer"),
+    "APSBrowser": _browser_strategy("APS"),
+    "TandFBrowser": _browser_strategy("Tandfonline"),
+    "IOPBrowser": _browser_strategy("IOP"),
+    "OxfordBrowser": _browser_strategy("Oxford"),
+    "ACMBrowser": _browser_strategy("ACM"),
+    "NatureBrowser": _browser_strategy("Nature"),
+    "ScienceBrowser": _browser_strategy("Science"),
+    "GenericBrowser": _browser_strategy(""),
 })

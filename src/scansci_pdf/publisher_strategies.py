@@ -1,0 +1,2074 @@
+"""Publisher-specific browser download strategies via camofox.
+
+Implements tailored download paths for major academic publishers,
+handling anti-bot challenges, PDF viewers, and publisher-specific DOM structures.
+Inspired by ref-downloader's publisher strategy registry.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+from .log import get_logger
+
+log = get_logger()
+
+# Module-level error tracking for caller introspection
+_last_error_type: str = ""
+_last_error_action: str = ""
+
+
+def get_last_error() -> tuple[str, str]:
+    """Return (error_type, action) from last _browser_download call."""
+    return _last_error_type, _last_error_action
+
+
+def _set_error(error_type: str, action: str = "") -> None:
+    global _last_error_type, _last_error_action
+    _last_error_type = error_type
+    _last_error_action = action
+
+
+def _clear_error() -> None:
+    global _last_error_type, _last_error_action
+    _last_error_type = ""
+    _last_error_action = ""
+
+
+def _detect_paywall(html: str, status_code: int = 0) -> bool:
+    """Detect if the page is a paywall/login wall rather than anti-bot challenge."""
+    lower = html[:50000].lower()
+    # Paywall indicators
+    paywall_signals = [
+        "sign in to access", "login to access", "institutional access",
+        "purchase access", "subscribe to access", "buy article",
+        "access through your institution", "get access",
+        "this article is behind a paywall", "subscription required",
+        "please log in", "register to continue",
+        "access denied", "you do not have access",
+        "institutional login", "shibboleth", "openathens",
+    ]
+    if any(sig in lower for sig in paywall_signals):
+        return True
+    # 403 with article content (not Cloudflare challenge) = paywall
+    if status_code == 403 and not _is_challenge_page(html):
+        return True
+    return False
+
+
+def _has_publisher_cookies(config: dict[str, Any]) -> bool:
+    """Check if we have saved publisher cookies for the current session."""
+    try:
+        from .browser_cookies import load_saved_cookies
+        if len(load_saved_cookies(config)) > 0:
+            return True
+    except Exception:
+        pass
+    # Also check CARSI cookies
+    try:
+        from .config import DATA_DIR
+        carsi_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache"))) / "carsi_cookies"
+        if carsi_dir.is_dir() and any(carsi_dir.glob("*.json")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _inject_cookies_to_tab(tab_id: str, config: dict[str, Any], publisher: str) -> None:
+    """Inject saved publisher + CARSI cookies into camofox-browser session."""
+    from .camofox import import_cookies
+    from .config import DATA_DIR
+    cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+    total = 0
+
+    # Import publisher cookies (Netscape format if exists)
+    netscape_file = cache_dir / "publisher_cookies.txt"
+    if netscape_file.exists():
+        try:
+            total += import_cookies(str(netscape_file), config)
+        except Exception:
+            pass
+
+    # Import CARSI cookies
+    carsi_dir = cache_dir / "carsi_cookies"
+    if carsi_dir.is_dir():
+        for cf in carsi_dir.glob("*.json"):
+            try:
+                # Convert JSON → Netscape format
+                from .browser_cookies import cookies_to_netscape
+                cookies = json.loads(cf.read_text(encoding="utf-8"))
+                tmp = cache_dir / f"_tmp_{cf.stem}.txt"
+                tmp.write_text(cookies_to_netscape(cookies), encoding="utf-8")
+                total += import_cookies(str(tmp), config)
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if total > 0:
+        log.info(f"   [{publisher}] imported {total} cookies into camofox session")
+
+
+def _try_institutional_login(tab_id: str, config: dict[str, Any], publisher: str) -> bool:
+    """Try institutional login (OpenAthens/CARSI) when paywall detected.
+
+    Works within the existing camofox-browser tab:
+    1. Find and click "Institutional login" / SSO link
+    2. Search for configured institution
+    3. Wait for user to complete CAS login
+    4. Navigate back to article
+
+    Returns True if login succeeded (cookies saved).
+    """
+    from .camofox import evaluate_js, navigate_tab
+
+    idp_name = config.get("carsi_idp_name", "")
+    if not idp_name:
+        log.info(f"   [{publisher}] no carsi_idp_name configured, skipping institutional login")
+        return False
+
+    idp_en = _IDP_MAP.get(idp_name, idp_name)
+
+    # Step 1: Click SSO/institutional login link on the article page
+    sso_clicked = evaluate_js(tab_id, """
+        (() => {
+            const links = [...document.querySelectorAll('a')];
+            for (const a of links) {
+                const href = (a.href || '').toLowerCase();
+                const text = (a.innerText || '').toLowerCase();
+                if (href.includes('ssostart') || href.includes('saml') || href.includes('shibboleth')
+                    || href.includes('institutional-login') || href.includes('federation')
+                    || (text.includes('institutional') && text.includes('login'))
+                    || text.includes('access through your institution')) {
+                    a.click();
+                    return a.href;
+                }
+            }
+            return null;
+        })()
+    """, config)
+
+    if not sso_clicked:
+        log.info(f"   [{publisher}] no SSO/institutional login link found on page")
+        return False
+
+    log.info(f"   [{publisher}] clicked institutional login: {str(sso_clicked)[:60]}")
+    time.sleep(8)
+
+    # Step 2: Look for institution search box and search
+    search_done = evaluate_js(tab_id, f"""
+        (() => {{
+            const name = {json.dumps(idp_en)};
+            const selectors = {json.dumps(_INSTITUTION_SEARCH_SELECTORS)};
+            for (const sel of selectors) {{
+                const input = document.querySelector(sel);
+                if (input) {{
+                    input.focus();
+                    input.value = name;
+                    input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    input.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    input.dispatchEvent(new KeyboardEvent('keyup', {{key: 'n', bubbles: true}}));
+                    return sel;
+                }}
+            }}
+            return null;
+        }})()
+    """, config)
+
+    if search_done:
+        log.info(f"   [{publisher}] searched for '{idp_en}' via {search_done}")
+        time.sleep(3)
+
+        # Click matching institution result
+        clicked = evaluate_js(tab_id, f"""
+            (() => {{
+                const name = {json.dumps(idp_en)};
+                const items = document.querySelectorAll('[class*="result"], [class*="suggestion"], [class*="federation"], li, a, button');
+                for (const el of items) {{
+                    const text = el.textContent || '';
+                    if (text.includes(name) && el.offsetParent !== null) {{
+                        el.click();
+                        return text.trim().substring(0, 60);
+                    }}
+                }}
+                return null;
+            }})()
+        """, config)
+
+        if clicked:
+            log.info(f"   [{publisher}] selected institution: {clicked}")
+            time.sleep(5)
+        else:
+            log.info(f"   [{publisher}] no matching institution found for '{idp_en}'")
+            return False
+    else:
+        log.info(f"   [{publisher}] no institution search box found")
+
+    # Step 3: Check if CAS login page appeared (headless tab → user can't interact)
+    # Use module-level constants
+    _ak = _AUTH_KEYWORDS
+    _at = _AUTH_TITLES
+
+    current_url = evaluate_js(tab_id, "window.location.href", config) or ""
+    current_title = evaluate_js(tab_id, "document.title", config) or ""
+
+    needs_login = any(x in current_url.lower() for x in _ak) or any(x in current_title for x in _at)
+
+    if needs_login:
+        # camofox-browser is headless — user can't see the tab
+        # Open a visible Camoufox window for the CAS login
+        log.info(f"   [{publisher}] CAS login required — opening visible browser...")
+        return _visible_institutional_login(current_url, config, publisher, idp_name, idp_en, tab_id)
+
+    # If we ended up back on the article page, login might have succeeded via cookies
+    log.info(f"   [{publisher}] institutional login flow completed")
+    return True
+
+
+def _visible_institutional_login(
+    cas_url: str, config: dict[str, Any], publisher: str,
+    idp_name: str, idp_en: str, headless_tab_id: str,
+) -> bool:
+    """Open a visible Camoufox browser for CAS login, then inject cookies back."""
+    try:
+        from camoufox.sync_api import Camoufox
+        from camoufox.addons import DefaultAddons
+    except ImportError:
+        log.info(f"   [{publisher}] camoufox not installed for visible login")
+        return False
+
+    from .camofox import evaluate_js, navigate_tab, import_cookies
+
+    with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
+        context = browser.new_context()
+        page = context.new_page()
+
+        # Start from article page to get Cloudflare clearance, then do SSO flow
+        article_url = evaluate_js(headless_tab_id, "window.location.href", config) or cas_url
+        import re as _re
+        doi_match = _re.search(r'10\.\d{4,}/[^\s?&]+', article_url)
+        doi_str = doi_match.group(0) if doi_match else ""
+        from urllib.parse import urlparse as _urlparse
+        parsed = _urlparse(article_url)
+        publisher_host = parsed.netloc or "onlinelibrary.wiley.com"
+        article_page = f"https://{publisher_host}/doi/{doi_str}" if doi_str else article_url
+
+        log.info(f"   [{publisher}] visible browser: loading article page first...")
+        try:
+            page.goto(article_page, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(5)
+        except Exception:
+            pass
+
+        title = page.title()
+        url = page.url
+        log.info(f"   [{publisher}] visible browser: '{title[:40]}' {url[:60]}")
+
+        # Check if already on CAS page (previous cookies caused redirect)
+        already_on_auth = any(x in (title or "") for x in _AUTH_TITLES) or \
+                          any(x in (url or "").lower() for x in _AUTH_KEYWORDS)
+
+        if not already_on_auth:
+            # Click "Institutional login" link on article page
+            page.evaluate("""
+                (() => {
+                    const a = [...document.querySelectorAll('a')].find(a => a.href && a.href.includes('ssostart'));
+                    if (a) a.click();
+                })()
+            """)
+            time.sleep(8)
+
+            title = page.title()
+            url = page.url
+            log.info(f"   [{publisher}] after SSO click: '{title[:30]}' {url[:60]}")
+
+            # Search for institution
+            si = page.query_selector('#searchInstitution')
+            if si:
+                si.fill(idp_en)
+                time.sleep(3)
+                page.evaluate(f"""
+                    (name) => {{
+                        const items = document.querySelectorAll('[class*="result"], [class*="suggestion"], li, a, button');
+                        for (const el of items) {{
+                            if (el.textContent.includes(name) && el.offsetParent !== null) {{
+                                el.click();
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """, idp_en)
+                time.sleep(5)
+
+        # Wait for user to complete CAS login
+        print(f"\n  请在浏览器中完成机构登录 ({idp_name})")
+        print("  登录成功后浏览器会自动跳转回文章页面，程序会自动检测\n")
+
+        for i in range(100):
+            time.sleep(3)
+            try:
+                title = page.title()
+                url = page.url
+            except Exception:
+                break
+            is_auth = any(x in title for x in _AUTH_TITLES)
+            is_auth_url = any(x in url.lower() for x in _AUTH_KEYWORDS)
+            if not is_auth and not is_auth_url:
+                log.info(f"   [{publisher}] login successful in visible browser!")
+
+                # Extract ALL cookies from visible browser
+                try:
+                    cookies = context.cookies()
+                    log.info(f"   [{publisher}] captured {len(cookies)} cookies from visible browser")
+
+                    # Save to Netscape file and import into camofox-browser
+                    from .config import DATA_DIR
+                    from .browser_cookies import cookies_to_netscape
+                    cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+                    tmp_file = cache_dir / "_tmp_visible_login.txt"
+                    tmp_file.write_text(cookies_to_netscape(cookies), encoding="utf-8")
+                    imported = import_cookies(str(tmp_file), config)
+                    log.info(f"   [{publisher}] imported {imported} cookies into camofox session")
+
+                    # Also save as JSON for future use
+                    carsi_dir = cache_dir / "carsi_cookies"
+                    carsi_dir.mkdir(parents=True, exist_ok=True)
+                    publisher_lower = publisher.lower()
+                    cookie_data = [
+                        {"name": c.get("name", ""), "value": c.get("value", ""),
+                         "domain": c.get("domain", ""), "path": c.get("path", "/"),
+                         "secure": c.get("secure", False), "expires": c.get("expires", 0),
+                         "httpOnly": c.get("httpOnly", False)}
+                        for c in cookies
+                    ]
+                    (carsi_dir / f"{publisher_lower}.json").write_text(
+                        json.dumps(cookie_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                    # Also save publisher subset to publisher_cookies.json
+                    from .browser_cookies import _save_cookies_json
+                    pub_domains = ["wiley.com", "onlinelibrary.wiley.com", "elsevier.com", "sciencedirect.com",
+                                   "springer.com", "link.springer.com", "nature.com", "ieee.org", "acs.org"]
+                    pub_cookies = [c for c in cookie_data
+                                   if any(c.get("domain", "").endswith(d) for d in pub_domains)]
+                    if pub_cookies:
+                        _save_cookies_json(pub_cookies, cache_dir / "publisher_cookies.json")
+
+                    log.info(f"   [{publisher}] saved cookies (carsi + publisher) to disk")
+                except Exception as e:
+                    log.info(f"   [{publisher}] cookie save error: {e}")
+                return True
+
+        log.info(f"   [{publisher}] visible login timed out")
+        return False
+
+
+# ============================================================
+# Publisher direct PDF URL patterns
+# ============================================================
+
+def _visible_browser_download(
+    doi: str,
+    article_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    publisher: str,
+) -> dict[str, Any] | None:
+    """Open a visible Camoufox browser for full SSO login + direct PDF download.
+
+    Works for any publisher. Uses _PUBLISHER_SSO_CONFIG for publisher-specific
+    SSO link patterns, institution search selectors, and PDF fetch paths.
+    """
+    try:
+        from camoufox.sync_api import Camoufox
+        from camoufox.addons import DefaultAddons
+    except ImportError:
+        log.info(f"   [{publisher}] camoufox not installed for visible download")
+        return None
+
+    from .pdf_utils import is_pdf_file, success
+    import base64
+
+    idp_name = config.get("carsi_idp_name", "")
+    idp_en = _IDP_MAP.get(idp_name, idp_name)
+
+    # Publisher-specific SSO config
+    sso_cfg = _PUBLISHER_SSO_CONFIG.get(publisher, _PUBLISHER_SSO_CONFIG["_default"])
+    sso_link_js = sso_cfg["sso_link_js"]
+    search_selectors = sso_cfg["search_selectors"]
+    pdf_paths = sso_cfg["pdf_paths"](doi)
+
+    with Camoufox(headless=False, exclude_addons=[DefaultAddons.UBO]) as browser:
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = context.new_page()
+
+        # Navigate to article page
+        log.info(f"   [{publisher}] visible browser: opening {article_url[:60]}")
+        try:
+            page.goto(article_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(5)
+        except Exception as exc:
+            log.info(f"   [{publisher}] page load warning: {exc}")
+
+        title = page.title()
+        url = page.url
+        log.info(f"   [{publisher}] page: '{title[:40]}' {url[:60]}")
+
+        # Check if already on auth page (previous cookies caused redirect)
+        already_on_auth = any(x in title for x in _AUTH_TITLES) or \
+                          any(x in url.lower() for x in _AUTH_KEYWORDS)
+
+        # Try fetching PDF first — if it works, no login needed
+        pdf_fetched = False
+        if not already_on_auth:
+            log.info(f"   [{publisher}] trying direct PDF fetch...")
+            fetch_result = _try_browser_fetch_pdf(page, pdf_paths)
+            if fetch_result:
+                pdf_bytes = fetch_result
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(pdf_bytes)
+                log.info(f"   [{publisher}] downloaded {len(pdf_bytes)} bytes via direct fetch")
+                if is_pdf_file(output_path):
+                    return success(doi, output_path, f"{publisher}(Visible)")
+                pdf_fetched = True
+            else:
+                log.info(f"   [{publisher}] direct PDF fetch failed, need SSO login")
+
+        # SSO login needed
+        if not already_on_auth and not pdf_fetched:
+            log.info(f"   [{publisher}] starting SSO login...")
+            page.evaluate(sso_link_js)
+            time.sleep(8)
+            title = page.title()
+            url = page.url
+            log.info(f"   [{publisher}] after SSO click: '{title[:30]}' {url[:60]}")
+
+            # Search for institution using publisher-specific selectors
+            for sel in search_selectors:
+                si = page.query_selector(sel)
+                if si:
+                    si.fill(idp_en)
+                    time.sleep(3)
+                    clicked = page.evaluate(f"""
+                        (name) => {{
+                            const items = document.querySelectorAll('[class*="result"], [class*="suggestion"], [class*="federation"], li, a, button');
+                            for (const el of items) {{
+                                if (el.textContent.includes(name) && el.offsetParent !== null) {{
+                                    el.click();
+                                    return true;
+                                }}
+                            }}
+                            return false;
+                        }}
+                    """, idp_en)
+                    if clicked:
+                        log.info(f"   [{publisher}] selected institution '{idp_en}'")
+                        time.sleep(5)
+                        break
+
+        # Wait for user to complete CAS login
+        print(f"\n  请在浏览器中完成机构登录 ({idp_name})")
+        print("  登录成功后会自动下载 PDF\n")
+
+        login_ok = False
+        for i in range(100):
+            time.sleep(3)
+            try:
+                title = page.title()
+                url = page.url
+            except Exception:
+                break
+            is_auth = any(x in title for x in _AUTH_TITLES)
+            is_auth_url = any(x in url.lower() for x in _AUTH_KEYWORDS)
+            if not is_auth and not is_auth_url:
+                login_ok = True
+                break
+
+        if not login_ok:
+            log.info(f"   [{publisher}] visible login timed out")
+            return None
+
+        log.info(f"   [{publisher}] login successful, downloading PDF...")
+        time.sleep(3)
+
+        # Save cookies for future use
+        try:
+            cookies = context.cookies()
+            from .config import DATA_DIR
+            cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+            carsi_dir = cache_dir / "carsi_cookies"
+            carsi_dir.mkdir(parents=True, exist_ok=True)
+            cookie_data = [
+                {"name": c.get("name", ""), "value": c.get("value", ""),
+                 "domain": c.get("domain", ""), "path": c.get("path", "/"),
+                 "secure": c.get("secure", False), "expires": c.get("expires", 0),
+                 "httpOnly": c.get("httpOnly", False)}
+                for c in cookies
+            ]
+            (carsi_dir / f"{publisher.lower()}.json").write_text(
+                json.dumps(cookie_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            log.info(f"   [{publisher}] saved {len(cookies)} cookies")
+        except Exception as e:
+            log.info(f"   [{publisher}] cookie save note: {e}")
+
+        # Try downloading PDF via in-browser fetch (post-login)
+        fetch_result = _try_browser_fetch_pdf(page, pdf_paths)
+        if fetch_result:
+            pdf_bytes = fetch_result
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(pdf_bytes)
+            log.info(f"   [{publisher}] downloaded {len(pdf_bytes)} bytes via post-login fetch")
+            if is_pdf_file(output_path):
+                return success(doi, output_path, f"{publisher}(Visible)")
+
+        # Fallback: look for PDF link on the page and fetch it
+        log.info(f"   [{publisher}] fetch failed, trying page PDF links...")
+        pdf_link = page.evaluate("""
+            (() => {
+                for (const a of document.querySelectorAll('a')) {
+                    const href = (a.href || '').toLowerCase();
+                    if (href.includes('pdfdirect') || href.includes('/pdf/') || href.includes('.pdf')) {
+                        if (!href.includes('supplement') && !href.includes('supporting')) return a.href;
+                    }
+                }
+                for (const el of document.querySelectorAll('iframe, embed, object')) {
+                    const src = el.src || el.data || '';
+                    if (src.includes('.pdf') || src.includes('pdfdirect')) return src;
+                }
+                return null;
+            })()
+        """)
+
+        if pdf_link and isinstance(pdf_link, str):
+            log.info(f"   [{publisher}] found PDF link: {pdf_link[:60]}")
+            try:
+                page.goto(pdf_link, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(3)
+            except Exception:
+                pass
+
+            # Try fetch from current page context
+            current_url = page.url
+            from urllib.parse import urlparse
+            parsed = urlparse(current_url)
+            # Try absolute fetch
+            abs_paths = [parsed.path]
+            fetch_result2 = _try_browser_fetch_pdf(page, abs_paths)
+            if fetch_result2:
+                pdf_bytes = fetch_result2
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(pdf_bytes)
+                log.info(f"   [{publisher}] downloaded {len(pdf_bytes)} bytes via PDF link")
+                if is_pdf_file(output_path):
+                    return success(doi, output_path, f"{publisher}(Visible)")
+
+        log.info(f"   [{publisher}] visible browser download failed")
+        return None
+
+
+def _try_browser_fetch_pdf(page: Any, paths: list[str]) -> bytes | None:
+    """Try fetching PDF via browser JS fetch for given paths. Returns PDF bytes or None."""
+    import base64
+    paths_js = json.dumps(paths)
+    pdf_b64 = page.evaluate(f"""
+        (async () => {{
+            const paths = {paths_js};
+            for (const p of paths) {{
+                try {{
+                    const resp = await fetch(p, {{credentials: 'include', headers: {{'Accept': 'application/pdf,*/*'}}}});
+                    if (!resp.ok) return 'status:' + resp.status;
+                    const ct = resp.headers.get('content-type') || '';
+                    if (!ct.includes('pdf') && !ct.includes('octet')) return 'ct:' + ct;
+                    const blob = await resp.blob();
+                    return await new Promise((resolve) => {{
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result);
+                        reader.readAsDataURL(blob);
+                    }});
+                }} catch(e) {{ return 'error:' + e.message; }}
+            }}
+            return null;
+        }})()
+    """)
+
+    if isinstance(pdf_b64, str) and pdf_b64.startswith("data:"):
+        _, data = pdf_b64.split(",", 1)
+        pdf_bytes = base64.b64decode(data)
+        if pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
+            return pdf_bytes
+    return None
+
+
+def _direct_pdf_urls(doi: str, publisher: str) -> list[str]:
+    """Build direct PDF URL candidates for a publisher."""
+    urls: list[str] = []
+
+    if publisher == "Elsevier":
+        # ScienceDirect doesn't have a simple direct PDF URL pattern
+        # Need to go through the article page
+        pass
+
+    elif publisher == "Wiley":
+        # PDFDirect is the fastest path
+        urls.append(f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}")
+        urls.append(f"https://onlinelibrary.wiley.com/doi/pdf/{doi}")
+
+    elif publisher == "IEEE":
+        # IEEE stamp URL — classic redirect-based PDF
+        # Need to resolve DOI first to get the article number
+        doi_suffix = doi.split("/", 1)[1] if "/" in doi else doi
+        urls.append(f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={doi_suffix}")
+
+    elif publisher == "ACS":
+        urls.append(f"https://pubs.acs.org/doi/pdf/{doi}")
+        urls.append(f"https://pubs.acs.org/doi/pdf/10.1021/{doi.split('10.1021/')[-1]}")
+
+    elif publisher == "RSC":
+        urls.append(f"https://pubs.rsc.org/en/content/articlepdf/{doi}")
+
+    elif publisher == "AIP":
+        # AIP has a loading page, direct URL may not work
+        urls.append(f"https://pubs.aip.org/aip/apl/article-pdf/{doi}")
+
+    elif publisher == "Springer":
+        urls.append(f"https://link.springer.com/content/pdf/{doi}.pdf")
+
+    elif publisher == "APS":
+        # Physical Review journals
+        doi_suffix = doi.split("10.1103/")[-1] if "10.1103/" in doi else doi
+        urls.append(f"https://journals.aps.org/prl/pdf/{doi}")
+        urls.append(f"https://journals.aps.org/prb/pdf/{doi}")
+        urls.append(f"https://journals.aps.org/pdf/{doi}")
+
+    elif publisher == "Tandfonline":
+        urls.append(f"https://www.tandfonline.com/doi/pdf/{doi}")
+
+    elif publisher == "OSA":
+        urls.append(f"https://opg.optica.org/viewmedia.cfm?r=1&uri={doi}")
+
+    elif publisher == "IOP":
+        urls.append(f"https://iopscience.iop.org/article/{doi}/pdf")
+
+    elif publisher == "Oxford":
+        urls.append(f"https://academic.oup.com/downloadpdf/{doi}")
+
+    elif publisher == "ACM":
+        urls.append(f"https://dl.acm.org/doi/pdf/{doi}")
+
+    return urls
+
+
+# ============================================================
+# Publisher-specific article page selectors
+# ============================================================
+
+# CSS selectors to find PDF links on article landing pages
+_PDF_LINK_SELECTORS: dict[str, list[str]] = {
+    "Elsevier": [
+        'a[aria-label*="View PDF" i]',
+        'a[aria-label*="pdf" i]',
+        'a.pdf-download-btn-link',
+        'a[data-aa-name="download-pdf"]',
+        'a[href*="/pdf/"]',
+        'a[href*="pdfft"]',
+        'a[href*=".pdf"]',
+        'a[href*="showPdf"]',
+        'a[href*="pdfExtended"]',
+    ],
+    "Wiley": [
+        'a[href*="pdfdirect"]',
+        'a[href*="/doi/pdf/"]',
+        'a[href*="/doi/epdf/"]',
+        'a.c-pdf-download__link',
+        'a[title*="PDF" i]',
+    ],
+    "IEEE": [
+        'a[href*="/stamp/"]',
+        'a[href*="getPDF"]',
+        'a[title*="PDF" i]',
+        'a.xpl-pdf-btn',
+    ],
+    "ACS": [
+        'a[href*="/doi/pdf/"]',
+        'a[title*="Download PDF" i]',
+        'a.nav-item-link-download',
+    ],
+    "RSC": [
+        'a[href*="/articlepdf/"]',
+        'a[title*="PDF" i]',
+    ],
+    "AIP": [
+        'a[href*="/article-pdf/"]',
+        'a[title*="PDF" i]',
+        'a[href*=".pdf"]',
+    ],
+    "Springer": [
+        'a[href*="/content/pdf/"]',
+        'a[data-track-action="download pdf"]',
+        'a.c-pdf-download__link',
+    ],
+    "Nature": [
+        'a.c-pdf-download__link',
+        'a[data-track-action="download pdf"]',
+        'a[href*=".pdf"]',
+    ],
+    "Science": [
+        'a[href*="/doi/pdf/"]',
+        'a[title*="PDF" i]',
+        'a.article-pdf',
+    ],
+    "APS": [
+        'a[href*="/pdf/"]',
+        'a[title*="PDF" i]',
+    ],
+    "Tandfonline": [
+        'a[href*="/doi/pdf/"]',
+        'a[title*="PDF" i]',
+    ],
+    "IOP": [
+        'a[href*="/article/"][href$="/pdf"]',
+        'a[title*="PDF" i]',
+    ],
+    "Oxford": [
+        'a[href*="/downloadpdf/"]',
+        'a[title*="PDF" i]',
+    ],
+    "ACM": [
+        'a[href*="/doi/pdf/"]',
+        'a[title*="PDF" i]',
+    ],
+}
+
+# ============================================================
+# Anti-bot challenge detection
+# ============================================================
+
+# Auth detection keywords for institutional login flows
+_AUTH_KEYWORDS = ("cas", "idp", "saml", "wayf", "auth", "sso", "passport", "accounts", "oauth")
+_AUTH_TITLES = ("登录", "身份", "二次认证", "Login", "Sign in", "Log in")
+
+
+def _school_auth_patterns(config: dict[str, Any]) -> tuple[str, ...]:
+    """Return school-specific URL auth patterns derived from carsi_idp_name.
+
+    Uses _IDP_MAP to translate the configured Chinese institution name to
+    English, then lowercases it so the caller can match it against IDP URLs
+    (e.g. 'tsinghua' matches 'id.tsinghua.edu.cn').
+    """
+    name = (config.get("carsi_idp_name", "") or "").strip()
+    if not name:
+        return ()
+    en = _IDP_MAP.get(name, name).lower()
+    if not en:
+        return ()
+    # Split multi-word names into individual tokens for broad matching
+    tokens = tuple(t for t in en.replace("-", " ").split() if len(t) > 2)
+    return tokens
+
+# Chinese → English university name mapping for institution search (CARSI/OpenAthens WAYF)
+_IDP_MAP: dict[str, str] = {
+    "清华大学": "Tsinghua", "北京大学": "Peking", "浙江大学": "Zhejiang",
+    "复旦大学": "Fudan", "上海交通大学": "Shanghai Jiao Tong",
+    "南京大学": "Nanjing", "中国科学技术大学": "USTC",
+    "武汉大学": "Wuhan", "中山大学": "Sun Yat-sen",
+    "华中科技大学": "Huazhong", "哈尔滨工业大学": "Harbin Institute",
+    "西安交通大学": "Xi'an Jiaotong", "同济大学": "Tongji",
+    "东南大学": "Southeast", "厦门大学": "Xiamen",
+    "北京师范大学": "Beijing Normal", "南开大学": "Nankai",
+    "四川大学": "Sichuan", "天津大学": "Tianjin",
+    "中国人民大学": "Renmin", "北京航空航天大学": "Beihang",
+    "山东大学": "Shandong", "吉林大学": "Jilin",
+}
+
+# Institution search input selectors, tried in order on WAYF pages
+_INSTITUTION_SEARCH_SELECTORS: list[str] = [
+    "#searchInstitution", "#bdd-email", 'input[name="institution"]',
+    "#institution-search", 'input[placeholder*="institution"]',
+    'input[placeholder*="University"]',
+]
+
+# Shared JS snippets for SSO/institutional login interaction.
+# These are Playwright-style (parametrized) — callers using string interpolation
+# (e.g. evaluate_js) must wrap them in an IIFE and inject params via json.dumps.
+
+# Find and click SSO/institutional login link on article page
+_SSO_LINK_FINDER_JS: str = (
+    "() => {"
+    "  const links = [...document.querySelectorAll('a')];"
+    "  const sso = links.find(a => a.href &&"
+    "    (a.href.includes('ssostart') || a.href.includes('shibboleth')"
+    "     || a.href.includes('saml') || a.href.includes('institutional-login')"
+    "     || a.href.includes('federation')));"
+    "  if (sso) { sso.click(); return sso.href; }"
+    "  return false;"
+    "}"
+)
+
+# Click institution result that matches the given name
+_INSTITUTION_CLICK_JS: str = (
+    "(name) => {"
+    "  const items = document.querySelectorAll("
+    "    '[class*=\"result\"], [class*=\"suggestion\"], [class*=\"federation\"], li, a, button');"
+    "  for (const el of items) {"
+    "    const text = el.textContent || '';"
+    "    if (text.includes(name) && el.offsetParent !== null) {"
+    "      el.click();"
+    "      return text.trim().substring(0, 60);"
+    "    }"
+    "  }"
+    "  return null;"
+    "}"
+)
+
+# Publisher-specific SSO configuration for visible browser download
+# Each entry: sso_link_js (JS to click institutional login), search_selectors, pdf_paths(doi)
+_PUBLISHER_SSO_CONFIG: dict[str, dict[str, Any]] = {
+    "Wiley": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => a.href && a.href.includes('ssostart'));
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/doi/pdfdirect/{doi}", f"/doi/pdf/{doi}"],
+    },
+    "Elsevier": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    const text = (a.innerText || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional') ||
+                           text.includes('access through your institution') ||
+                           text.includes('institutional access');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["#institution-search", "input[name='query']", "#bdd-email"],
+        "pdf_paths": lambda doi: [],  # Elsevier needs to find showPdf link on page
+    },
+    "Springer": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional-login');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["#idp-search", "input[name='idpSearch']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/content/pdf/{doi}.pdf"],
+    },
+    "ACS": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
+    },
+    "IEEE": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    const text = (a.innerText || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional') ||
+                           text.includes('institutional sign in');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='idpSearch']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [],  # IEEE uses stamp URL, needs page-level extraction
+    },
+    "Tandfonline": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    const text = (a.innerText || '').toLowerCase();
+                    return href.includes('ssostart') || href.includes('shibboleth')
+                        || href.includes('institutional')
+                        || text.includes('access through your institution');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": [
+            'input[placeholder*="institution"]',
+            'input[placeholder*="Type the name"]',
+            "#searchInstitution",
+            "input[name='query']",
+        ],
+        "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
+    },
+    "Oxford": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["#searchInstitution", "input[name='query']"],
+        "pdf_paths": lambda doi: [f"/downloadpdf/{doi}"],
+    },
+    "RSC": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/content/articlepdf/{doi}"],
+    },
+    "IOP": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/article/{doi}/pdf"],
+    },
+    "APS": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/pdf/{doi}"],
+    },
+    "AIP": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [],
+    },
+    "Nature": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='idpSearch']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/articles/{doi}.pdf"],
+    },
+    "Science": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
+    },
+    "ACM": {
+        "sso_link_js": """
+            (() => {
+                const a = [...document.querySelectorAll('a')].find(a => {
+                    const href = (a.href || '').toLowerCase();
+                    return href.includes('shibboleth') || href.includes('institutional');
+                });
+                if (a) a.click();
+            })()
+        """,
+        "search_selectors": ["input[name='search']", "#searchInstitution"],
+        "pdf_paths": lambda doi: [f"/doi/pdf/{doi}"],
+    },
+    "_default": {
+        "sso_link_js": """
+            (() => {
+                const links = [...document.querySelectorAll('a')];
+                for (const a of links) {
+                    const href = (a.href || '').toLowerCase();
+                    const text = (a.innerText || '').toLowerCase();
+                    if (href.includes('ssostart') || href.includes('shibboleth') ||
+                        href.includes('saml') || href.includes('institutional-login') ||
+                        href.includes('federation') ||
+                        (text.includes('institutional') && text.includes('login')) ||
+                        text.includes('access through your institution')) {
+                        a.click();
+                        return;
+                    }
+                }
+            })()
+        """,
+        "search_selectors": ["#searchInstitution", "input[name='query']", "input[name='search']", "#institution-search"],
+        "pdf_paths": lambda doi: [f"/doi/pdf/{doi}", f"/doi/pdfdirect/{doi}", f"/content/pdf/{doi}.pdf"],
+    },
+}
+
+_CHALLENGE_SIGNATURES = [
+    "cf-browser-verification",
+    "challenge-platform",
+    "just a moment",
+    "attention required",
+    "security check",
+    "verify you are human",
+    "access to this page has been denied",
+    "please complete the security check",
+    "px-captcha",
+    "hcaptcha",
+    "recaptcha",
+    "radware",
+    "request rejected",
+    "crasolve",
+]
+
+
+def _is_challenge_page(html: str) -> bool:
+    """Detect if the page is an anti-bot challenge."""
+    lower = html[:5000].lower()
+    return any(sig in lower for sig in _CHALLENGE_SIGNATURES)
+
+
+# ============================================================
+# Elsevier-specific detection
+# ============================================================
+
+def _is_elsevier_crasolve(url: str, html: str) -> bool:
+    """Detect Elsevier's crasolve anti-bot shell."""
+    if "crasolve=1" in url.lower():
+        return True
+    lower = html[:3000].lower()
+    return "crasolve" in lower and "sciencedirect" in url.lower()
+
+
+def _is_elsevier_pdf_security(html: str) -> bool:
+    """Detect Elsevier's PDF security verification page."""
+    lower = html[:3000].lower()
+    return (
+        "pdf.sciencedirectassets.com" in lower
+        and ("security verification" in lower or "verify" in lower)
+    )
+
+
+# ============================================================
+# AIP/AVS loading page detection
+# ============================================================
+
+def _is_aip_loading_page(html: str) -> bool:
+    """Detect AIP's loading/waiting page."""
+    lower = html[:3000].lower()
+    return "loading" in lower and ("aip" in lower or "pubs.aip.org" in lower)
+
+
+# ============================================================
+# Core browser strategy
+# ============================================================
+
+def _try_http_download(
+    pdf_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cookies: dict[str, str] | None = None,
+) -> bool:
+    """Try direct HTTP download of a PDF URL. Returns True on success."""
+    import requests
+    from .network import USER_AGENT
+    from .pdf_utils import _response_looks_pdf, is_pdf_file
+    from .sources.publishers import _write_pdf_atomic, _load_publisher_cookies
+
+    try:
+        s = requests.Session()
+        s.trust_env = False
+        s.headers.update({"User-Agent": USER_AGENT})
+        _load_publisher_cookies(s, config)
+        if cookies:
+            for name, value in cookies.items():
+                s.cookies.set(name, value)
+
+        resp = s.get(pdf_url, timeout=20, stream=True,
+                     headers={"Accept": "application/pdf,*/*"},
+                     allow_redirects=True)
+
+        if resp.status_code >= 400:
+            return False
+
+        iterator = resp.iter_content(chunk_size=8192)
+        first = next(iterator, b"")
+        if not _response_looks_pdf(resp, first):
+            return False
+
+        if not _write_pdf_atomic(output_path, first, iterator):
+            return False
+        return is_pdf_file(output_path)
+    except Exception:
+        return False
+
+
+def _extract_pdf_from_page(
+    html: str,
+    article_url: str,
+    publisher: str,
+) -> str | None:
+    """Extract PDF URL from article page HTML using publisher-specific selectors."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    selectors = _PDF_LINK_SELECTORS.get(publisher, [])
+
+    for selector in selectors:
+        try:
+            for el in soup.select(selector):
+                href = el.get("href", "")
+                if not href:
+                    continue
+                # Resolve relative URLs
+                if href.startswith("/"):
+                    from urllib.parse import urljoin
+                    href = urljoin(article_url, href)
+                if href.startswith("http"):
+                    return href
+        except Exception:
+            continue
+
+    # Generic fallback: look for any link containing "pdf" (exclude supplements)
+    for a in soup.find_all("a", href=True):
+        href = a["href"].lower()
+        # Skip supplement/attachment links
+        if any(skip in href for skip in ["/attachment/", "/cms/", "/mmc", "supplement", "supporting"]):
+            continue
+        if "/pdf/" in href or href.endswith(".pdf") or "pdfdirect" in href:
+            if a["href"].startswith("http"):
+                return a["href"]
+            elif a["href"].startswith("/"):
+                from urllib.parse import urljoin
+                return urljoin(article_url, a["href"])
+
+    return None
+
+
+def _is_campus_network(config: dict[str, Any]) -> bool:
+    """Check if user is on campus network (IP-authenticated access)."""
+    return config.get("is_campus_network", False)
+
+
+def _browser_download(
+    doi: str,
+    article_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    publisher: str,
+    *,
+    wait_for_loading: float = 0,
+) -> bool:
+    """Navigate to article page via camofox, find PDF link, download it."""
+    from .camofox import (
+        is_available, create_tab, close_tab, evaluate_js,
+        navigate_tab, download_pdf_via_camofox, _is_pdf_url,
+        fetch_url, get_captured_responses,
+    )
+    from .pdf_utils import is_pdf_file
+
+    _clear_error()
+
+    # Campus network fast-path: skip HTTP, go directly to Camofox
+    # Campus networks use IP authentication, so Camofox can access directly
+    if _is_campus_network(config) and is_available(config):
+        log.info(f"   [{publisher}] campus network detected, using Camofox directly")
+        if download_pdf_via_camofox(article_url, output_path, config):
+            from .pdf_utils import is_pdf_file, success
+            if is_pdf_file(output_path):
+                log.info(f"   [{publisher}] campus network download succeeded")
+                return success(doi, output_path, f"{publisher}(Campus)")
+
+    # Fast-path: if we have publisher cookies and a PDF-like URL, try HTTP first
+    # This avoids 15-30s browser startup overhead
+    if _has_publisher_cookies(config) and _is_pdf_url(article_url):
+        log.info(f"   [{publisher}] trying HTTP with cookies first (fast-path)")
+        if _try_http_download(article_url, output_path, config):
+            from .pdf_utils import is_pdf_file, success
+            if is_pdf_file(output_path):
+                log.info(f"   [{publisher}] HTTP download succeeded with cached cookies")
+                return success(doi, output_path, f"{publisher}(HTTP)")
+
+    if not is_available(config):
+        log.info(f"   [{publisher}] camofox not available, skipping browser strategy")
+        _set_error("camofox_unavailable", "start_camofox")
+        return False
+
+    log.info(f"   [{publisher}] browser download: {article_url[:80]}")
+
+    # Create tab to a lightweight page first, inject cookies, then navigate to target
+    tab_id = create_tab("https://www.google.com/", config, timeout=15.0)
+    if not tab_id:
+        return False
+
+    try:
+        # Inject saved publisher/CARSI cookies into the browser session
+        _inject_cookies_to_tab(tab_id, config, publisher)
+
+        # Now navigate to the actual article page
+        log.info(f"   [{publisher}] navigating to {article_url[:80]}")
+        nav_ok = navigate_tab(tab_id, article_url, config, timeout=60.0)
+        if not nav_ok:
+            log.info(f"   [{publisher}] navigation failed, tab may be destroyed")
+            _set_error("navigate_failed", "cloudflare_timeout")
+            return False
+
+        # Wait for loading pages (AIP/AVS)
+        if wait_for_loading > 0:
+            time.sleep(wait_for_loading)
+
+        # Wait for page to settle
+        time.sleep(3)
+
+        # Detect meta-refresh redirects (e.g., linkinghub.elsevier.com)
+        # Wait longer if we're on a redirect page
+        current_url = evaluate_js(tab_id, "window.location.href", config) or ""
+        if "linkinghub" in current_url or "retrieve/pii" in current_url:
+            log.info(f"   [{publisher}] on Elsevier redirect hub, waiting for meta-refresh...")
+            # Wait for the browser to follow the meta-refresh chain
+            for _ in range(5):
+                time.sleep(3)
+                new_url = evaluate_js(tab_id, "window.location.href", config) or ""
+                if new_url != current_url and "linkinghub" not in new_url and "retrieve/pii" not in new_url:
+                    log.info(f"   [{publisher}] redirected to {new_url[:80]}")
+                    break
+            else:
+                # Manually extract and follow meta-refresh
+                redirect_url = evaluate_js(tab_id, """
+                    (() => {
+                        const meta = document.querySelector('meta[http-equiv="REFRESH"], meta[http-equiv="refresh"]');
+                        if (meta) {
+                            const content = meta.content || '';
+                            const urlMatch = content.match(/url\\s*=\\s*['"]?([^'"]+)/i);
+                            if (urlMatch) {
+                                let target = urlMatch[1];
+                                if (target.startsWith('/')) target = window.location.origin + target;
+                                return target;
+                            }
+                        }
+                        return null;
+                    })()
+                """, config)
+                if redirect_url and isinstance(redirect_url, str) and redirect_url.startswith("http"):
+                    log.info(f"   [{publisher}] manually following redirect to {redirect_url[:80]}")
+                    navigate_tab(tab_id, redirect_url, config, timeout=30.0)
+                    time.sleep(5)
+
+            # Wait for the final page to fully render
+            time.sleep(3)
+
+        # Get page HTML
+        html = evaluate_js(tab_id, "document.documentElement.outerHTML", config) or ""
+
+        # Check for anti-bot challenges
+        if _is_challenge_page(html):
+            log.info(f"   [{publisher}] challenge detected, waiting for auto-resolve...")
+            time.sleep(8)
+            html = evaluate_js(tab_id, "document.documentElement.outerHTML", config) or ""
+            if _is_challenge_page(html):
+                log.info(f"   [{publisher}] challenge did not resolve")
+                _set_error("cloudflare_blocked", "use_proxy_or_camofox")
+                return False
+
+        # Check for paywall AFTER challenge resolution
+        if _detect_paywall(html):
+            log.info(f"   [{publisher}] paywall detected — trying institutional login...")
+            if _try_institutional_login(tab_id, config, publisher):
+                # Login succeeded, re-fetch page content
+                time.sleep(3)
+                html = evaluate_js(tab_id, "document.documentElement.outerHTML", config) or html
+                current_url = evaluate_js(tab_id, "window.location.href", config) or article_url
+                if _detect_paywall(html):
+                    log.info(f"   [{publisher}] still behind paywall after login")
+                    _set_error("paywall", "login_required")
+                    return False
+            else:
+                _set_error("paywall", "login_required")
+                return False
+
+        # Also detect paywall by absence of PDF links (Cell Press pattern)
+        if publisher == "Elsevier" and "cell.com" in str(evaluate_js(tab_id, "window.location.href", config) or ""):
+            has_showpdf = evaluate_js(tab_id, """
+                (() => {
+                    return document.querySelectorAll('a[href*="showPdf"], a[href*="pdfExtended"]').length;
+                })()
+            """, config)
+            # Use JS to check for institutional access links (HTML can be 500K+)
+            has_institutional = evaluate_js(tab_id, """
+                (() => {
+                    const links = document.querySelectorAll('a[href*="institution"], a[href*="subscribe"]');
+                    for (const a of links) {
+                        const text = (a.innerText || '').toLowerCase();
+                        const href = (a.href || '').toLowerCase();
+                        if (text.includes('institutional access') || text.includes('access through your institution')
+                            || text.includes('subscribe') || text.includes('purchase')) return true;
+                    }
+                    return false;
+                })()
+            """, config)
+            if has_institutional and not has_showpdf:
+                log.info(f"   [{publisher}] Cell Press paywall detected (institutional links present, no PDF links)")
+                _set_error("paywall", "login_required")
+                return False
+
+        # Elsevier-specific: detect crasolve
+        if publisher == "Elsevier":
+            current_url = evaluate_js(tab_id, "window.location.href", config) or article_url
+            if _is_elsevier_crasolve(str(current_url), html):
+                log.info(f"   [{publisher}] crasolve shell detected, waiting...")
+                time.sleep(5)
+                html = evaluate_js(tab_id, "document.documentElement.outerHTML", config) or ""
+
+        # AIP-specific: check for loading page
+        if publisher == "AIP" and _is_aip_loading_page(html):
+            log.info(f"   [{publisher}] loading page detected, waiting...")
+            time.sleep(10)
+            html = evaluate_js(tab_id, "document.documentElement.outerHTML", config) or ""
+
+        # Get current URL after potential redirects
+        current_url = evaluate_js(tab_id, "window.location.href", config) or article_url
+
+        # Try to extract PDF link from page
+        pdf_url = _extract_pdf_from_page(html, str(current_url), publisher)
+
+        if pdf_url:
+            log.info(f"   [{publisher}] found PDF link: {pdf_url[:80]}")
+
+            # Strategy 1: Network response capture (navigate and intercept PDF at network layer)
+            captured = fetch_url(tab_id, pdf_url, config, timeout=30.0)
+            if captured and captured.get("data"):
+                pdf_data = captured["data"]
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(pdf_data)
+                log.info(f"   [{publisher}] downloaded {len(pdf_data)} bytes via network capture")
+                close_tab(tab_id, config)
+                from .pdf_utils import is_pdf_file, success
+                if is_pdf_file(output_path):
+                    return success(doi, output_path, f"{publisher}(Network)")
+                return True
+
+            # Strategy 2: Check any already-captured responses
+            captured_resps = get_captured_responses(tab_id, config, consume=True)
+            import base64 as _b64_net
+            for resp in captured_resps:
+                data = resp.get("dataBase64", "")
+                if data:
+                    pdf_bytes = _b64_net.b64decode(data)
+                    if pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        output_path.write_bytes(pdf_bytes)
+                        log.info(f"   [{publisher}] downloaded {len(pdf_bytes)} bytes from captured response")
+                        close_tab(tab_id, config)
+                        from .pdf_utils import is_pdf_file, success
+                        if is_pdf_file(output_path):
+                            return success(doi, output_path, f"{publisher}(Network)")
+                        return True
+
+            # Strategy 3: Try in-browser fetch for the PDF URL
+            # This bypasses Cloudflare because the request comes from the browser context
+            import base64 as _b64
+            from urllib.parse import urlparse as _urlparse
+
+            parsed = _urlparse(pdf_url)
+            fetch_paths = [parsed.path]
+            # Also try pdfdirect variant
+            if "/doi/pdf/" in parsed.path:
+                fetch_paths.append(parsed.path.replace("/doi/pdf/", "/doi/pdfdirect/"))
+            elif "/doi/epdf/" in parsed.path:
+                fetch_paths.append(parsed.path.replace("/doi/epdf/", "/doi/pdfdirect/"))
+
+            for fetch_path in fetch_paths:
+                log.info(f"   [{publisher}] trying in-browser fetch {fetch_path[:60]}")
+                pdf_b64 = evaluate_js(tab_id, f"""
+                    (async () => {{
+                        try {{
+                            const resp = await fetch('{fetch_path}', {{
+                                credentials: 'include',
+                                headers: {{'Accept': 'application/pdf,*/*'}}
+                            }});
+                            if (!resp.ok) return 'status:' + resp.status;
+                            const ct = resp.headers.get('content-type') || '';
+                            if (!ct.includes('pdf') && !ct.includes('octet')) return 'ct:' + ct;
+                            const blob = await resp.blob();
+                            return new Promise((resolve) => {{
+                                const reader = new FileReader();
+                                reader.onload = () => resolve(reader.result);
+                                reader.readAsDataURL(blob);
+                            }});
+                        }} catch(e) {{
+                            return 'error:' + e.message;
+                        }}
+                    }})()
+                """, config, timeout=45.0)
+
+                if isinstance(pdf_b64, str) and pdf_b64.startswith("data:"):
+                    header, data = pdf_b64.split(",", 1)
+                    pdf_bytes = _b64.b64decode(data)
+                    if pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        output_path.write_bytes(pdf_bytes)
+                        log.info(f"   [{publisher}] downloaded {len(pdf_bytes)} bytes via in-browser fetch")
+                        close_tab(tab_id, config)
+                        from .pdf_utils import is_pdf_file, success
+                        if is_pdf_file(output_path):
+                            return success(doi, output_path, f"{publisher}(Browser)")
+                        return True
+                elif isinstance(pdf_b64, str) and "status:403" in pdf_b64:
+                    log.info(f"   [{publisher}] PDF fetch returned 403 — trying institutional login...")
+                    if _try_institutional_login(tab_id, config, publisher):
+                        # Retry fetch after login
+                        pdf_b64_retry = evaluate_js(tab_id, f"""
+                            (async () => {{
+                                try {{
+                                    const resp = await fetch('{fetch_path}', {{
+                                        credentials: 'include',
+                                        headers: {{'Accept': 'application/pdf,*/*'}}
+                                    }});
+                                    if (!resp.ok) return 'status:' + resp.status;
+                                    const ct = resp.headers.get('content-type') || '';
+                                    if (!ct.includes('pdf') && !ct.includes('octet')) return 'ct:' + ct;
+                                    const blob = await resp.blob();
+                                    return new Promise((resolve) => {{
+                                        const reader = new FileReader();
+                                        reader.onload = () => resolve(reader.result);
+                                        reader.readAsDataURL(blob);
+                                    }});
+                                }} catch(e) {{
+                                    return 'error:' + e.message;
+                                }}
+                            }})()
+                        """, config, timeout=45.0)
+                        if isinstance(pdf_b64_retry, str) and pdf_b64_retry.startswith("data:"):
+                            _, data = pdf_b64_retry.split(",", 1)
+                            pdf_bytes = _b64.b64decode(data)
+                            if pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
+                                output_path.parent.mkdir(parents=True, exist_ok=True)
+                                output_path.write_bytes(pdf_bytes)
+                                log.info(f"   [{publisher}] downloaded {len(pdf_bytes)} bytes after institutional login")
+                                close_tab(tab_id, config)
+                                from .pdf_utils import is_pdf_file, success
+                                if is_pdf_file(output_path):
+                                    return success(doi, output_path, f"{publisher}(Institutional)")
+                                return True
+                    _set_error("paywall", "login_required")
+                elif isinstance(pdf_b64, str) and "status:401" in pdf_b64:
+                    log.info(f"   [{publisher}] PDF fetch returned 401 — trying institutional login...")
+                    if not _try_institutional_login(tab_id, config, publisher):
+                        _set_error("paywall", "login_required")
+                elif isinstance(pdf_b64, str) and pdf_b64.startswith("ct:text/html"):
+                    log.info(f"   [{publisher}] PDF fetch returned HTML — trying institutional login...")
+                    if not _try_institutional_login(tab_id, config, publisher):
+                        _set_error("paywall", "login_required")
+
+            close_tab(tab_id, config)
+
+            # Fall back to HTTP download
+            if _try_http_download(pdf_url, output_path, config):
+                return True
+
+            # Fall back to full camofox download
+            return download_pdf_via_camofox(pdf_url, output_path, config)
+
+        # For Elsevier/Cell Press: try specific PDF link patterns
+        if publisher == "Elsevier":
+            pdf_url = evaluate_js(tab_id, """
+                (() => {
+                    // Cell Press: showPdf link
+                    for (const a of document.querySelectorAll('a[href*="showPdf"]')) {
+                        if (a.href) return a.href;
+                    }
+                    // ScienceDirect: click View PDF button
+                    const btn = document.querySelector('a[aria-label*="View PDF" i], a.pdf-download-btn-link');
+                    if (btn && btn.href) return btn.href;
+                    // Check for pdfft links (PDF viewer)
+                    for (const a of document.querySelectorAll('a[href*="pdfft"]')) {
+                        if (a.href) return a.href;
+                    }
+                    return null;
+                })()
+            """, config)
+
+            if pdf_url and isinstance(pdf_url, str):
+                log.info(f"   [{publisher}] Elseviewer PDF button: {pdf_url[:80]}")
+                close_tab(tab_id, config)
+                if _try_http_download(pdf_url, output_path, config):
+                    return True
+                return download_pdf_via_camofox(pdf_url, output_path, config)
+
+        # For Wiley: specifically look for pdfdirect
+        if publisher == "Wiley":
+            pdf_url = evaluate_js(tab_id, """
+                (() => {
+                    for (const a of document.querySelectorAll('a[href*="pdfdirect"]')) {
+                        if (a.href) return a.href;
+                    }
+                    // Filter out supplement links
+                    for (const a of document.querySelectorAll('a[href*="/doi/pdf/"]')) {
+                        const href = a.href.toLowerCase();
+                        if (!href.includes('supplement') && !href.includes('supporting')) {
+                            return a.href;
+                        }
+                    }
+                    return null;
+                })()
+            """, config)
+
+            if pdf_url and isinstance(pdf_url, str):
+                log.info(f"   [{publisher}] Wiley PDFDirect: {pdf_url[:80]}")
+                close_tab(tab_id, config)
+                if _try_http_download(pdf_url, output_path, config):
+                    return True
+                return download_pdf_via_camofox(pdf_url, output_path, config)
+
+        # For IEEE: look for stamp URL
+        if publisher == "IEEE":
+            pdf_url = evaluate_js(tab_id, """
+                (() => {
+                    for (const a of document.querySelectorAll('a[href*="/stamp/"], a[href*="getPDF"]')) {
+                        if (a.href) return a.href;
+                    }
+                    const btn = document.querySelector('a.xpl-pdf-btn');
+                    if (btn && btn.href) return btn.href;
+                    return null;
+                })()
+            """, config)
+
+            if pdf_url and isinstance(pdf_url, str):
+                log.info(f"   [{publisher}] IEEE stamp: {pdf_url[:80]}")
+                close_tab(tab_id, config)
+                return download_pdf_via_camofox(pdf_url, output_path, config)
+
+        log.info(f"   [{publisher}] no PDF link found on page")
+        if not _last_error_type:
+            _set_error("no_pdf_found", "try_other_source")
+        return False
+    finally:
+        close_tab(tab_id, config)
+
+
+def _browser_download_with_fallback(
+    doi: str,
+    article_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    publisher: str,
+) -> bool:
+    """Try headless browser download, fallback to visible browser if paywall detected."""
+    result = _browser_download(doi, article_url, output_path, config, publisher)
+    if result:
+        return True
+
+    # If paywall or navigate failure, try visible browser with SSO login
+    err_type, err_action = get_last_error()
+    if err_type in ("paywall", "navigate_failed", "cloudflare_blocked") and config.get("carsi_idp_name"):
+        log.info(f"   [{publisher}] headless failed ({err_type}), trying visible browser fallback...")
+        try:
+            vbd_result = _visible_browser_download(doi, article_url, output_path, config, publisher)
+            if vbd_result:
+                return True
+        except Exception as e:
+            log.info(f"   [{publisher}] visible browser fallback error: {e}")
+
+    return False
+
+
+# ============================================================
+# Publisher entry points
+# ============================================================
+
+def try_elsevier_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Elsevier/ScienceDirect/Cell Press browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+    from .camofox import is_available as camofox_available, download_pdf_via_camofox
+
+    # Campus network fast-path: skip HTTP, go directly to Camofox
+    if _is_campus_network(config) and camofox_available(config):
+        cell_url = _build_cell_press_url(doi)
+        if cell_url:
+            log.info(f"   [Elsevier] campus network detected, trying Camofox directly: {cell_url[:80]}")
+            if download_pdf_via_camofox(cell_url, output_path, config):
+                if is_pdf_file(output_path):
+                    log.info(f"   [Elsevier] campus network download succeeded")
+                    return success(doi, output_path, "CellPress(Campus)")
+
+    # Fast-path: if we have publisher cookies, try HTTP download first
+    # This avoids 15-30s browser startup overhead
+    if _has_publisher_cookies(config):
+        # Try Cell Press showPdf with PII first (most reliable for Cell Press)
+        cell_url = _build_cell_press_url(doi)
+        if cell_url and "/abstract/" in cell_url:
+            pii = cell_url.split("/abstract/")[-1]
+            show_pdf_url = f"https://www.cell.com/action/showPdf?pii={pii}"
+            log.info(f"   [Elsevier] trying Cell Press showPdf HTTP with cookies: {show_pdf_url[:80]}")
+            if _try_http_download(show_pdf_url, output_path, config):
+                if is_pdf_file(output_path):
+                    log.info(f"   [Elsevier] Cell Press HTTP download succeeded with cached cookies")
+                    return success(doi, output_path, "CellPress(HTTP)")
+
+    # For Cell Press DOIs, try direct showPdf download first (bypasses linkinghub)
+    cell_url = _build_cell_press_url(doi)
+    if cell_url and "/abstract/" in cell_url:
+        pii = cell_url.split("/abstract/")[-1]
+        show_pdf_url = f"https://www.cell.com/action/showPdf?pii={pii}"
+        log.info(f"   [CellPress] trying showPdf via network capture: {show_pdf_url[:80]}")
+        result = _cell_press_showpdf_download(show_pdf_url, output_path, config)
+        if result and is_pdf_file(output_path):
+            return result
+
+        # If showPdf failed, navigate to the abstract page directly
+        log.info(f"   [CellPress] trying abstract page: {cell_url[:80]}")
+        if _browser_download_with_fallback(doi, cell_url, output_path, config, "Elsevier"):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "CellPress(Browser)")
+
+    # Fallback to general browser download via DOI (for ScienceDirect articles)
+    # Only try if we haven't already detected a paywall
+    if not _last_error_type:
+        article_url = f"https://doi.org/{doi}"
+        if _browser_download_with_fallback(doi, article_url, output_path, config, "Elsevier"):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "Elsevier(Browser)")
+    return None
+
+
+def _cell_press_showpdf_download(
+    show_pdf_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Download a Cell Press showPdf URL via camofox network capture."""
+    from .camofox import create_tab, close_tab, fetch_url
+    from .pdf_utils import success
+
+    tab_id = create_tab("https://example.com", config, timeout=15.0)
+    if not tab_id:
+        return None
+
+    try:
+        result = fetch_url(tab_id, show_pdf_url, config, timeout=30.0)
+        if result and result.get("data"):
+            pdf_bytes = result["data"]
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(pdf_bytes)
+            log.info(f"   [CellPress] downloaded {len(pdf_bytes)} bytes via showPdf")
+            return success(show_pdf_url, output_path, "CellPress(Network)")
+    except Exception as e:
+        log.info(f"   [CellPress] showPdf failed: {e}")
+    finally:
+        close_tab(tab_id, config)
+    return None
+
+
+# Cell Press journal mapping from DOI prefix to cell.com path
+_CELL_JOURNAL_MAP = {
+    "j.oneear": "one-earth",
+    "j.cell": "cell",
+    "j.cels": "cancer-cell",
+    "j.cub": "current-biology",
+    "j.neuron": "neuron",
+    "j.molcel": "molecular-cell",
+    "j.devcel": "developmental-cell",
+    "j.immuni": "immunity",
+    "j.chom": "cell-host-microbe",
+    "j.cmet": "cell-metabolism",
+    "j.stem": "cell-stem-cell",
+    "j.celrep": "cell-reports",
+    "j.isci": "iscience",
+    "j.xcr": "cell-reports-physical-science",
+    "j.heliyon": "heliyon",
+    "j.applanim": "ajhg",
+    "j.ajhg": "ajhg",
+}
+
+
+def _build_cell_press_url(doi: str) -> str | None:
+    """Build direct cell.com abstract URL from DOI if it's a Cell Press journal."""
+    import re
+    doi_suffix = doi.split("/", 1)[-1] if "/" in doi else ""
+    if not doi_suffix.startswith("j."):
+        return None
+
+    parts = doi_suffix.split(".")
+    if len(parts) < 3:
+        return None
+
+    # Try to match journal: j.oneear, j.cell, etc.
+    journal_key = f"{parts[0]}.{parts[1]}"
+    journal_path = _CELL_JOURNAL_MAP.get(journal_key)
+    if not journal_path:
+        return None
+
+    # Try to get PII from Crossref alternative-id
+    pii = _get_elsevier_pii(doi)
+    if pii:
+        return f"https://www.cell.com/{journal_path}/abstract/{pii}"
+
+    # Fallback: use /doi/ path (may not have showPdf links)
+    return f"https://www.cell.com/{journal_path}/doi/{doi}"
+
+
+def _get_elsevier_pii(doi: str) -> str | None:
+    """Get PII (Publisher Item Identifier) from Crossref API."""
+    try:
+        import requests
+        from .network import USER_AGENT
+        resp = requests.get(
+            f"https://api.crossref.org/works/{doi}",
+            timeout=10, verify=False,
+            headers={"User-Agent": USER_AGENT},
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("message", {})
+        alt_ids = data.get("alternative-id", [])
+        for aid in alt_ids:
+            if aid.startswith("S") and len(aid) >= 16:
+                return aid
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_elsevier_pii(doi: str, config: dict[str, Any]) -> str | None:
+    """Resolve Elsevier DOI to direct article URL, bypassing linkinghub.elsevier.com.
+
+    Uses HTTP to get the PII from linkinghub, then uses Crossref to determine the journal.
+    Returns a direct cell.com/sciencedirect.com URL, or None.
+    """
+    import re
+    try:
+        import requests
+        from .network import USER_AGENT
+        s = requests.Session()
+        s.trust_env = False
+        s.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html"})
+        resp = s.get(f"https://doi.org/{doi}", timeout=10, allow_redirects=True)
+        final_url = str(resp.url)
+        html = resp.text
+
+        # Extract PII from URL
+        pii_match = re.search(r'pii/(S\d+)', final_url)
+        if not pii_match:
+            return None
+        pii = pii_match.group(1)
+
+        # Check if meta-refresh points to sciencedirect.com or cell.com
+        if "sciencedirect.com" in html:
+            return f"https://www.sciencedirect.com/science/article/pii/{pii}"
+
+        # Check for cell.com in meta-refresh
+        if "cell.com" in html:
+            cell_match = re.search(r'cell\.com/([^/]+)/', html)
+            if cell_match:
+                journal = cell_match.group(1)
+                return f"https://www.cell.com/{journal}/abstract/{pii}"
+
+        return None
+    except Exception:
+        return None
+
+
+def try_wiley_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Wiley browser strategy with PDFDirect."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+    from .camofox import is_available as camofox_available, download_pdf_via_camofox
+
+    # Campus network fast-path: skip HTTP, go directly to Camofox
+    if _is_campus_network(config) and camofox_available(config):
+        article_url = f"https://doi.org/{doi}"
+        log.info(f"   [Wiley] campus network detected, trying Camofox directly")
+        if download_pdf_via_camofox(article_url, output_path, config):
+            if is_pdf_file(output_path):
+                log.info(f"   [Wiley] campus network download succeeded")
+                return success(doi, output_path, "Wiley(Campus)")
+
+    # Try direct PDF URLs first
+    for url in _direct_pdf_urls(doi, "Wiley"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "Wiley(PDFDirect)")
+
+    # Fall back to browser — use direct Wiley URL to avoid slow DOI redirect
+    article_url = f"https://onlinelibrary.wiley.com/doi/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Wiley"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Wiley(Browser)")
+    return None
+
+
+def try_ieee_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """IEEE browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "IEEE"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "IEEE(Browser)")
+    return None
+
+
+def try_acs_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """ACS browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    # Try direct PDF URL first
+    for url in _direct_pdf_urls(doi, "ACS"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "ACS(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "ACS"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "ACS(Browser)")
+    return None
+
+
+def try_rsc_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """RSC browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    for url in _direct_pdf_urls(doi, "RSC"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "RSC(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "RSC"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "RSC(Browser)")
+    return None
+
+
+def try_aip_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """AIP browser strategy with loading page wait."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "AIP", wait_for_loading=10):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "AIP(Browser)")
+    return None
+
+
+def try_springer_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Springer browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    # Try direct PDF URL first
+    for url in _direct_pdf_urls(doi, "Springer"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "Springer(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Springer"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Springer(Browser)")
+    return None
+
+
+def try_aps_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """APS (Physical Review) browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    for url in _direct_pdf_urls(doi, "APS"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "APS(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "APS"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "APS(Browser)")
+    return None
+
+
+def try_tandfonline_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Taylor & Francis browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    for url in _direct_pdf_urls(doi, "Tandfonline"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "T&F(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Tandfonline"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "T&F(Browser)")
+    return None
+
+
+def try_iop_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """IOP browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    for url in _direct_pdf_urls(doi, "IOP"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "IOP(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "IOP"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "IOP(Browser)")
+    return None
+
+
+def try_oxford_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Oxford Academic browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    for url in _direct_pdf_urls(doi, "Oxford"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "Oxford(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Oxford"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Oxford(Browser)")
+    return None
+
+
+def try_acm_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """ACM browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    for url in _direct_pdf_urls(doi, "ACM"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "ACM(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "ACM"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "ACM(Browser)")
+    return None
+
+
+def try_nature_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Nature browser strategy (fallback when direct fails)."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Nature"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Nature(Browser)")
+    return None
+
+
+def try_science_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Science/AAAS browser strategy."""
+    from .pdf_utils import is_pdf_file
+    from .pdf_utils import success
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Science"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Science(Browser)")
+    return None
+
+
+# ============================================================
+# Generic publisher browser fallback
+# ============================================================
+
+def try_generic_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Generic browser fallback for unknown publishers."""
+    from .pdf_utils import is_pdf_file
+    from .sources.publishers import get_publisher
+    from .pdf_utils import success
+
+    publisher = get_publisher(doi) or "Unknown"
+    article_url = f"https://doi.org/{doi}"
+
+    if _browser_download_with_fallback(doi, article_url, output_path, config, publisher):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, f"{publisher}(Browser)")
+    return None

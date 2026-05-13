@@ -106,13 +106,13 @@ def update_probe(domain: str, reachable: bool, latency_ms: float, config: dict[s
     conn.commit()
 
 
-def set_probe_timestamp(config: dict[str, Any]) -> None:
-
+def set_probe_timestamp(config: dict[str, Any], timestamp: float | None = None) -> None:
+    ts = int(timestamp) if timestamp is not None else int(time.time())
     conn = _get_conn(config)
     conn.execute("""
         INSERT INTO probe_meta (key, value) VALUES ('_last_probe', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    """, (str(int(time.time())),))
+    """, (str(ts),))
     conn.commit()
 
 

@@ -66,6 +66,7 @@ def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False
         tor_proxy = ensure_tor(config)
         if tor_proxy:
             return tor_proxy
+        log.warning("Tor requested but unavailable — falling back to direct connection")
 
     explicit = os.environ.get("SCANSCI_PDF_PROXY") or config.get("network_proxy")
     if explicit:
@@ -134,14 +135,14 @@ def _is_cloudflare_block(resp: requests.Response) -> bool:
     return False
 
 
-def fetch_with_flaresolverr(
+def fetch_with_camofox(
     url: str,
     config: dict[str, Any],
     *,
     stream: bool = False,
 ) -> requests.Response | None:
-    """Fetch URL using FlareSolverr to bypass Cloudflare challenges."""
-    from .flaresolverr import solve_url, is_available
+    """Fetch URL using camofox-browser to bypass Cloudflare challenges."""
+    from .camofox import solve_url, is_available
     if not is_available(config):
         return None
     result = solve_url(url, config)
@@ -151,12 +152,10 @@ def fetch_with_flaresolverr(
     status = solution.get("status", 0)
     if status >= 400:
         return None
-    # Build a Response-like object from FlareSolverr solution
     resp = requests.Response()
     resp.status_code = status
     resp._content = solution.get("response", "").encode("utf-8")
     resp.url = solution.get("url", url)
-    # Copy cookies from FlareSolverr into session
     cookies = solution.get("cookies", [])
     if isinstance(cookies, list):
         for c in cookies:

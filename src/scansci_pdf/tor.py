@@ -52,17 +52,17 @@ def ensure_tor(config: dict[str, Any]) -> str | None:
     if check_tor_circuit(config):
         return get_tor_proxy(config)
 
-    # 2. Try starting embedded Tor
-    if not config.get("use_tor_for_scihub"):
-        return None
-
+    # 2. Try starting embedded Tor (auto-install if needed)
     try:
         from .embedded_tor import get_embedded_tor
+        log.info("Tor: starting embedded Tor...")
         tor = get_embedded_tor(config)
         if tor and tor.is_running():
+            log.info(f"Tor: embedded Tor started at {tor.proxy_url}")
             return tor.proxy_url
+        log.warning("Tor: embedded Tor failed to start")
     except Exception as e:
-        log.warning(f"Embedded Tor failed: {e}")
+        log.warning(f"Tor: embedded Tor error: {e}")
 
     return None
 

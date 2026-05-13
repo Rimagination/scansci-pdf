@@ -35,7 +35,7 @@ def _try_libgen_mirror(
     try:
         resp = fetch(url, config, use_tor=use_tor)
 
-        # Fallback to FlareSolverr on Cloudflare/403
+        # Fallback to camofox on Cloudflare/403
         if resp.status_code in (403, 503):
             from ..flaresolverr import solve_url, is_available
             if is_available(config):

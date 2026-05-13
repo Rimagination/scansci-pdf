@@ -25,6 +25,40 @@ mcp_app = FastMCP(
 
 
 @mcp_app.tool()
+def scansci_pdf_smart_download(
+    identifier: str,
+    output_dir: str | None = None,
+    bibtex: bool = False,
+) -> str:
+    """Download a paper with zero configuration required.
+
+    Automatically tries all available sources (OA, Sci-Hub, LibGen, WebVPN) with
+    automatic Tor bypass when direct access fails. Just give a DOI — everything else is handled.
+
+    Args:
+        identifier: DOI (e.g. 10.1038/nature12373), DOI URL, or arXiv ID (e.g. 2301.00001)
+        output_dir: Override default output directory
+        bibtex: Also return BibTeX citation for this paper
+    """
+    result = download(
+        identifier, output_dir,
+        scihub_enabled=True,
+        use_tor=True,
+        use_vpnsci=True,
+        bibtex=bibtex,
+        strategy="fastest",
+    )
+    # Add actionable guidance on failure
+    if not result.get("success"):
+        result["hint"] = (
+            "下载失败。可能原因：1) 网络受限 → 运行 scansci-pdf login 配置机构代理 "
+            "2) Sci-Hub 被封锁 → Tor 会自动尝试，检查 scansci-pdf camofox-status "
+            "3) 论文太新或未收录 → 尝试机构代理下载"
+        )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp_app.tool()
 def scansci_pdf_download(
     identifier: str,
     output_dir: str | None = None,
@@ -46,6 +80,23 @@ def scansci_pdf_download(
         strategy: Download strategy: "fastest" (default), "oa_first", "scihub_only", "legal_only"
     """
     result = download(identifier, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, bibtex=bibtex, strategy=strategy)
+
+    # Add actionable hints for agents when download fails
+    if not result.get("success"):
+        error_type = result.get("error_type", "")
+        action = result.get("action", "")
+        if error_type == "paywall" or action == "login_required":
+            doi = result.get("doi", result.get("identifier", ""))
+            result["agent_hint"] = (
+                f"此论文需要机构登录才能下载。请运行 scansci_pdf_login(identifier=\"{doi}\") "
+                "打开浏览器让用户登录机构账号，登录后关闭浏览器，然后重试下载。"
+            )
+        elif error_type == "cloudflare_blocked":
+            result["agent_hint"] = (
+                "Cloudflare 防护阻止访问。请提示用户启动 camofox-browser（端口 9377），"
+                "或配置代理后重试。"
+            )
+
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -91,6 +142,18 @@ def scansci_pdf_batch_download(
         batch_id=batch_id, resume=resume,
         progress_callback=_progress_report,
     )
+
+    # Add agent hint if any paywall failures detected
+    failed_results = [r for r in result.get("results", []) if not r.get("success")]
+    paywall_failures = [r for r in failed_results if r.get("error_type") == "paywall"]
+    if paywall_failures:
+        dois = [r.get("doi", r.get("identifier", "?")) for r in paywall_failures[:3]]
+        result["agent_hint"] = (
+            f"{len(paywall_failures)} 篇论文需要机构登录才能下载（如 {', '.join(dois)}）。"
+            "请运行 scansci_pdf_login(identifier=\"第一篇DOI\") 打开浏览器让用户登录，"
+            "登录后关闭浏览器，然后重新批量下载。"
+        )
+
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -154,8 +217,8 @@ def scansci_pdf_health_check(detailed: bool = False) -> str:
     tor_ok = check_tor_circuit()
     checks["tor"] = {"status": "ok" if tor_ok else "unavailable"}
 
-    from .flaresolverr import is_available as flaresolverr_ok
-    checks["flaresolverr"] = {"status": "ok" if flaresolverr_ok(config) else "unavailable"}
+    from .camofox import is_available as camofox_ok
+    checks["camofox"] = {"status": "ok" if camofox_ok(config) else "unavailable"}
 
     overall = "ok" if all(c.get("status") == "ok" for c in checks.values()) else "degraded"
 
@@ -214,10 +277,71 @@ def scansci_pdf_source_scores() -> str:
 
 
 @mcp_app.tool()
+def scansci_pdf_auto_setup() -> str:
+    """One-click setup: auto-start Tor, check camofox, probe Sci-Hub domains.
+
+    Run this once before downloading papers. No configuration needed — everything is auto-detected.
+    Returns what was set up and what needs manual attention.
+    """
+    config = load_config()
+    report: dict[str, Any] = {"actions": [], "status": {}}
+
+    # 1. Auto-start Tor
+    try:
+        from .tor import ensure_tor, check_tor_circuit
+        tor_proxy = ensure_tor(config)
+        if tor_proxy:
+            report["actions"].append(f"Tor started at {tor_proxy}")
+            report["status"]["tor"] = "running"
+        else:
+            report["actions"].append("Tor could not be started (will retry on download)")
+            report["status"]["tor"] = "unavailable"
+    except Exception as e:
+        report["actions"].append(f"Tor error: {e}")
+        report["status"]["tor"] = "error"
+
+    # 2. Check camofox
+    try:
+        from .camofox import is_available
+        if is_available(config):
+            report["actions"].append("camofox-browser is running")
+            report["status"]["camofox"] = "running"
+        else:
+            report["actions"].append("camofox-browser not running (optional, for Cloudflare bypass)")
+            report["status"]["camofox"] = "not_running"
+    except Exception:
+        report["status"]["camofox"] = "unknown"
+
+    # 3. Probe Sci-Hub domains
+    try:
+        from .sources.scihub import _probe_scihub_domains
+        from .domain_db import load_stats
+        config_copy = config.copy()
+        config_copy["_force_probe"] = True
+        # Reset probe timestamp to force re-probe
+        from .domain_db import set_probe_timestamp
+        set_probe_timestamp(config_copy, timestamp=0)
+        _probe_scihub_domains(config_copy)
+        stats = load_stats(config_copy)
+        reachable = [d for d, s in stats.items() if s.get("reachable") and not d.startswith("_")]
+        report["actions"].append(f"Sci-Hub: {len(reachable)} domains reachable")
+        report["status"]["scihub_domains"] = reachable[:5]
+    except Exception as e:
+        report["actions"].append(f"Sci-Hub probe error: {e}")
+
+    # 4. Check WebVPN/CARSI
+    report["status"]["webvpn"] = "configured" if config.get("vpnsci_enabled") else "not_configured"
+    report["status"]["carsi"] = "configured" if config.get("carsi_enabled") else "not_configured"
+
+    report["summary"] = "Ready to download. Use scansci_pdf_smart_download with a DOI."
+    return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
 def scansci_pdf_network_diagnose() -> str:
     """Diagnose network connectivity and provide actionable fix suggestions.
 
-    Tests DNS resolution, TCP connectivity, proxy, Tor, and FlareSolverr status.
+    Tests DNS resolution, TCP connectivity, proxy, Tor, and camofox-browser status.
     Returns specific configuration commands to fix detected issues.
     """
     from .sources.scoring import diagnose_network
@@ -276,6 +400,8 @@ def scansci_pdf_import_bib(
         use_tor: Route through Tor
     """
     from .bibparser import parse_bib_file
+    from .log import get_logger
+    _log = get_logger()
     entries = parse_bib_file(bib_file)
     if not entries:
         return json.dumps({"success": False, "error": "No entries with DOI found in .bib file"})
@@ -448,11 +574,116 @@ def scansci_pdf_vpnsci_schools(query: str | None = None) -> str:
 
 
 @mcp_app.tool()
+def scansci_pdf_carsi_login(publisher: str | None = None) -> str:
+    """Login via CARSI federated authentication for publisher institutional access.
+
+    Opens browser to publisher's institutional login page. Cookies are saved
+    and reused for subsequent downloads. Works with ScienceDirect, Springer, Wiley, etc.
+
+    Args:
+        publisher: Publisher key (sciencedirect, springer, wiley, ieee, tandfonline, nature).
+                   Auto-detected from DOI if omitted.
+    """
+    from .sources.carsi import CARSIClient
+
+    config = load_config()
+    if not config.get("carsi_enabled"):
+        return json.dumps({"success": False, "error": "CARSI not enabled. Run: scansci_pdf_config_set key=carsi_enabled value=true"})
+
+    idp_name = config.get("carsi_idp_name", "")
+    if not idp_name:
+        return json.dumps({"success": False, "error": "No IdP set. Run: scansci_pdf_config_set key=carsi_idp_name value=你的学校名称（如 北京大学、浙江大学）"})
+
+    target_publisher = publisher or "sciencedirect"
+    client = CARSIClient(config)
+    if target_publisher not in client._publisher_configs:
+        available = list(client._publisher_configs.keys())
+        return json.dumps({"success": False, "error": f"Unknown publisher: {target_publisher}", "available": available})
+
+    ok = client.login(target_publisher)
+    if ok:
+        return json.dumps({"success": True, "message": f"CARSI login successful for {target_publisher}.", "idp": idp_name})
+    return json.dumps({"success": False, "error": "Login failed or timed out. Make sure Chrome is installed."})
+
+
+@mcp_app.tool()
+def scansci_pdf_carsi_status() -> str:
+    """Check CARSI configuration and login status."""
+    from .sources.carsi import CARSIClient
+
+    config = load_config()
+    enabled = config.get("carsi_enabled", False)
+    idp_name = config.get("carsi_idp_name", "")
+
+    if not enabled:
+        return json.dumps({"carsi_enabled": False, "message": "CARSI not enabled."})
+
+    client = CARSIClient(config)
+    publishers = {}
+    for pub_key in client._publisher_configs:
+        cookie_file = client._cookie_path(pub_key)
+        has_cookies = cookie_file.exists()
+        publishers[pub_key] = {
+            "has_cookies": has_cookies,
+            "cookie_file": str(cookie_file),
+        }
+
+    return json.dumps({
+        "carsi_enabled": True,
+        "carsi_idp_name": idp_name,
+        "publishers": publishers,
+    }, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_ezproxy_login() -> str:
+    """Open browser for EZProxy institutional proxy login.
+
+    Uses the university library's EZProxy service to access papers.
+    Login happens in your browser - only session cookies are saved.
+    """
+    from .sources.ezproxy import ezproxy_login, _validate_ezproxy_session
+
+    config = load_config()
+    if not config.get("ezproxy_enabled"):
+        return json.dumps({"success": False, "error": "EZProxy not enabled. Run: scansci_pdf_config_set key=ezproxy_enabled value=true"})
+
+    if _validate_ezproxy_session(config):
+        return json.dumps({"success": True, "message": "Already logged in. Session is valid."})
+
+    ok = ezproxy_login(config)
+    if ok:
+        return json.dumps({"success": True, "message": "Login successful. Cookies saved."})
+    return json.dumps({"success": False, "error": "Login failed or timed out. Make sure Chrome is installed."})
+
+
+@mcp_app.tool()
+def scansci_pdf_ezproxy_status() -> str:
+    """Check EZProxy configuration and login status."""
+    from .sources.ezproxy import _get_ezproxy_base, _validate_ezproxy_session, _ezproxy_cookie_path
+
+    config = load_config()
+    enabled = config.get("ezproxy_enabled", False)
+    base_url = _get_ezproxy_base(config)
+    cookie_path = _ezproxy_cookie_path(config)
+    has_cookies = cookie_path.exists()
+    session_valid = _validate_ezproxy_session(config) if enabled and has_cookies else False
+
+    return json.dumps({
+        "ezproxy_enabled": enabled,
+        "ezproxy_login_url": base_url,
+        "cookie_file": str(cookie_path),
+        "has_cookies": has_cookies,
+        "session_valid": session_valid,
+    }, ensure_ascii=False)
+
+
+@mcp_app.tool()
 def scansci_pdf_vpnsci_set_school(school: str) -> str:
     """Set the university for WebVPN access.
 
     Args:
-        school: University name (e.g. "清华大学", "北京大学", "浙江大学")
+        school: University name (e.g. "北京大学", "浙江大学", "复旦大学")
     """
     from .schools import get_school
     try:
@@ -569,6 +800,8 @@ def scansci_pdf_resolve_and_download(
             unique_dois.append(d)
 
     # Download
+    from .log import get_logger
+    _log = get_logger()
     def _resolve_progress(current: int, total: int, identifier: str, result: dict[str, Any]) -> None:
         ok = result.get("success", False)
         src = result.get("source", "?")
@@ -649,3 +882,122 @@ def scansci_pdf_tor_stop() -> str:
     from .tor import stop_embedded_tor
     result = stop_embedded_tor()
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
+def scansci_pdf_import_browser_cookies(
+    url: str = "https://www.sciencedirect.com/",
+    max_wait: int = 300,
+) -> str:
+    """Extract publisher cookies via camofox-browser for institutional access.
+
+    Opens a visible stealth browser window. Log in to your institution (university library),
+    then close the browser. Cookies are saved and automatically used for all future downloads.
+
+    No WebVPN or special configuration needed — works with any institution.
+
+    Args:
+        url: Page to open (default: ScienceDirect). Use publisher-specific URL for best results.
+        max_wait: Max seconds to wait for login (default 300).
+    """
+    config = load_config()
+    from .browser_cookies import extract_via_camofox
+    result = extract_via_camofox(config, url=url, max_wait=max_wait)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
+def scansci_pdf_login(
+    identifier: str,
+    max_wait: int = 300,
+) -> str:
+    """Login to publisher via your institution for paywall access.
+
+    Opens a stealth browser to the article or publisher page. Click
+    'Access through your institution' or 'Log In', select your
+    institution, and complete SSO login. Close the browser when done.
+    Cookies are automatically captured and saved for all future downloads.
+
+    No WebVPN or CARSI configuration needed — works with any institution.
+
+    Args:
+        identifier: DOI (e.g. 10.1126/science.aec6396) or publisher name
+                    (e.g. "elsevier", "wiley", "nature", "springer", "ieee",
+                    "science", "tandfonline", "pnas", "acs", "rsc", "aip",
+                    "aps", "iop", "oxford", "acm")
+        max_wait: Max seconds to wait for login (default 300)
+    """
+    config = load_config()
+    from .browser_cookies import publisher_login
+    result = publisher_login(identifier, config, max_wait=max_wait)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
+def scansci_pdf_camofox_status() -> str:
+    """Check camofox-browser availability and configuration."""
+    config = load_config()
+    from .camofox import is_available
+    url = config.get("camofox_url", "http://localhost:9377")
+    enabled = config.get("camofox_enabled", True)
+    available = is_available(config) if enabled else False
+    return json.dumps({
+        "enabled": enabled,
+        "url": url,
+        "available": available,
+        "status": "ok" if available else ("disabled" if not enabled else "unreachable"),
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
+def scansci_pdf_camofox_login(
+    login_type: str = "webvpn",
+    custom_url: str | None = None,
+) -> str:
+    """Open a stealth browser for institutional login (WebVPN/CARSI/EZProxy/custom).
+
+    Captures cookies after login and auto-imports them into camofox-browser.
+
+    Args:
+        login_type: One of "webvpn", "carsi", "ezproxy", "custom"
+        custom_url: URL to open (required when login_type is "custom")
+    """
+    config = load_config()
+    from .camofox_login import open_login_browser, webvpn_login, ezproxy_login
+    from .config import DATA_DIR
+    from pathlib import Path
+
+    if login_type == "webvpn":
+        success = webvpn_login(config)
+    elif login_type == "ezproxy":
+        success = ezproxy_login(config)
+    elif login_type == "custom":
+        if not custom_url:
+            return json.dumps({"error": "custom_url is required for login_type=custom"})
+        cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
+        cookie_file = cache_dir / "custom_cookies.json"
+        success = open_login_browser(custom_url, config, cookie_file=cookie_file)
+    elif login_type == "carsi":
+        return json.dumps({"error": "Use the CARSI publisher-specific login flow instead"})
+    else:
+        return json.dumps({"error": f"Unknown login_type: {login_type}. Use webvpn/ezproxy/custom"})
+
+    return json.dumps({"login_type": login_type, "success": success}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_camofox_import_cookies(cookie_file: str) -> str:
+    """Import Netscape-format cookies into camofox-browser.
+
+    Args:
+        cookie_file: Path to Netscape-format cookie file
+    """
+    config = load_config()
+    from .camofox import import_cookies, is_available
+    if not is_available(config):
+        return json.dumps({"error": "camofox-browser is not running"})
+    try:
+        count = import_cookies(cookie_file, config)
+        return json.dumps({"imported": count, "file": cookie_file}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)

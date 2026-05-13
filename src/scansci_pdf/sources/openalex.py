@@ -89,18 +89,9 @@ def try_openalex_content_api(doi: str, output_path: Path, config: dict[str, Any]
         if not _response_looks_pdf(resp, first):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        try:
-            with tmp_path.open("wb") as fh:
-                fh.write(first)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        from .publishers import _write_pdf_atomic
+        if not _write_pdf_atomic(output_path, first, iterator):
+            return None
 
         if is_pdf_file(output_path):
             return success(doi, output_path, "OpenAlexContent")

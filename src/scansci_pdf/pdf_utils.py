@@ -74,8 +74,19 @@ def success(identifier: str, file_path: Path, source: str) -> dict[str, Any]:
     }
 
 
-def fail(identifier: str, reason: str = "not found", extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def fail(
+    identifier: str,
+    reason: str = "not found",
+    extra: dict[str, Any] | None = None,
+    *,
+    error_type: str = "",
+    action: str = "",
+) -> dict[str, Any]:
     result = {"success": False, "identifier": identifier, "doi": identifier, "reason": reason}
+    if error_type:
+        result["error_type"] = error_type
+    if action:
+        result["action"] = action
     if extra:
         result.update(extra)
     return result

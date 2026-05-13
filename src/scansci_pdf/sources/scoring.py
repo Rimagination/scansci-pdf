@@ -122,11 +122,13 @@ def get_user_advice(error_type: str, source: str) -> str:
         "forbidden": "访问被拒绝（403）→ 建议：1) 配置代理 config_set network_proxy 2) 启用 WebVPN 3) 换用 strategy=legal_only",
         "rate_limited": "请求过于频繁（429）→ 建议：稍后重试，或配置 openalex_api_key 提升配额",
         "timeout": "连接超时 → 建议：1) 检查网络连通性 2) 配置代理绕过封锁 config_set network_proxy 3) 启用 Tor（tor_start）",
-        "captcha": "触发 Cloudflare 防护 → 建议：1) 安装 FlareSolverr（docker run -d ghcr.io/flaresolverr/flaresolverr）2) 配置代理",
+        "captcha": "触发 Cloudflare 防护 → 建议：1) 启动 camofox-browser（默认端口 9377）2) 配置代理",
         "ssl_error": "SSL 连接错误 → 建议：1) 检查代理是否正确 2) 尝试不同代理协议（socks5/http）3) 更新证书",
         "server_error": "服务器错误（5xx）→ 暂时不可用，稍后重试",
         "dns_blocked": "DNS 解析失败 → 建议：1) 配置代理 config_set network_proxy 2) 更换 DNS（8.8.8.8）3) 启用 Tor",
         "network_blocked": "网络完全不通 → 建议：1) 检查代理配置 config_set network_proxy 2) 使用 WebVPN 机构代理 3) 换用海外网络",
+        "paywall": "论文需要机构订阅 → 运行 scansci_pdf_camofox_login 或 scansci_pdf_vpnsci_login 登录机构账号",
+        "cloudflare_blocked": "Cloudflare 反爬封锁 → 启动 camofox-browser（端口 9377）或配置代理",
     }
     return advice.get(error_type, "未知错误 → 建议：运行 network_diagnose 检查网络状态")
 
@@ -220,16 +222,19 @@ def diagnose_network(config: dict[str, Any] | None = None) -> dict[str, Any]:
     except Exception:
         report["tests"].append({"target": "Tor SOCKS5", "status": "unknown"})
 
-    # Check FlareSolverr
+    # Check camofox-browser
     try:
-        import requests
-        resp = requests.get("http://localhost:8191/", timeout=3)
-        report["tests"].append({"target": "FlareSolverr", "status": "running"})
+        from ..camofox import is_available as camofox_avail
+        if camofox_avail(config):
+            report["tests"].append({"target": "camofox-browser", "status": "running"})
+        else:
+            report["tests"].append({"target": "camofox-browser", "status": "not running"})
+            report["recommendations"].append(
+                "camofox-browser 未运行 → 如遇 Cloudflare 封锁，启动 camofox-browser (默认端口 9377)"
+            )
     except Exception:
-        report["tests"].append({"target": "FlareSolverr", "status": "not running"})
-        report["recommendations"].append(
-            "FlareSolverr 未运行 → 如遇 Cloudflare 封锁，运行: docker run -d -p 8191:8191 ghcr.io/flareSolverr/flareSolverr"
-        )
+        report["tests"].append({"target": "camofox-browser", "status": "not installed"})
+
 
     # Summary
     failed_tests = [t for t in report["tests"] if t.get("dns") == "failed" or t.get("tcp") == "failed"]

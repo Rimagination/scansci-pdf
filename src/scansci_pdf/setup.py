@@ -99,13 +99,13 @@ def check_docker() -> dict[str, Any]:
     return result
 
 
-def check_flaresolverr() -> dict[str, Any]:
-    """Check FlareSolverr connectivity."""
+def check_camofox() -> dict[str, Any]:
+    """Check camofox-browser connectivity."""
     result: dict[str, Any] = {"running": False}
     try:
-        import requests
-        resp = requests.get("http://127.0.0.1:8191/health", timeout=3)
-        result["running"] = resp.status_code == 200
+        from .camofox import is_available
+        from .config import load_config
+        result["running"] = is_available(load_config())
     except Exception:
         pass
     return result
@@ -177,7 +177,7 @@ def setup_check() -> dict[str, Any]:
     sys_info = detect_system()
     tor = check_tor()
     docker = check_docker()
-    flaresolverr = check_flaresolverr()
+    camofox = check_camofox()
 
     commands = get_install_commands(sys_info, tor, docker)
 
@@ -186,19 +186,19 @@ def setup_check() -> dict[str, Any]:
     if not tor["running"] and not docker.get("running"):
         issues.append("Tor 未运行且 Docker 未安装，Sci-Hub/LibGen 通过 Tor 访问受限")
     if not docker.get("installed"):
-        issues.append("Docker 未安装，无法使用 Tor 和 FlareSolverr 容器化部署")
-    if not flaresolverr["running"]:
-        issues.append("FlareSolverr 未运行，Sci-Hub 的 Cloudflare 防护可能无法绕过")
+        issues.append("Docker 未安装，无法使用 Tor 容器化部署")
+    if not camofox["running"]:
+        issues.append("camofox-browser 未运行，Cloudflare 防护可能无法绕过")
 
     readiness = "ready" if not issues else "partial"
-    if not tor["running"] and not docker.get("running") and not flaresolverr["running"]:
+    if not tor["running"] and not docker.get("running") and not camofox["running"]:
         readiness = "limited"
 
     return {
         "system": sys_info,
         "tor": tor,
         "docker": docker,
-        "flaresolverr": flaresolverr,
+        "camofox": camofox,
         "install_commands": commands,
         "issues": issues,
         "readiness": readiness,

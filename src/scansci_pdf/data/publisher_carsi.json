@@ -2,7 +2,7 @@
   "sciencedirect": {
     "name": "ScienceDirect (Elsevier)",
     "domains": ["sciencedirect.com", "elsevier.com"],
-    "login_url": "https://www.sciencedirect.com/institutional-login",
+    "login_url": "https://www.sciencedirect.com/user/institution/login",
     "search_selector": "input#institution-search, input[placeholder*='institution'], input[placeholder*='机构']",
     "result_selector": ".institution-list a, .search-results a, [data-testid='institution-result']",
     "success_url_pattern": "sciencedirect.com",

@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-05-14T02:57:48.970086",
+  "idp_name": "清华大学",
+  "total": 1,
+  "passed": 1,
+  "failed": 0,
+  "results": [
+    {
+      "publisher": "Tandfonline",
+      "passed": true,
+      "error": null,
+      "checks": {
+        "article_loaded": true,
+        "already_on_auth": false,
+        "cloudflare": false,
+        "paywall_detected": true,
+        "sso_clicked": true,
+        "sso_navigated": true,
+        "institution_search_found": true,
+        "cas_required": true,
+        "cas_login_ok": true,
+        "paywall_after_login": false,
+        "pdf_fetched": true
+      }
+    }
+  ]
+}
