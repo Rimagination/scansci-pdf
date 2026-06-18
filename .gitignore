@@ -38,3 +38,5 @@ download_*.py
 login_and_download.py
 test_download*.py
 ISSUE_REPORT*.md
+src/scansci_pdf/_browsers/
+downloads/

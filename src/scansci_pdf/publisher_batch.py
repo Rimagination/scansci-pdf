@@ -150,6 +150,91 @@ def fetch_est_records(
     return records[:limit]
 
 
+class _PagePool:
+    """Thread-safe page pool sharing a single browser context.
+
+    All pages share the same context, which means they share:
+    - Cookies (session tokens, auth cookies)
+    - localStorage (publisher auth tokens)
+    - sessionStorage (temporary session data)
+    - HTTP connection pool (keep-alive authenticated connections)
+    - TLS session tickets (established encrypted sessions)
+
+    This is essential: login state is the ENTIRE browser context, not just cookies.
+    Creating a new context is like switching devices — publishers may reject it.
+    """
+
+    def __init__(self, context: Any, max_size: int = 2):
+        self._context = context
+        self._max_size = max_size
+        self._available: list[Any] = []
+        self._in_use: set[int] = set()
+        self._lock = threading.Lock()
+        self._not_empty = threading.Condition(self._lock)
+
+    def acquire(self) -> Any:
+        """Acquire a page from the pool. Creates new if pool is empty and under limit."""
+        with self._not_empty:
+            # Try to reuse an available page
+            while self._available:
+                page = self._available.pop()
+                try:
+                    _ = page.url  # Test if page is still alive
+                    self._in_use.add(id(page))
+                    return page
+                except Exception:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+            # Create new page if under limit
+            if len(self._in_use) < self._max_size:
+                page = self._context.new_page()
+                self._in_use.add(id(page))
+                return page
+
+            # Wait for a page to be returned
+            while not self._available:
+                self._not_empty.wait(timeout=30)
+                if self._available:
+                    page = self._available.pop()
+                    try:
+                        _ = page.url
+                        self._in_use.add(id(page))
+                        return page
+                    except Exception:
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+            # Should not reach here, but just in case
+            page = self._context.new_page()
+            self._in_use.add(id(page))
+            return page
+
+    def release(self, page: Any) -> None:
+        """Return a page to the pool for reuse."""
+        with self._not_empty:
+            self._in_use.discard(id(page))
+            try:
+                self._available.append(page)
+            except Exception:
+                pass
+            self._not_empty.notify()
+
+    def close_all(self) -> None:
+        """Close all pages."""
+        with self._lock:
+            for page in self._available:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            self._available.clear()
+            self._in_use.clear()
+
+
 class PublisherBatchDownloader:
     """Deterministic publisher workflow with diagnostic packets for surprises."""
 
@@ -323,15 +408,24 @@ class PublisherBatchDownloader:
         attempt_cache_path: Path | None = None,
         phase: str = "primary",
     ) -> list[DownloadResult]:
+        """Run downloads in parallel using a shared browser context + page pool.
+
+        Architecture:
+        - ONE persistent context (preserves cookies, localStorage, sessionStorage,
+          HTTP connections, TLS sessions — the complete login state)
+        - N worker threads, each borrows a page from the pool, downloads, returns it
+        - All pages share the same context = same identity, no re-login needed
+
+        This is the correct model: login state is NOT just cookies. It includes
+        localStorage tokens, sessionStorage, connection pools, and TLS sessions.
+        Exporting cookies to a new context is like "switching devices" — some
+        publishers reject that. Sharing the context keeps the same device identity.
+        """
         run_dir.mkdir(parents=True, exist_ok=True)
-        indexed_records = list(enumerate(records))
-        chunks = [indexed_records[index::worker_count] for index in range(worker_count)]
         profile_root = run_dir / "worker-profiles"
         source_profile = Path(self.config.get("chrome_profile_dir", ""))
-        worker_profiles = [
-            self._prepare_worker_profile(source_profile, profile_root / f"{phase}-{index + 1}")
-            for index in range(worker_count)
-        ]
+        profile_dir = self._prepare_worker_profile(source_profile, profile_root / f"{phase}-shared")
+
         results_by_index: dict[int, DownloadResult] = {}
         results_lock = threading.Lock()
         attempt_lock = threading.Lock()
@@ -344,29 +438,33 @@ class PublisherBatchDownloader:
             with attempt_lock:
                 self._append_attempt(attempt_cache_path, result, phase)
 
-        def run_worker(worker_index: int, items: list[tuple[int, PaperRecord]]) -> None:
-            if not items:
-                return
-            context = self._launch_context(profile_dir=worker_profiles[worker_index])
-            try:
-                for item_index, record in items:
-                    record_result(item_index, self.fetch_one(context, record, run_dir))
-            finally:
+        # Single shared context — login state fully preserved
+        context = self._launch_context(profile_dir=profile_dir)
+        page_pool = _PagePool(context, max_size=worker_count)
+
+        def run_worker(items: list[tuple[int, PaperRecord]]) -> None:
+            for item_index, record in items:
+                page = page_pool.acquire()
                 try:
-                    context.close()
-                except Exception:
-                    pass
+                    record_result(item_index, self.fetch_one(page, record, run_dir))
+                finally:
+                    page_pool.release(page)
+
+        indexed_records = list(enumerate(records))
+        chunks = [indexed_records[i::worker_count] for i in range(worker_count)]
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(run_worker, worker_index, chunk)
-                for worker_index, chunk in enumerate(chunks)
-                if chunk
-            ]
+            futures = [executor.submit(run_worker, chunk) for chunk in chunks if chunk]
             for future in as_completed(futures):
                 future.result()
 
-        results = [results_by_index[index] for index in range(len(records)) if index in results_by_index]
+        page_pool.close_all()
+        try:
+            context.close()
+        except Exception:
+            pass
+
+        results = [results_by_index[i] for i in range(len(records)) if i in results_by_index]
         self._write_results(run_dir / "summary.json", results)
         return results
 
@@ -400,6 +498,113 @@ class PublisherBatchDownloader:
             target.mkdir(parents=True, exist_ok=True)
         return target
 
+    def _login_and_export_cookies(self, run_dir: Path, profile_dir: Path) -> list[dict]:
+        """Login once and export cookies for all workers to share.
+
+        This ensures the user only needs to complete SSO/login once,
+        while each worker still gets its own browser fingerprint.
+
+        Returns list of cookies that can be injected via context.add_cookies().
+        """
+        cookie_cache = run_dir / "shared_cookies.json"
+
+        # Check for cached cookies from previous run
+        if cookie_cache.exists():
+            try:
+                cookies = json.loads(cookie_cache.read_text(encoding="utf-8"))
+                if cookies and isinstance(cookies, list):
+                    self._event(None, "shared_cookies_loaded", f"{len(cookies)} cookies from cache")
+                    return cookies
+            except Exception:
+                pass
+
+        # Launch a dedicated login context
+        self._event(None, "login_phase_start", "Launching browser for authentication...")
+        context = self._launch_context(profile_dir=profile_dir)
+        try:
+            # Navigate to the publisher's institutional login page
+            login_url = self._get_login_url()
+            if not login_url:
+                return []
+
+            page = context.new_page()
+            try:
+                page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+                # Wait for user to complete login
+                login_timeout = self.login_timeout_sec
+                self._event(None, "login_waiting", f"Complete login in browser (timeout={login_timeout}s)")
+                print(f"\n  🔐 Complete login in the browser window")
+                print(f"     Timeout: {login_timeout}s")
+                print(f"     Cookies will be shared with all download workers\n")
+
+                deadline = time.time() + login_timeout
+                while time.time() < deadline:
+                    time.sleep(3)
+                    try:
+                        current_url = page.url
+                    except Exception:
+                        break
+                    # Check if login is complete
+                    if self._looks_like_logged_in(page, current_url):
+                        break
+
+                # Export cookies
+                cookies = context.cookies()
+                if cookies:
+                    cookie_cache.write_text(
+                        json.dumps(cookies, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    self._event(None, "shared_cookies_exported", f"{len(cookies)} cookies saved")
+                    print(f"  ✅ Login successful! Exported {len(cookies)} cookies for {len(cookies)} workers")
+                return cookies
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+    def _get_login_url(self) -> str:
+        """Get the institutional login URL for this publisher."""
+        profile = self.profile
+        login_url = profile.login_url
+        if not login_url:
+            # Construct from publisher name
+            publisher = profile.name.lower()
+            if "elsevier" in publisher or "sciencedirect" in publisher:
+                login_url = "https://www.sciencedirect.com/"
+            elif "springer" in publisher or "nature" in publisher:
+                login_url = "https://link.springer.com/institutional-login"
+            elif "wiley" in publisher:
+                login_url = "https://onlinelibrary.wiley.com/"
+            elif "ieee" in publisher:
+                login_url = "https://ieeexplore.ieee.org/"
+            elif "acs" in publisher:
+                login_url = "https://pubs.acs.org/"
+            else:
+                login_url = f"https://www.{publisher}.com/"
+        return login_url
+
+    def _looks_like_logged_in(self, page: Any, current_url: str) -> bool:
+        """Check if the page looks like a successful login."""
+        url_lower = current_url.lower()
+        # If we're no longer on a login/CAS page, consider it done
+        if not any(kw in url_lower for kw in ("login", "cas", "sso", "signin", "sign-in")):
+            return True
+        # Check for SSO-specific indicators
+        try:
+            title = (page.title() or "").lower()
+            if any(kw in title for kw in ("登录成功", "welcome", "dashboard")):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _launch_context(self, profile_dir: str | Path | None = None):
         from .browser_engine import get_persistent_context
 
@@ -407,8 +612,16 @@ class PublisherBatchDownloader:
         profile_path.mkdir(parents=True, exist_ok=True)
         return get_persistent_context(profile_path, self.config)
 
-    def fetch_one(self, context: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
-        page = context.new_page()
+    def fetch_one(self, context_or_page: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
+        # Support both context (creates new page) and pre-created page (from page pool)
+        if hasattr(context_or_page, "new_page") and hasattr(context_or_page, "cookies"):
+            # It's a context — create a new page
+            page = context_or_page.new_page()
+            _owns_page = True
+        else:
+            # It's already a page (from page pool)
+            page = context_or_page
+            _owns_page = False
         result = DownloadResult(
             doi=record.doi,
             status="failed",
@@ -520,10 +733,11 @@ class PublisherBatchDownloader:
             return result
         finally:
             self._hold_after_run(page, result)
-            try:
-                page.close()
-            except Exception:
-                pass
+            if _owns_page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def _hold_after_login(self, page: Any, result: DownloadResult) -> None:
         if not self.post_login_hold_sec:
@@ -2193,8 +2407,9 @@ class PublisherBatchDownloader:
         return re.sub(r"\s+", " ", text).strip()[:limit]
 
     @staticmethod
-    def _event(result: DownloadResult, state: str, detail: str = "") -> None:
-        result.events.append({"state": state, "detail": detail[:500]})
+    def _event(result: DownloadResult | None, state: str, detail: str = "") -> None:
+        if result is not None:
+            result.events.append({"state": state, "detail": detail[:500]})
 
     def _write_diagnostic(self, page: Any, result: DownloadResult, run_dir: Path) -> None:
         diag_dir = run_dir / "diagnostics" / safe_name(result.doi)
