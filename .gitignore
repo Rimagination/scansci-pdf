@@ -40,3 +40,6 @@ test_download*.py
 ISSUE_REPORT*.md
 src/scansci_pdf/_browsers/
 downloads/
+Default/
+segmentation_platform/
+*.txt

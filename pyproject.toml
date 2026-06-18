@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["lxml>=4.9"]
-instsci = ["pycryptodome>=3.20", "selenium>=4.15"]
+instsci = ["pycryptodome>=3.20"]
 cloakbrowser = ["cloakbrowser>=0.3"]
 dev = ["pytest>=8.0"]
 compile = ["cython>=3.0"]

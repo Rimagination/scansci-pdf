@@ -22,7 +22,7 @@ CORE_DEPS = {
 OPTIONAL_DEPS = {
     "socks": "SOCKS proxy support (requests[socks])",
     "Crypto": "WebVPN AES encryption (pycryptodome)",
-    "selenium": "WebVPN browser login",
+    "cloakbrowser": "Stealth browser for publisher access",
 }
 
 _feature_status: dict[str, bool] = {}
@@ -67,7 +67,7 @@ def is_feature_available(feature: str) -> bool:
 
     feature_deps = {
         "socks_proxy": ["socks"],
-        "instsci": ["Crypto", "selenium"],
+        "instsci": ["Crypto", "cloakbrowser"],
         "html_parse": ["bs4"],
     }
 

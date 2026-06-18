@@ -127,11 +127,8 @@ class CARSIClient:
             return None
 
     def download_via_browser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
-        """Download PDF via browser with CARSI auth. Tries CloakBrowser first, falls back to Selenium."""
-        result = self._download_via_cloakbrowser(doi, article_url, output_path)
-        if result:
-            return result
-        return self._download_via_selenium(doi, article_url, output_path)
+        """Download PDF via CloakBrowser with CARSI auth."""
+        return self._download_via_cloakbrowser(doi, article_url, output_path)
 
     def _download_via_cloakbrowser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
         """Download PDF via CloakBrowser with CARSI auth. Single session: login + download."""
@@ -437,135 +434,6 @@ class CARSIClient:
                 log.info(f"   [CARSI-Browser] Error: {e}")
                 return None
 
-    def _download_via_selenium(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
-        """Download PDF via Selenium browser (fallback when CloakBrowser unavailable)."""
-        publisher = detect_publisher(article_url)
-        if not publisher:
-            return None
-
-        cfg = self._publisher_configs.get(publisher)
-        if not cfg:
-            return None
-
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.common.by import By
-        except ImportError:
-            log.info("   [CARSI-Browser] selenium not installed")
-            return None
-
-        download_dir = str(output_path.parent)
-        options = Options()
-        options.add_argument("--no-first-run")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--remote-allow-origins=*")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        prefs = {
-            "download.default_directory": download_dir,
-            "download.prompt_for_download": False,
-            "plugins.always_open_pdf_externally": True,
-        }
-        options.add_experimental_option("prefs", prefs)
-
-        try:
-            driver = webdriver.Chrome(options=options)
-        except Exception as e:
-            log.info(f"   [CARSI-Browser] Chrome launch failed: {e}")
-            return None
-
-        try:
-            # Step 1: Navigate to institutional login
-            driver.get(cfg.login_url)
-            time.sleep(5)
-
-            # Step 2: Search for institution
-            idp_name = self.config.get("carsi_idp_name", "")
-            if idp_name:
-                search = driver.find_element(By.ID, "bdd-email")
-                search.send_keys(idp_name[:10])  # Use first few chars
-                time.sleep(3)
-                # Click on institution
-                driver.execute_script('''
-                    var buttons = document.querySelectorAll("button");
-                    for (var i = 0; i < buttons.length; i++) {
-                        if (buttons[i].textContent.includes("''' + idp_name[:4] + '''")) {
-                            buttons[i].click();
-                            return true;
-                        }
-                    }
-                    return false;
-                ''')
-                time.sleep(5)
-
-            # Step 3: Wait for CAS login (user interaction)
-            _login_keywords = ("cas", "login", "idp", "saml", "wayf", "auth", "sso", "passport", "accounts")
-            url = driver.current_url
-            if any(x in url.lower() for x in _login_keywords):
-                log.info(f"   [CARSI-Browser] Please log in via CAS in the browser...")
-                max_wait = 180
-                elapsed = 0
-                while elapsed < max_wait:
-                    time.sleep(3)
-                    elapsed += 3
-                    try:
-                        current = driver.current_url
-                    except Exception:
-                        return None
-                    if not any(x in current.lower() for x in _login_keywords):
-                        break
-                else:
-                    log.info("   [CARSI-Browser] Login timed out.")
-                    return None
-
-            # Step 4: Navigate to article
-            time.sleep(2)
-            driver.get(article_url)
-            time.sleep(8)
-
-            # Step 5: Check for PDF access
-            body = driver.execute_script("return document.body.innerText")
-            if "robot" in body.lower() or "captcha" in body.lower():
-                log.info("   [CARSI-Browser] Bot detection triggered.")
-                return None
-
-            # Look for PDF download link
-            links = driver.find_elements(By.CSS_SELECTOR, "a")
-            for link in links:
-                href = link.get_attribute("href") or ""
-                text = link.text.strip().lower()
-                if "pdf" in text and "purchase" not in text:
-                    log.info(f"   [CARSI-Browser] Found PDF link: {href[:80]}")
-                    driver.get(href)
-                    time.sleep(5)
-                    # Check if downloaded
-                    from ..pdf_utils import is_pdf_file
-                    downloaded = self._find_downloaded_pdf(download_dir, doi)
-                    if downloaded:
-                        return {"success": True, "path": str(downloaded), "source": "CARSI-Browser"}
-                    break
-
-            # Try pdfft pattern
-            if publisher == "sciencedirect":
-                pii_match = re.search(r"pii/([A-Z0-9]+)", article_url)
-                if pii_match:
-                    pdfft_url = f"https://www.sciencedirect.com/science/article/pii/{pii_match.group(1)}/pdfft"
-                    driver.get(pdfft_url)
-                    time.sleep(5)
-                    from ..pdf_utils import is_pdf_file
-                    downloaded = self._find_downloaded_pdf(download_dir, doi)
-                    if downloaded:
-                        return {"success": True, "path": str(downloaded), "source": "CARSI-Browser"}
-
-        except Exception as e:
-            log.info(f"   [CARSI-Browser] Error: {e}")
-        finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        return None
-
     def _find_downloaded_pdf(self, download_dir: str, doi: str) -> Path | None:
         """Check download directory for recently downloaded PDF files."""
         dir_path = Path(download_dir)
@@ -631,93 +499,18 @@ class CARSIClient:
             return False
 
     def _browser_login(self, publisher: str) -> bool:
-        """Login via CARSI by opening the publisher's institutional login page. Tries stealth browser first, falls back to Selenium."""
+        """Login via CARSI using CloakBrowser."""
         cfg = self._publisher_configs.get(publisher)
         if not cfg:
             log.error(f"   [CARSI] Unknown publisher: {publisher}")
             return False
 
-        # Try stealth browser (stealth browser) first
         try:
             from ..browser_login import carsi_login
-            if carsi_login(publisher, self.config, login_url=cfg.login_url, domains=cfg.domains):
-                return True
+            return carsi_login(publisher, self.config, login_url=cfg.login_url, domains=cfg.domains)
         except Exception as exc:
-            log.info(f"   [CARSI] stealth browser login failed: {exc}")
-
-        # Fallback to Selenium
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-        except ImportError:
-            log.error("   [CARSI] selenium not installed")
+            log.error(f"   [CARSI] CloakBrowser login failed: {exc}")
             return False
-
-        idp_name = self.config.get("carsi_idp_name", "")
-        log.info(f"   [CARSI] Opening {cfg.name} institutional login...")
-
-        options = Options()
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-default-browser-check")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--remote-allow-origins=*")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-
-        try:
-            driver = webdriver.Chrome(options=options)
-        except Exception as e:
-            log.error(f"   [CARSI] Chrome launch failed: {e}")
-            return False
-
-        try:
-            driver.get(cfg.login_url)
-            log.info(f"   [CARSI] Please log in via {cfg.name} institutional access in the browser...")
-
-            # Wait for user to complete login (up to 180 seconds)
-            max_wait = 180
-            elapsed = 0
-            while elapsed < max_wait:
-                time.sleep(3)
-                elapsed += 3
-                try:
-                    url = driver.current_url
-                except Exception:
-                    log.info("   [CARSI] Browser closed by user.")
-                    return False
-
-                # Check if we're back on the publisher page (login successful)
-                on_publisher = any(d in url for d in cfg.domains)
-                on_login_page = any(x in url.lower() for x in ("login", "institutional", "wayf", "saml", "cas", "idp"))
-
-                if on_publisher and not on_login_page:
-                    # Save cookies
-                    cookies = driver.get_cookies()
-                    cookie_file = self._cookie_path(publisher)
-                    cookie_data = [
-                        {"name": c["name"], "value": c["value"], "domain": c.get("domain", ""), "path": c.get("path", "/")}
-                        for c in cookies
-                    ]
-                    cookie_file.write_text(
-                        json.dumps(cookie_data, indent=2, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
-                    log.info(f"   [CARSI] Login successful! Saved {len(cookie_data)} cookies.")
-                    return True
-
-            log.info("   [CARSI] Login timed out.")
-            return False
-
-        except Exception as e:
-            log.error(f"   [CARSI] Login error: {e}")
-            return False
-        finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
 
     def _extract_chrome_cookies(self, publisher: str) -> None:
         """Try to extract cookies from Chrome's cookie database."""

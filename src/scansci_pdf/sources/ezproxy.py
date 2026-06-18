@@ -87,80 +87,8 @@ def ezproxy_login(config: dict[str, Any]) -> bool:
     except Exception as exc:
         log.info(f"   [EZProxy] stealth browser login failed: {exc}")
 
-    # Fallback to Selenium
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-    except ImportError:
-        log.info("   [EZProxy] selenium not installed")
-        return False
-
-    base = _get_ezproxy_base(config)
-    if not base:
-        log.info("   [EZProxy] No ezproxy_login_url configured")
-        return False
-
-    # Use a test URL to trigger login
-    login_url = base.replace("{url}", "https://www.sciencedirect.com")
-    log.info(f"   [EZProxy] Opening {login_url[:80]}...")
-
-    options = Options()
-    options.add_argument("--no-first-run")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--remote-allow-origins=*")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-
-    try:
-        driver = webdriver.Chrome(options=options)
-    except Exception as e:
-        log.info(f"   [EZProxy] Chrome launch failed: {e}")
-        return False
-
-    try:
-        driver.get(login_url)
-        log.info("   [EZProxy] Please log in via your library credentials...")
-
-        # Wait for login (up to 180 seconds)
-        max_wait = 180
-        elapsed = 0
-        while elapsed < max_wait:
-            time.sleep(3)
-            elapsed += 3
-            try:
-                url = driver.current_url
-            except Exception:
-                log.info("   [EZProxy] Browser closed by user.")
-                return False
-
-            # If redirected away from login page, login is complete
-            if "libproxy" not in url.lower() and "login" not in url.lower():
-                # Save cookies
-                cookies = driver.get_cookies()
-                cookie_file = _ezproxy_cookie_path(config)
-                import json
-                cookie_data = [
-                    {"name": c["name"], "value": c["value"], "domain": c.get("domain", ""), "path": c.get("path", "/")}
-                    for c in cookies
-                ]
-                cookie_file.write_text(
-                    json.dumps(cookie_data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                log.info(f"   [EZProxy] Login successful! Saved {len(cookie_data)} cookies.")
-                return True
-
-        log.info("   [EZProxy] Login timed out.")
-        return False
-
-    except Exception as e:
-        log.info(f"   [EZProxy] Error: {e}")
-        return False
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+    log.error("   [EZProxy] CloakBrowser login failed, no fallback available")
+    return False
 
 
 def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
@@ -191,60 +119,49 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     log.info(f"   [EZProxy] Trying {doi} via library proxy...")
 
     try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
+        from cloakbrowser import launch
+        from ..browser_engine import _build_browser_args
     except ImportError:
-        log.info("   [EZProxy] selenium not installed")
+        log.info("   [EZProxy] cloakbrowser not installed")
         return None
 
     download_dir = str(output_path.parent)
-    options = Options()
-    options.add_argument("--no-first-run")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--remote-allow-origins=*")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    prefs = {
-        "download.default_directory": download_dir,
-        "download.prompt_for_download": False,
-        "plugins.always_open_pdf_externally": True,
-    }
-    options.add_experimental_option("prefs", prefs)
+    args = _build_browser_args(config)
+    captured_pdf: list[bytes] = []
 
-    try:
-        driver = webdriver.Chrome(options=options)
-    except Exception as e:
-        log.info(f"   [EZProxy] Chrome launch failed: {e}")
-        return None
+    def _on_response(response):
+        try:
+            ct = response.headers.get("content-type", "")
+            if "pdf" in ct:
+                try:
+                    body = response.body()
+                    if body and len(body) > 5000:
+                        captured_pdf.append(body)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
+    browser = launch(headless=False, humanize=True, args=args)
     try:
+        context = browser.new_context()
+        page = context.new_page()
+        page.on("response", _on_response)
+
         # Load saved cookies if available
         cookie_file = _ezproxy_cookie_path(config)
         if cookie_file.exists():
             import json
-            from urllib.parse import urlparse
             cookies = json.loads(cookie_file.read_text(encoding="utf-8"))
-            # Navigate to EZProxy base domain to set cookies
-            parsed = urlparse(base)
-            ezproxy_base = f"{parsed.scheme}://{parsed.hostname}"
-            driver.get(ezproxy_base)
-            time.sleep(1)
-            for c in cookies:
-                try:
-                    params = {"name": c["name"], "value": c["value"], "path": c.get("path", "/")}
-                    if c.get("domain"):
-                        params["domain"] = c["domain"]
-                    driver.execute_cdp_cmd("Network.setCookie", params)
-                except Exception:
-                    pass
-            driver.execute_cdp_cmd("Network.enable", {})
+            if cookies:
+                context.add_cookies(cookies)
 
         # Navigate to EZProxy URL
-        driver.get(ezproxy_url)
+        page.goto(ezproxy_url, wait_until="domcontentloaded", timeout=30000)
         time.sleep(8)
 
         # Check if redirected to login
-        url = driver.current_url
+        url = page.url
         if "libproxy" in url.lower() or "login" in url.lower():
             log.info("   [EZProxy] Login required. Please log in...")
             max_wait = 180
@@ -253,7 +170,7 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
                 time.sleep(3)
                 elapsed += 3
                 try:
-                    url = driver.current_url
+                    url = page.url
                 except Exception:
                     return None
                 if "libproxy" not in url.lower() and "login" not in url.lower():
@@ -262,43 +179,43 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
                 log.info("   [EZProxy] Login timed out.")
                 return None
 
-        # Check page content
-        body = driver.execute_script("return document.body.innerText")
-        if "robot" in body.lower() or "captcha" in body.lower():
-            log.info("   [EZProxy] Bot detection triggered.")
-            return None
+        # Check for captured PDF
+        if captured_pdf:
+            pdf_bytes = captured_pdf[-1]
+            if pdf_bytes[:5] == b"%PDF-":
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(pdf_bytes)
+                return success(doi, output_path, "EZProxy")
 
-        # Look for PDF download link
-        links = driver.find_elements(By.CSS_SELECTOR, "a")
-        for link in links:
-            href = link.get_attribute("href") or ""
-            text = link.text.strip().lower()
-            if "pdf" in text and "purchase" not in text:
-                log.info(f"   [EZProxy] Found PDF link: {href[:80]}")
-                driver.get(href)
-                time.sleep(5)
-                # Check for downloaded file
-                downloaded = _find_downloaded_ezproxy(download_dir, doi)
-                if downloaded:
-                    return success(doi, downloaded, "EZProxy")
-
-        # Try pdfft pattern for ScienceDirect
-        import re
-        pii_match = re.search(r"pii/([A-Z0-9]+)", url)
-        if pii_match:
-            pdfft_url = f"https://www.sciencedirect.com/science/article/pii/{pii_match.group(1)}/pdfft"
-            ezproxy_pdfft = _make_ezproxy_url(pdfft_url, config)
-            driver.get(ezproxy_pdfft)
+        # Look for PDF link in page
+        pdf_link = page.evaluate("""() => {
+            const links = document.querySelectorAll('a');
+            for (const link of links) {
+                const text = (link.innerText || '').toLowerCase();
+                const href = link.href || '';
+                if (text.includes('pdf') && !text.includes('purchase') && href) {
+                    return href;
+                }
+            }
+            return '';
+        }""")
+        if pdf_link:
+            log.info(f"   [EZProxy] Found PDF link: {pdf_link[:80]}")
+            captured_pdf.clear()
+            page.goto(pdf_link, wait_until="commit", timeout=30000)
             time.sleep(5)
-            downloaded = _find_downloaded_ezproxy(download_dir, doi)
-            if downloaded:
-                return success(doi, downloaded, "EZProxy")
+            if captured_pdf:
+                pdf_bytes = captured_pdf[-1]
+                if pdf_bytes[:5] == b"%PDF-":
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(pdf_bytes)
+                    return success(doi, output_path, "EZProxy")
 
     except Exception as e:
         log.info(f"   [EZProxy] Error: {e}")
     finally:
         try:
-            driver.quit()
+            browser.close()
         except Exception:
             pass
 
