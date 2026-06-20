@@ -16,9 +16,6 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/scansci-pdf
     permissions:
       contents: read
       id-token: write
