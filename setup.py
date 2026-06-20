@@ -15,8 +15,8 @@ class BuildPyWithEncryption(build_py):
     """Custom build_py that encrypts webvpn.json -> webvpn.dat."""
 
     def run(self):
-        super().run()
         self._encrypt_webvpn_data()
+        super().run()
 
     def _encrypt_webvpn_data(self):
         """Encrypt webvpn.json into webvpn.dat for IP protection."""
