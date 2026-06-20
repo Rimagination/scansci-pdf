@@ -1,20 +1,15 @@
 <p align="center">
-  <img src="assets/brand/scansci-pdf-logo.svg" alt="ScanSci PDF" width="680">
+  <img src="assets/brand/scansci-pdf-logo-ai.png" alt="ScanSci PDF" width="720">
 </p>
 
 <p align="center">
   <a href="https://pypi.org/project/scansci-pdf/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/scansci-pdf"></a>
-  <a href="https://pypi.org/project/scansci-pdf/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/scansci-pdf"></a>
+  <a href="https://pypi.org/project/scansci-pdf/"><img alt="Python versions" src="https://img.shields.io/badge/python-%3E%3D3.11-blue"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
   <a href="https://modelcontextprotocol.io"><img alt="MCP compatible" src="https://img.shields.io/badge/MCP-compatible-green"></a>
 </p>
 
-<p align="center">
-  <sub>联合出品</sub><br>
-  <a href="https://github.com/Rimagination/scansci-portal"><img src="assets/brand/scansci-logo.svg" alt="ScanSci" height="34"></a>
-</p>
-
-ScanSci PDF 是一个用于获取学术论文 PDF 的 Python 项目，提供 Python 包、命令行工具、浏览器 Web UI 和 MCP 服务，并把开放/官方渠道、灰色渠道（Sci-Hub/LibGen/SciBban）和机构渠道（WebVPN/CARSI/EZProxy/浏览器 SSO）组织到同一套并行竞速与回退流程中。
+ScanSci PDF 是一个用于获取学术论文 PDF 的项目，提供 Python 包、命令行工具 和 MCP 服务，并把官方 OA 渠道、灰色渠道（Sci-Hub/LibGen/SciBban）和机构渠道（WebVPN/CARSI/EZProxy/浏览器 SSO）组织到同一套并行竞速与回退流程中。
 
 ---
 
