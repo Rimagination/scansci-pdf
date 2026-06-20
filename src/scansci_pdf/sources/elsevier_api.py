@@ -3,6 +3,7 @@
 import logging
 import os
 import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 import requests
 
@@ -47,9 +48,166 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
     return _fetch_pdf_direct(doi, api_key, inst_token)
 
 
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].split(":", 1)[-1].lower()
+
+
+def _element_text(el: ET.Element) -> str:
+    return " ".join(" ".join(el.itertext()).split())
+
+
+def _header(headers: dict, name: str) -> str:
+    value = headers.get(name)
+    if value is not None:
+        return str(value)
+    needle = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == needle:
+            return str(value)
+    return ""
+
+
+def _response_is_pdf(resp: requests.Response) -> bool:
+    content_type = _header(resp.headers, "content-type").lower()
+    return "pdf" in content_type or resp.content[:5] == b"%PDF-"
+
+
+def _looks_like_pdf_eid(value: str) -> bool:
+    lowered = value.strip().lower()
+    return bool(lowered) and (lowered.endswith(".pdf") or ".pdf" in lowered)
+
+
+def _article_eid_to_main_pdf(value: str) -> str:
+    candidate = value.strip()
+    if candidate.lower().startswith("eid:"):
+        candidate = candidate.split(":", 1)[1].strip()
+    if not candidate.startswith("1-s2.0-"):
+        return ""
+    if candidate.lower().endswith(".pdf"):
+        return candidate
+    return f"{candidate}-main.pdf"
+
+
+def _attachment_container(el: ET.Element, parent_map: dict[ET.Element, ET.Element]) -> ET.Element:
+    node = parent_map.get(el, el)
+    while node is not None:
+        local = _local_name(str(node.tag))
+        if "attachment" in local or "object" in local or local == "web-pdf":
+            return node
+        node = parent_map.get(node)
+    return parent_map.get(el, el)
+
+
+def _attachment_metadata(el: ET.Element) -> str:
+    parts: list[str] = []
+    for node in el.iter():
+        local = _local_name(str(node.tag))
+        text = _element_text(node)
+        if text:
+            parts.append(f"{local}:{text}")
+        for attr_name, attr_value in node.attrib.items():
+            attr_local = _local_name(str(attr_name))
+            if attr_value:
+                parts.append(f"{attr_local}:{attr_value}")
+    return " ".join(parts).lower()
+
+
+def _attachment_score(eid: str, metadata: str) -> int:
+    haystack = f"{eid} {metadata}".lower()
+    score = 0
+    if eid.lower().endswith(".pdf"):
+        score += 20
+    if "pdf" in haystack:
+        score += 10
+    if "main" in haystack or "full-text" in haystack or "fulltext" in haystack:
+        score += 100
+    if "page-count" in haystack or "pages" in haystack:
+        score += 5
+    if "attachment-size" in haystack or "filesize" in haystack or "file-size" in haystack:
+        score += 5
+    if any(
+        marker in haystack
+        for marker in ("supplement", "supplementary", "mmc", "appendix", "graphical")
+    ):
+        score -= 100
+    return score
+
+
+def _extract_pdf_attachment_eids(xml_text: str) -> list[str]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        logger.warning("Failed to parse Elsevier XML attachments: %s", e)
+        return []
+
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    candidates: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+
+    for el in root.iter():
+        local = _local_name(str(el.tag))
+        found: list[str] = []
+
+        if local in {"attachment-eid", "object-eid"}:
+            text = _element_text(el)
+            if _looks_like_pdf_eid(text):
+                found.append(text)
+        elif local in {"eid", "identifier"}:
+            main_pdf = _article_eid_to_main_pdf(_element_text(el))
+            if main_pdf:
+                found.append(main_pdf)
+
+        for attr_name, attr_value in el.attrib.items():
+            attr_local = _local_name(str(attr_name))
+            if attr_local in {"attachment-eid", "object-eid", "eid"}:
+                value = str(attr_value).strip()
+                if _looks_like_pdf_eid(value):
+                    found.append(value)
+                else:
+                    main_pdf = _article_eid_to_main_pdf(value)
+                    if main_pdf:
+                        found.append(main_pdf)
+
+        for eid in found:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            metadata = _attachment_metadata(_attachment_container(el, parent_map))
+            candidates.append((_attachment_score(eid, metadata), len(candidates), eid))
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return [eid for _, _, eid in candidates]
+
+
+def _pdf_page_count(content: bytes) -> int | None:
+    try:
+        import fitz  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    try:
+        with fitz.open(stream=content, filetype="pdf") as doc:
+            return int(doc.page_count)
+    except Exception:
+        return None
+
+
+def _valid_pdf_bytes(content: bytes, label: str, *, reject_single_page: bool) -> bool:
+    if content[:5] != b"%PDF-":
+        logger.info("Elsevier API: %s returned non-PDF", label)
+        return False
+    if len(content) < 10000:
+        logger.warning("Elsevier API: %s too small (%d bytes)", label, len(content))
+        return False
+    if reject_single_page and _pdf_page_count(content) == 1:
+        logger.info("Elsevier API: %s is a 1-page preview", label)
+        return False
+    return True
+
+
 def _fetch_attachment_eids(doi: str, api_key: str, inst_token: str = "") -> list[str]:
     """Fetch FULL XML and extract MAIN PDF attachment EIDs."""
-    url = f"{ELSEVIER_API}/article/doi/{doi}?view=FULL"
+    url = f"{ELSEVIER_API}/article/doi/{doi}"
     headers = {
         "X-ELS-APIKey": api_key,
         "Accept": "application/xml",
@@ -57,46 +215,19 @@ def _fetch_attachment_eids(doi: str, api_key: str, inst_token: str = "") -> list
     if inst_token:
         headers["X-ELS-InstToken"] = inst_token
 
-    resp = _api_request(url, headers)
+    resp = _api_request(url, headers, params={"view": "FULL"})
     if not resp or resp.status_code != 200:
         return []
 
-    # Parse XML to find attachment EIDs
-    eids = []
-    try:
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(resp.text)
-        for el in root.iter():
-            local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-            if local == "web-pdf":
-                eid = ""
-                purpose = ""
-                page_count = 0
-                for child in el:
-                    child_local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-                    if child_local == "attachment-eid" and child.text:
-                        eid = child.text.strip()
-                    elif child_local == "web-pdf-purpose" and child.text:
-                        purpose = child.text.strip()
-                    elif child_local == "web-pdf-page-count" and child.text:
-                        try:
-                            page_count = int(child.text.strip())
-                        except ValueError:
-                            pass
-                if eid and purpose == "MAIN":
-                    eids.append(eid)
-                    logger.info("Elsevier API: found MAIN attachment %s (%d pages)", eid, page_count)
-    except Exception as e:
-        logger.warning("Failed to parse Elsevier XML attachments: %s", e)
-
-    # Sort: prefer main.pdf over mainext.pdf
-    eids.sort(key=lambda e: (0 if e.endswith("-main.pdf") else 1))
+    eids = _extract_pdf_attachment_eids(resp.text)
+    for eid in eids:
+        logger.info("Elsevier API: found PDF attachment %s", eid)
     return eids
 
 
 def _fetch_pdf_by_eid(eid: str, api_key: str, inst_token: str = "") -> bytes | None:
     """Download PDF via Content Object API using attachment EID."""
-    url = f"{ELSEVIER_API}/object/eid/{eid}"
+    url = f"{ELSEVIER_API}/object/eid/{quote(eid, safe='')}"
     headers = {
         "X-ELS-APIKey": api_key,
         "Accept": "application/pdf",
@@ -116,12 +247,11 @@ def _fetch_pdf_by_eid(eid: str, api_key: str, inst_token: str = "") -> bytes | N
         logger.info("Elsevier API: HTTP %d for attachment %s", resp.status_code, eid)
         return None
 
-    if resp.content[:5] != b"%PDF-":
+    if not _response_is_pdf(resp):
         logger.info("Elsevier API: attachment %s returned non-PDF", eid)
         return None
 
-    if len(resp.content) < 10000:
-        logger.warning("Elsevier API: attachment %s too small (%d bytes)", eid, len(resp.content))
+    if not _valid_pdf_bytes(resp.content, f"attachment {eid}", reject_single_page=True):
         return None
 
     logger.info("Elsevier API: downloaded %d bytes via attachment %s", len(resp.content), eid)
@@ -142,30 +272,47 @@ def _fetch_pdf_direct(doi: str, api_key: str, inst_token: str = "") -> bytes | N
     if not resp or resp.status_code != 200:
         return None
 
-    content_type = resp.headers.get("content-type", "")
-    if "pdf" not in content_type and resp.content[:5] != b"%PDF-":
+    content_type = _header(resp.headers, "content-type")
+    if not _response_is_pdf(resp):
         logger.info("Elsevier API: direct endpoint returned non-PDF (%s)", content_type[:50])
         return None
 
-    if len(resp.content) < 10000:
-        logger.warning("Elsevier API: direct PDF too small (%d bytes)", len(resp.content))
+    if not _valid_pdf_bytes(resp.content, "direct PDF", reject_single_page=True):
         return None
 
     logger.info("Elsevier API: downloaded %d bytes directly for %s", len(resp.content), doi)
     return resp.content
 
 
-def _api_request(url: str, headers: dict) -> requests.Response | None:
+def _api_request(
+    url: str,
+    headers: dict,
+    *,
+    params: dict[str, str] | None = None,
+) -> requests.Response | None:
     """Make an Elsevier API request with error handling."""
     try:
         session = requests.Session()
         session.trust_env = False
-        resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+        resp = session.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=30,
+            allow_redirects=True,
+        )
     except requests.exceptions.SSLError:
         try:
             session = requests.Session()
             session.trust_env = False
-            resp = session.get(url, headers=headers, timeout=30, allow_redirects=True, verify=False)
+            resp = session.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=30,
+                allow_redirects=True,
+                verify=False,
+            )
         except requests.RequestException as e:
             logger.warning("Elsevier API request failed: %s", e)
             return None
@@ -194,18 +341,8 @@ def fetch_fulltext(doi: str, api_key: str, inst_token: str = "") -> dict | None:
     if inst_token:
         headers["X-ELS-Insttoken"] = inst_token
 
-    try:
-        session = requests.Session()
-        session.trust_env = False
-        resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
-    except requests.exceptions.SSLError:
-        try:
-            resp = session.get(url, headers=headers, timeout=30, allow_redirects=True, verify=False)
-        except requests.RequestException as e:
-            logger.warning("Elsevier API request failed: %s", e)
-            return None
-    except requests.RequestException as e:
-        logger.warning("Elsevier API request failed: %s", e)
+    resp = _api_request(url, headers, params={"view": "FULL"})
+    if not resp:
         return None
 
     if resp.status_code == 401:

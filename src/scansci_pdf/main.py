@@ -405,7 +405,7 @@ def elsevier_setup(
     api_key: str = typer.Option("", help="Elsevier API key"),
     inst_token: str = typer.Option("", help="Elsevier institutional token"),
 ) -> None:
-    """Configure Elsevier API access for direct full-text retrieval."""
+    """Configure Elsevier API access for ScienceDirect full-text retrieval."""
     from .config import load_config, save_config
 
     config = load_config()
@@ -425,7 +425,15 @@ def elsevier_setup(
         has_token = bool(config.get("elsevier_insttoken"))
         print(f"  Elsevier API key:   {'set' if has_key else '(not set)'}")
         print(f"  Elsevier inst token: {'set' if has_token else '(not set)'}")
-        print(f"\n  Usage: scansci-pdf elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN")
+        print("\n  Get a free API key:")
+        print("    1. Visit https://dev.elsevier.com/")
+        print("    2. Sign in, open My API Key / API Key Settings, create a key")
+        print("    3. If asked, choose ScienceDirect / Article Retrieval permissions")
+        print("\n  Usage:")
+        print("    scansci-pdf elsevier-setup --api-key YOUR_KEY")
+        print("    scansci-pdf elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN")
+        print("\n  Closed full text depends on institutional subscription and request IP.")
+        print("  Campus/VPN users should let api.elsevier.com use the institution route.")
 
 
 @app.command("session-doctor")

@@ -1334,7 +1334,7 @@ def elsevier_setup(
     inst_token: str = typer.Option("", "--inst-token", help="Elsevier institutional token."),
     validate: bool = typer.Option(False, "--validate", help="Validate an existing API key."),
 ):
-    """Set up Elsevier API key for direct PDF download.
+    """Set up Elsevier API key for ScienceDirect full-text retrieval.
 
     Get a free key at: https://dev.elsevier.com/
     """
@@ -1356,11 +1356,13 @@ def elsevier_setup(
         console.print()
         console.print("To get a free API key:")
         console.print("  1. Go to [cyan]https://dev.elsevier.com/[/cyan]")
-        console.print("  2. Register and create an API key")
-        console.print("  3. Run: [cyan]instsci elsevier-setup --api-key YOUR_KEY[/cyan]")
+        console.print("  2. Register/sign in, then open My API Key / API Key Settings")
+        console.print("  3. Create an API key; choose ScienceDirect / Article Retrieval if asked")
+        console.print("  4. Run: [cyan]scansci-pdf elsevier-setup --api-key YOUR_KEY --validate[/cyan]")
         console.print()
-        console.print("With an institutional token, you get full-text PDF access:")
-        console.print("  [cyan]instsci elsevier-setup --api-key KEY --inst-token TOKEN[/cyan]")
+        console.print("Closed full text still depends on institutional subscription/IP entitlement.")
+        console.print("If your library provides an Elsevier institutional token:")
+        console.print("  [cyan]scansci-pdf elsevier-setup --api-key KEY --inst-token TOKEN[/cyan]")
         raise typer.Exit(0)
 
     if validate:
@@ -1386,24 +1388,27 @@ def elsevier_setup(
         except Exception as e:
             console.print(f"[red]Validation failed: {e}[/red]")
 
-        # Check PDF access
+        # Check Article Retrieval XML access. Closed object-PDF entitlement is tested by normal download.
         console.print()
-        console.print("Testing PDF access...")
+        console.print("Testing Article Retrieval XML access...")
         try:
             resp = requests.get(
-                "https://api.elsevier.com/content/article/doi/10.1016/j.watres.2024.121507",
-                headers={"X-ELS-APIKey": key, "Accept": "application/pdf"},
+                "https://api.elsevier.com/content/article/doi/10.1016/j.nicl.2021.102600",
+                headers={"X-ELS-APIKey": key, "Accept": "application/xml"},
+                params={"view": "FULL"},
                 timeout=30,
             )
             ct = resp.headers.get("content-type", "")
-            if resp.status_code == 200 and "pdf" in ct:
-                console.print(f"[green]PDF access: YES ({len(resp.content)} bytes)[/green]")
-            elif resp.status_code == 200:
-                console.print(f"[yellow]PDF access: NO (got {ct[:40]}, need institutional token)[/yellow]")
+            if resp.status_code == 200 and "xml" in ct:
+                console.print(f"[green]Article Retrieval XML: YES ({len(resp.content)} bytes)[/green]")
+                console.print(
+                    "  Closed Elsevier PDFs use: view=FULL XML -> attachment-eid -> "
+                    "Content Object API /object/eid/{eid}."
+                )
             else:
-                console.print(f"[yellow]PDF access: HTTP {resp.status_code}[/yellow]")
+                console.print(f"[yellow]Article Retrieval XML: HTTP {resp.status_code} ({ct[:40]})[/yellow]")
         except Exception as e:
-            console.print(f"[red]PDF test failed: {e}[/red]")
+            console.print(f"[red]Article Retrieval XML test failed: {e}[/red]")
 
     console.print()
     console.print(f"  API Key:        {key[:8]}...{key[-4:]}" if len(key) > 12 else f"  API Key:        {key}")

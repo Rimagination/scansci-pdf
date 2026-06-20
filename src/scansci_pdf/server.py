@@ -401,24 +401,52 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
         result["message"] = "Elsevier API key 已配置。"
 
         if test:
-            # Validate by hitting the serial title API (lightweight, no PDF download)
+            # Validate by hitting the serial title API (lightweight, no PDF download).
+            # Try direct first so campus/VPN routes are not hidden by a generic proxy.
             import requests
             from .network import USER_AGENT
             try:
-                s = requests.Session()
-                s.trust_env = False
                 proxy = config.get("network_proxy", "")
+                route_options: list[tuple[str, dict[str, str]]] = [("direct", {})]
                 if proxy:
-                    s.proxies = {"http": proxy, "https": proxy}
-                resp = s.get(
-                    "https://api.elsevier.com/content/serial/title",
-                    headers={"Accept": "application/json", "X-ELS-APIKey": api_key, "User-Agent": USER_AGENT},
-                    params={"count": 1},
-                    timeout=15,
-                )
+                    route_options.append(("configured_proxy", {"http": proxy, "https": proxy}))
+
+                resp = None
+                route_used = ""
+                last_error = ""
+                for route_name, proxies in route_options:
+                    try:
+                        s = requests.Session()
+                        s.trust_env = False
+                        if proxies:
+                            s.proxies = proxies
+                        candidate = s.get(
+                            "https://api.elsevier.com/content/serial/title",
+                            headers={
+                                "Accept": "application/json",
+                                "X-ELS-APIKey": api_key,
+                                "User-Agent": USER_AGENT,
+                            },
+                            params={"count": 1},
+                            timeout=15,
+                        )
+                        resp = candidate
+                        route_used = route_name
+                        if candidate.status_code == 200:
+                            break
+                    except Exception as route_exc:
+                        last_error = str(route_exc)
+
+                if resp is None:
+                    raise RuntimeError(last_error or "no Elsevier API response")
+
+                result["route"] = route_used
                 if resp.status_code == 200:
                     result["test"] = "passed"
-                    result["message"] += " API Key 验证有效！ScienceDirect 论文可直接 API 下载。"
+                    result["message"] += (
+                        " API Key 验证有效。闭源全文还需要机构订阅/IP entitlement；"
+                        "下载时会优先走 direct route，再回退配置代理。"
+                    )
                 else:
                     result["test"] = "failed"
                     result["message"] += f" API Key 验证失败（HTTP {resp.status_code}），请检查 key 是否正确。"
@@ -440,12 +468,15 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
             "Elsevier API Key 未配置。请按以下步骤操作：\n\n"
             "1. 浏览器已打开 Elsevier Developer Portal（如未打开请访问 https://dev.elsevier.com/）\n"
             "2. 注册或登录你的 Elsevier 账号（个人邮箱即可，免费）\n"
-            "3. 点击 \"My API Key\" → \"Create new key\"\n"
-            "4. 应用名称随意填写，选择 \"ScienceDirect Article Retrieval\" API\n"
-            "5. 复制生成的 API Key（32位字符串）\n"
+            "3. 进入 \"My API Key\" / API Key Settings，创建新的 API Key\n"
+            "4. 如需选择产品/API，选择 ScienceDirect / Article Retrieval 相关权限\n"
+            "5. 复制生成的 API Key\n"
             "6. 运行配置命令：\n"
             "   scansci_pdf_config_set(key=\"elsevier_api_key\", value=\"你的APIKey\")\n\n"
-            "配置后所有 Elsevier/ScienceDirect/Cell Press 论文自动走 API 直接下载（1-2秒）。"
+            "配置后，Elsevier/ScienceDirect/Cell Press 论文会优先走 API："
+            "view=FULL 全文 XML → 解析 PDF attachment-eid → object/eid 下载正式 PDF。\n"
+            "闭源全文仍取决于机构订阅和请求 IP；校园网/规则 VPN 用户应让 api.elsevier.com 走机构出口，"
+            "不要让普通 network_proxy 覆盖机构授权。"
         )
 
     return json.dumps(result, ensure_ascii=False, indent=2)

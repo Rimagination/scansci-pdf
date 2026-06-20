@@ -6,8 +6,9 @@ description: >
   import .bib files, or batch-download papers. This skill orchestrates the scansci-pdf MCP server
   which has 13+ download sources, 100+ university WebVPNs, and parallel download.
   TRIGGER when: user mentions downloading papers, DOI, arXiv ID, Sci-Hub, paper search,
-  literature review, citation export, WebVPN, institutional access, "帮我下载论文", "搜索文献",
-  "批量下载", "论文下载", "文献检索", or provides a list of DOIs/arXiv IDs.
+  literature review, citation export, WebVPN, institutional access, Elsevier API, ScienceDirect,
+  "帮我下载论文", "搜索文献", "批量下载", "论文下载", "文献检索",
+  "配置 Elsevier API", or provides a list of DOIs/arXiv IDs.
   SKIP: user is only discussing papers conceptually without intent to download/search/cite,
   or user asks about non-academic PDFs (invoices, reports, etc.).
 ---
@@ -164,8 +165,8 @@ scansci_pdf_ezproxy_login
 |--------|--------|------|
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen |
 | `openalex_api_key` | `""` | OpenAlex Content API key（免费，每天 100 次） |
-| `elsevier_api_key` | `""` | Elsevier API key（ScienceDirect Article Retrieval API） |
-| `elsevier_insttoken` | `""` | Elsevier 机构令牌（需学校图书馆申请） |
+| `elsevier_api_key` | `""` | Elsevier API key（ScienceDirect Article Retrieval API，首次使用推荐配置） |
+| `elsevier_insttoken` | `""` | Elsevier 机构令牌（可选；仅在图书馆明确提供时配置） |
 | `network_proxy` | `""` | 全局代理（如 `socks5://127.0.0.1:1080`） |
 | `batch_workers` | `10` | 批量下载并发数 |
 | `auto_rename` | `true` | 自动重命名为作者+标题 |
@@ -260,35 +261,44 @@ scansci_pdf_ezproxy_login
 
 ### 流程 6：Elsevier API Key 配置（ScienceDirect 快速通道）
 
-当 Elsevier/ScienceDirect 论文（DOI 以 `10.1016/` 开头）下载失败或需要更快下载时触发：
+首次使用 scansci-pdf、遇到 Elsevier/ScienceDirect/Cell Press 论文（DOI 常以 `10.1016/` 开头）、用户有校园网/VPN/机构网络、或下载失败提示 `elsevier_setup` 时，优先引导配置 Elsevier API Key。不要把它当作最后兜底；它是 ScienceDirect 的最快稳定通道。
 
 ```
 1. scansci_pdf_elsevier_setup
-   → 自动打开浏览器到 Elseveloper Developer Portal
-   → 返回详细注册步骤（中文指引）
+   → 自动打开 Elsevier Developer Portal
+   → 返回注册与配置步骤
 
 2. 用户在浏览器中：
-   → 注册/登录 → 点击 "My API Key" → 创建应用
-   → 选择 "ScienceDirect Article Retrieval" API → 复制 API Key
+   → 注册/登录 Elsevier 账号
+   → 进入 "My API Key" / API Key Settings
+   → 创建 API Key；如果页面要求选择产品/API，选择 ScienceDirect / Article Retrieval 相关权限
+   → 复制 API Key
 
 3. scansci_pdf_config_set(key="elsevier_api_key", value="用户的APIKey")
 
 4. scansci_pdf_elsevier_setup(test=true)
-   → 验证 key 有效性 → 返回成功/失败状态
+   → 验证 key 基本有效性
 
-5. 后续所有 Elsevier 论文自动走 API 直接下载（1-2秒）
+5. 确认网络：
+   → 校园网、学校 VPN、规则 VPN 或机构出口已生效
+   → 如果配置了 network_proxy，确认它不是普通非机构代理；Elsevier API 应优先走 direct route
+
+6. 后续 Elsevier/ScienceDirect/Cell Press 论文自动优先走 API
 ```
 
 **触发时机：**
+- 初次使用且用户会下载 Elsevier/ScienceDirect 论文时
 - 下载返回结果中 `hint` 包含 "elsevier_setup" 时
 - 用户提到 ScienceDirect/Elsevier 论文下载慢或失败时
 - 用户主动要求配置 API key 时
 
 **关键点：**
-- 申请完全免费，无需机构邮箱
-- 配置一次，所有 Elsevier/ScienceDirect/Cell Press 论文受益
-- API 下载比浏览器快 10-30 倍，且不受 Cloudflare 拦截影响
-- 不配置也能用（走浏览器登录回退），但配置后体验大幅提升
+- API key 可在 Elsevier Developer Portal 申请；不要把 key 写进日志、文档或仓库
+- 完整闭源全文取决于机构订阅和请求 IP entitlement；API key 本身不等于所有文章全文授权
+- 稳定路径不是直接请求 PDF，而是：`Article Retrieval API ?view=FULL` → XML 中解析 PDF `attachment-eid` → `Content Object API /content/object/eid/{eid}`
+- 对有校园网/规则 VPN 的用户，Elsevier API 应 direct-first，让 `api.elsevier.com` 走机构出口；普通代理可能导致 `NOT_ENTITLED`
+- 直接 PDF 响应若只有 1 页是预览，必须拒绝并继续 XML/object-eid 路径
+- 详细实现和排查见仓库 `docs/elsevier-api-fulltext-guide.md`
 
 ### 流程 4：故障排查
 
@@ -342,8 +352,8 @@ scansci_pdf_ezproxy_login
 ### 快速安装
 
 ```
-# 0.（推荐）配置 Elsevier API Key，ScienceDirect 论文直接下载
-scansci_pdf_elsevier_setup → 打开浏览器注册 → 复制 key → scansci_pdf_config_set
+# 0.（推荐）配置 Elsevier API Key，ScienceDirect 论文走 FULL XML → object/eid 快速通道
+scansci_pdf_elsevier_setup → 打开浏览器注册 → 复制 key → scansci_pdf_config_set → scansci_pdf_elsevier_setup(test=true)
 
 # 1. 自动下载安装 Tor（首次使用）
 scansci_pdf_tor_install
