@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/scansci-pdf-logo-ai.png" alt="ScanSci PDF" width="720">
+  <img src="assets/brand/scansci-pdf-logo-ai.png" alt="ScanSci PDF" width="560">
 </p>
 
 <p align="center">
