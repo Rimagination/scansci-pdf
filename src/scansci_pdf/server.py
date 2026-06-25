@@ -24,8 +24,10 @@ from .search import search_papers
 from .sources import batch_download, download
 from .tor import check_tor_circuit
 
+_config = load_config()
+
 mcp_app = FastMCP(
-    name="scansci-pdf",
+    name=_config.get("mcp_server_name", "scansci-pdf"),
     instructions="Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. Supports DOI, arXiv ID, keyword search, and resumable batch downloads.",
 )
 

@@ -28,6 +28,7 @@ DEFAULT_SCIHUB_DOMAINS = [
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "email": "scansci-pdf@example.invalid",
+    "mcp_server_name": os.environ.get("MCP_SERVER_NAME", "scansci-pdf"),
     "output_dir": str(DATA_DIR / "papers"),
     "cache_dir": str(DATA_DIR / "cache"),
     "network_proxy": "",

@@ -209,6 +209,14 @@ ScanSci PDF 也可以作为 MCP 服务运行，让支持 MCP 的 Agent 直接调
 scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 ```
 
+默认绑定 `0.0.0.0`，但只接受 hostname 为 `scansci-pdf` 的连接。如需接受其他域名（如 `example.com`），配置 `mcp_server_name`：
+
+```bash
+scansci-pdf config-cmd mcp_server_name example.com
+# 或通过环境变量
+MCP_SERVER_NAME=example.com scansci-pdf run --mode streamable_http
+```
+
 常用 MCP 工具：
 
 | 工具 | 用途 |
@@ -230,6 +238,7 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `output_dir` | `~/.scansci-pdf/papers` | PDF 保存目录 |
 | `auto_rename` | `true` | 自动按作者/标题重命名 |
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
+| `use_tor_for_scihub` | `true` | Sci-Hub/LibGen 走 Tor 代理 |
 | `network_proxy` | 空 | HTTP/SOCKS 代理地址 |
 | `batch_workers` | `10` | 批量下载并发数 |
 | `instsci_enabled` | `false` | 启用 WebVPN |
@@ -240,6 +249,7 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `elsevier_insttoken` | 空 | Elsevier institutional token，可选 |
 | `browser_headless` | `false` | 浏览器是否无头运行 |
 | `browser_humanize` | `true` | 浏览器人性化操作 |
+| `mcp_server_name` | `scansci-pdf` | MCP 服务接受的 hostname，支持 `MCP_SERVER_NAME` 环境变量 |
 
 查看全部配置：
 
