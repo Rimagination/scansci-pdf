@@ -32,6 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_dir": str(DATA_DIR / "papers"),
     "cache_dir": str(DATA_DIR / "cache"),
     "network_proxy": "",
+    "proxy_only_scihub": False,
     "scihub_enabled": True,
     "scihub_domains": DEFAULT_SCIHUB_DOMAINS,
     "instsci_enabled": False,

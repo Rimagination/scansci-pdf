@@ -240,6 +240,7 @@ MCP_SERVER_NAME=example.com scansci-pdf run --mode streamable_http
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
 | `use_tor_for_scihub` | `true` | Sci-Hub/LibGen 走 Tor 代理 |
 | `network_proxy` | 空 | HTTP/SOCKS 代理地址 |
+| `proxy_only_scihub` | `false` | 仅对 Sci-Hub/LibGen 使用代理，其他来源直连 |
 | `batch_workers` | `10` | 批量下载并发数 |
 | `instsci_enabled` | `false` | 启用 WebVPN |
 | `instsci_school` | 空 | WebVPN 学校名称 |
@@ -289,6 +290,12 @@ docker compose up -d
 ### Tor
 
 如果你的网络无法访问某些来源，可以配置代理或使用 Tor。Docker 模式会提供 Tor 服务；本地模式可按诊断提示启用。
+
+如果你希望代理仅用于 Sci-Hub/LibGen（避免影响机构来源的 IP 授权），启用：
+
+```bash
+scansci-pdf config-cmd proxy_only_scihub true
+```
 
 ### CloakBrowser
 
