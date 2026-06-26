@@ -198,7 +198,7 @@ def _search_openalex_by_author(
 
 def search_papers(
     query: str = "",
-    limit: int = 10,
+    limit: int = 50,
     year_from: int | None = None,
     year_to: int | None = None,
     sort: str | None = None,
@@ -243,7 +243,7 @@ def search_papers(
         return []
 
     all_results: list[dict[str, Any]] = []
-    per_source = max(5, limit)
+    per_source = max(10, limit)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
