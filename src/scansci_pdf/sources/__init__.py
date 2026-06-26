@@ -585,6 +585,7 @@ def download(
     _institutional: bool = True,
     strategy: str | None = None,
     _config: dict[str, Any] | None = None,
+    _progress_callback: Any = None,
 ) -> dict[str, Any]:
     config = _config if _config is not None else load_config()
     if use_tor is None:
@@ -669,9 +670,13 @@ def download(
                     return result
 
     log.info(f"ScanSci PDF - {identifier}")
+    if _progress_callback:
+        _progress_callback("progress", phase="starting", message=f"Starting download for {identifier}")
 
     if is_arxiv_identifier(identifier):
         log.info("   [L0] arXiv direct")
+        if _progress_callback:
+            _progress_callback("progress", phase="arxiv", message="Trying arXiv direct download")
         result = try_arxiv(identifier, output_path, config)
         if result:
             _update_doi_index(target_dir, identifier, Path(result.get("file", "")))
@@ -689,18 +694,15 @@ def download(
     # Phase 1: Free sources (OA + grey) — parallel race
     free_sources = _build_free_sources(doi, config)
     if free_sources:
+        if _progress_callback:
+            _progress_callback("progress", phase="free_sources", message=f"Racing {len(free_sources)} free sources...")
         result = _run_tiers_parallel(
             [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
         )
         if result:
-            _update_doi_index(target_dir, doi, Path(result.get("file", "")))
-            if rename:
-                _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
-            cache_set(identifier, result, config)
-            if bibtex:
-                from ..bibtex import fetch_bibtex
-                result["bibtex"] = fetch_bibtex(doi, config)
-            return result
+            if _progress_callback:
+                _progress_callback("progress", phase="completed", source=result.get("source", "unknown"), message="Download successful")
+            return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
 
     # Phase 2: Institutional access — only when Phase 1 failed
     # Skip institutional fallback for grey_only/scihub_only strategy
@@ -708,18 +710,15 @@ def download(
         inst_sources = _build_institutional_sources(doi, config, use_vpnsci=use_vpnsci)
         if inst_sources:
             log.info("   Phase 1 failed, trying institutional access...")
+            if _progress_callback:
+                _progress_callback("progress", phase="institutional", message=f"Trying {len(inst_sources)} institutional sources...")
             result = _run_tiers_parallel(
                 [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30
             )
             if result:
-                _update_doi_index(target_dir, doi, Path(result.get("file", "")))
-                if rename:
-                    _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
-                cache_set(identifier, result, config)
-                if bibtex:
-                    from ..bibtex import fetch_bibtex
-                    result["bibtex"] = fetch_bibtex(doi, config)
-                return result
+                if _progress_callback:
+                    _progress_callback("progress", phase="completed", source=result.get("source", "unknown"), message="Download successful via institutional access")
+                return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
 
     # Late capture: wait briefly for browser downloads that complete after race timeout,
     # then scan for any PDFs that were saved to disk by racing threads.
