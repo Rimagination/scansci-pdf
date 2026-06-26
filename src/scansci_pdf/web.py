@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -24,6 +27,9 @@ templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 templates.env.cache = None
 
 app = FastAPI(title="ScanSci PDF", description="Academic paper downloader web UI")
+
+# Active download tasks for SSE tracking
+_active_downloads: dict[str, dict[str, Any]] = {}
 
 
 # --- Request/Response models ---
@@ -156,6 +162,107 @@ async def api_download(req: DownloadRequest):
     return JSONResponse(error_response, status_code=404)
 
 
+@app.post("/api/download/stream")
+async def api_download_stream(req: DownloadRequest):
+    """Download a paper with real-time SSE status updates.
+
+    Returns a stream of JSON events:
+    - {"type": "start", "identifier": "...", "task_id": "..."}
+    - {"type": "progress", "phase": "...", "source": "...", "message": "..."}
+    - {"type": "success", "file": "...", "source": "...", "task_id": "..."}
+    - {"type": "error", "error": "...", "task_id": "..."}
+    """
+    identifier = req.identifier.strip()
+    if not identifier:
+        return JSONResponse({"success": False, "error": "Empty identifier"}, status_code=400)
+
+    # Normalize DOI URL to bare DOI
+    if _DOI_URL_PATTERN.match(identifier):
+        identifier = _DOI_URL_PATTERN.sub("", identifier)
+
+    # If input looks like a title, resolve to DOI first
+    if not _is_doi_or_arxiv(identifier):
+        from .resolver import resolve_title_to_doi
+        config = load_config()
+        doi = resolve_title_to_doi(identifier, config)
+        if doi:
+            identifier = doi
+        else:
+            return JSONResponse(
+                {"success": False, "error": f"Could not resolve title to DOI: {identifier}"},
+                status_code=404,
+            )
+
+    task_id = str(uuid.uuid4())[:8]
+
+    async def event_generator():
+        # Start event
+        yield f"data: {json.dumps({'type': 'start', 'identifier': identifier, 'task_id': task_id})}\n\n"
+
+        # Track progress via callback
+        progress_events: list[dict] = []
+        progress_lock = asyncio.Lock()
+
+        def progress_callback(event_type: str, **kwargs):
+            """Called from download thread to report progress."""
+            event = {'type': event_type, 'task_id': task_id, **kwargs}
+            progress_events.append(event)
+
+        # Store active download info
+        _active_downloads[task_id] = {
+            "identifier": identifier,
+            "status": "running",
+            "started_at": asyncio.get_event_loop().time(),
+        }
+
+        try:
+            # Run download in thread pool with progress callback
+            result = await asyncio.to_thread(
+                download, identifier,
+                _progress_callback=progress_callback,
+            )
+
+            # Yield any pending progress events
+            for event in progress_events:
+                yield f"data: {json.dumps(event)}\n\n"
+
+            if result.get("success"):
+                file_path = result.get("file", "")
+                source = result.get("source", "unknown")
+                _active_downloads[task_id]["status"] = "completed"
+                _active_downloads[task_id]["file"] = file_path
+                yield f"data: {json.dumps({'type': 'success', 'file': file_path, 'source': source, 'task_id': task_id})}\n\n"
+            else:
+                error = result.get("error", "Download failed")
+                _active_downloads[task_id]["status"] = "failed"
+                yield f"data: {json.dumps({'type': 'error', 'error': error, 'task_id': task_id})}\n\n"
+        except Exception as e:
+            _active_downloads[task_id]["status"] = "error"
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'task_id': task_id})}\n\n"
+        finally:
+            # Cleanup after a delay
+            await asyncio.sleep(60)
+            _active_downloads.pop(task_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/download/{task_id}/file")
+async def api_download_file(task_id: str, request: Request):
+    """Get the downloaded file for a completed task."""
+    # This endpoint allows fetching the file after SSE stream completes
+    # The task_id is passed via SSE events
+    return JSONResponse({"error": "Use /api/download with POST for direct file download"}, status_code=400)
+
+
 @app.post("/api/search")
 async def api_search(req: SearchRequest):
     """Search papers by keyword. Returns list of results."""
@@ -185,4 +292,46 @@ async def api_status():
         "status": "ok",
         "output_dir": config.get("output_dir", ""),
         "sources": sources,
+        "active_downloads": len(_active_downloads),
     })
+
+
+@app.get("/api/downloads/active")
+async def api_active_downloads():
+    """List currently active downloads."""
+    return JSONResponse({
+        "active": [
+            {
+                "task_id": tid,
+                "identifier": info["identifier"],
+                "status": info["status"],
+                "elapsed": asyncio.get_event_loop().time() - info["started_at"],
+            }
+            for tid, info in _active_downloads.items()
+        ]
+    })
+
+
+@app.get("/api/download/file")
+async def api_download_file(path: str):
+    """Download a file by its path. Used after SSE stream completes."""
+    if not path:
+        return JSONResponse({"error": "Missing path parameter"}, status_code=400)
+
+    file_path = Path(path)
+    if not file_path.exists():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    # Security: only allow files from configured output directory
+    config = load_config()
+    output_dir = Path(config.get("output_dir", ""))
+    try:
+        file_path.resolve().relative_to(output_dir.resolve())
+    except ValueError:
+        return JSONResponse({"error": "Access denied"}, status_code=403)
+
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=file_path.name,
+    )
