@@ -426,6 +426,14 @@ def _run_tiers_parallel(
                     output_path.unlink()
                 final_path.rename(output_path)
                 result["file"] = str(output_path)
+            # Cancel remaining threads immediately
+            pool.shutdown(wait=False)
+            for _, other_path in futures.values():
+                if other_path != output_path and other_path.exists():
+                    try:
+                        other_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             log.info(f"   OK {label}")
             return result
 
@@ -451,6 +459,14 @@ def _run_tiers_parallel(
                     output_path.unlink()
                 final_path.rename(output_path)
                 result["file"] = str(output_path)
+            # Cancel remaining threads immediately
+            pool.shutdown(wait=False)
+            for _, other_path in futures.values():
+                if other_path != output_path and other_path.exists():
+                    try:
+                        other_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             log.info(f"   OK {label} (late)")
             return result
 
