@@ -33,6 +33,31 @@ def is_pdf_file(path: Path) -> bool:
         return False
 
 
+def is_suspicious_pdf(path: Path, min_size_kb: int = 50) -> bool:
+    """Check if a PDF is suspiciously small (likely a preview/cover page)."""
+    try:
+        size_kb = path.stat().st_size / 1024
+        return size_kb < min_size_kb
+    except OSError:
+        return False
+
+
+def suspicious_pdf(identifier: str, file_path: Path, source: str) -> dict[str, Any]:
+    """Return a failure result for a suspicious (too small) PDF."""
+    size_kb = round(file_path.stat().st_size / 1024, 1)
+    try:
+        file_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return {
+        "success": False,
+        "identifier": identifier,
+        "doi": identifier,
+        "source": source,
+        "reason": f"Suspicious PDF ({size_kb} KB) — likely a preview or cover page, not full text",
+    }
+
+
 def is_plausible_pdf_url(url: str) -> bool:
     if not url or not url.startswith(("http://", "https://")):
         return False
