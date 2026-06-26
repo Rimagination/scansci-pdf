@@ -394,7 +394,7 @@ def _run_tiers_parallel(
         # Browser sources wait briefly to let fast API sources win first
         is_browser = label in _BROWSER_SOURCE_LABELS
         if is_browser:
-            cancel_event.wait(timeout=3)  # give API sources 3s head start
+            cancel_event.wait(timeout=10)  # give API sources 10s head start
             if cancel_event.is_set():
                 return None
         result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
