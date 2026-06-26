@@ -1,7 +1,9 @@
-"""Paper search via OpenAlex, Semantic Scholar, and Crossref."""
+"""Paper search via OpenAlex, Semantic Scholar, Crossref, and PubMed."""
 
 from __future__ import annotations
 
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -87,15 +89,16 @@ def search_papers(
     year_to: int | None = None,
     sort: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search papers from OpenAlex + Semantic Scholar + Crossref in parallel."""
+    """Search papers from OpenAlex + Semantic Scholar + Crossref + PubMed in parallel."""
     all_results: list[dict[str, Any]] = []
     per_source = max(5, limit)
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
             pool.submit(_search_openalex, query, per_source, year_from, year_to, sort): "openalex",
             pool.submit(_search_semantic_scholar, query, per_source, year_from, year_to): "semantic_scholar",
             pool.submit(_search_crossref, query, per_source, year_from, year_to): "crossref",
+            pool.submit(_search_pubmed, query, per_source, year_from, year_to): "pubmed",
         }
         for future in as_completed(futures, timeout=30):
             try:
@@ -121,6 +124,8 @@ def search_papers(
                 existing["oa_url"] = r.get("oa_url", "")
             if r.get("cited_by_count", 0) > existing.get("cited_by_count", 0):
                 existing["cited_by_count"] = r["cited_by_count"]
+            if not existing.get("pmid") and r.get("pmid"):
+                existing["pmid"] = r["pmid"]
             existing["source"] = existing.get("source", "") + "+" + r.get("source", "")
 
     # Sort by relevance or citations
@@ -265,6 +270,104 @@ def _search_crossref(
             "is_oa": bool(oa_url),
             "oa_url": oa_url,
         })
+    return results
+
+
+def _search_pubmed(
+    query: str, limit: int = 10,
+    year_from: int | None = None, year_to: int | None = None,
+) -> list[dict[str, Any]]:
+    """Search PubMed via NCBI E-utilities API."""
+    from .network import _get_session, request_timeout
+    config = load_config()
+
+    try:
+        session = _get_session(config)
+
+        # Step 1: Search for PMIDs
+        params: dict[str, Any] = {
+            "db": "pubmed",
+            "term": query,
+            "retmax": min(limit, 200),
+            "retmode": "json",
+            "sort": "relevance",
+        }
+        if year_from or year_to:
+            y_from = year_from or "1900"
+            y_to = year_to or "2026"
+            params["mindate"] = str(y_from)
+            params["maxdate"] = str(y_to)
+            params["datetype"] = "pdat"
+
+        resp = session.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params=params,
+            timeout=request_timeout(config),
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        pmids = data.get("esearchresult", {}).get("idlist", [])
+        if not pmids:
+            return []
+
+        # Step 2: Fetch summaries for PMIDs
+        time.sleep(0.3)  # respect NCBI rate limit
+        summary_resp = session.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+            params={"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
+            timeout=request_timeout(config),
+        )
+        if summary_resp.status_code != 200:
+            return []
+        summary_data = summary_resp.json()
+    except Exception:
+        return []
+
+    results = []
+    for pmid in pmids:
+        info = summary_data.get("result", {}).get(pmid, {})
+        if not info or isinstance(info, str):
+            continue
+
+        # Extract DOI from articleids
+        doi = ""
+        for aid in info.get("articleids", []):
+            if aid.get("idtype") == "doi":
+                doi = aid.get("value", "")
+                break
+
+        if not doi:
+            continue
+
+        authors = []
+        for a in info.get("authors", [])[:5]:
+            name = a.get("name", "")
+            if name:
+                authors.append(name)
+
+        # Year from pubdate
+        pubdate = info.get("pubdate", "")
+        year = pubdate[:4] if pubdate and pubdate[:4].isdigit() else ""
+
+        title = info.get("title", "")
+        # Clean up title (remove trailing period)
+        if title.endswith("."):
+            title = title[:-1]
+
+        results.append({
+            "title": title,
+            "doi": doi,
+            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+            "authors": authors,
+            "year": year,
+            "cited_by_count": 0,  # PubMed doesn't provide citation count
+            "abstract": "",  # Summary doesn't include abstract
+            "is_oa": False,
+            "oa_url": "",
+            "pmid": pmid,
+        })
+
     return results
 
 
