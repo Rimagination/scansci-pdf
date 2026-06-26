@@ -257,14 +257,6 @@ async def api_download_stream(req: DownloadRequest):
     )
 
 
-@app.get("/api/download/{task_id}/file")
-async def api_download_file(task_id: str, request: Request):
-    """Get the downloaded file for a completed task."""
-    # This endpoint allows fetching the file after SSE stream completes
-    # The task_id is passed via SSE events
-    return JSONResponse({"error": "Use /api/download with POST for direct file download"}, status_code=400)
-
-
 @app.post("/api/search")
 async def api_search(req: SearchRequest):
     """Search papers by keyword. Returns list of results."""
