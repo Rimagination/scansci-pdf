@@ -171,7 +171,7 @@ def diagnose_network(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
     # Test DNS resolution
     test_domains = [
-        ("sci-hub.mksa.top", "Sci-Hub"),
+        ("sci-hub.ru", "Sci-Hub"),
         ("api.openalex.org", "OpenAlex"),
         ("doi.org", "DOI"),
     ]
@@ -185,7 +185,7 @@ def diagnose_network(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
     # Test TCP connectivity
     tcp_tests = [
-        ("sci-hub.mksa.top", 443, "Sci-Hub HTTPS"),
+        ("sci-hub.ru", 443, "Sci-Hub HTTPS"),
         ("api.openalex.org", 443, "OpenAlex HTTPS"),
     ]
     for host, port, label in tcp_tests:
@@ -202,7 +202,7 @@ def diagnose_network(config: dict[str, Any] | None = None) -> dict[str, Any]:
     if active_proxy:
         try:
             import requests
-            resp = requests.get("https://sci-hub.mksa.top", timeout=10,
+            resp = requests.get("https://sci-hub.ru", timeout=10,
                               proxies={"https": active_proxy, "http": active_proxy},
                               headers={"User-Agent": "Mozilla/5.0"})
             report["tests"].append({"target": "Sci-Hub via proxy", "status": resp.status_code})
