@@ -21,7 +21,7 @@ log = get_logger()
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
-templates.env.cache_size = 0
+templates.env.cache = None
 
 app = FastAPI(title="ScanSci PDF", description="Academic paper downloader web UI")
 
@@ -91,7 +91,7 @@ def _check_sources(config: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.post("/api/download")
