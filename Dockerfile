@@ -5,7 +5,7 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY src ./src
 
-RUN pip install --no-cache-dir ".[tor,cloakbrowser,instsci]"
+RUN pip install --no-cache-dir ".[web,tor,cloakbrowser,instsci]"
 
 FROM python:3.12-slim
 
