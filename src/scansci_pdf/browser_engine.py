@@ -100,10 +100,15 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
 
     from cloakbrowser import launch
 
-    headless = False
+    # Auto-detect headless: Docker/CI environments have no DISPLAY
+    import os
+    _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    headless = not _has_display  # default: headless when no display
     humanize = True
     if config:
-        headless = config.get("browser_headless", False)
+        if _has_display:
+            # Only respect config override when a display is available
+            headless = config.get("browser_headless", False)
         humanize = config.get("browser_humanize", True)
 
     args = _build_browser_args(config)
@@ -140,10 +145,13 @@ def get_persistent_context(
 
     from cloakbrowser import launch_persistent_context
 
-    headless = False
+    import os
+    _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    headless = not _has_display
     humanize = True
     if config:
-        headless = config.get("browser_headless", False)
+        if _has_display:
+            headless = config.get("browser_headless", False)
         humanize = config.get("browser_humanize", True)
 
     args = _build_browser_args(config)
