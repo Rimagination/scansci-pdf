@@ -432,16 +432,23 @@ def _run_tiers_parallel(
             return result
 
         # Timeout reached — give late-finishing threads a grace period.
-        # Visible browser login can take 60-300s (browser launch + SSO + redirect),
-        # so we wait much longer if browser-based sources are in the pool.
+        # Reduce grace period: if most sources already failed, don't wait long.
         has_browser = any("Browser" in lbl for _, lbl, _, _ in all_sources)
         has_carsi = any("CARSI" in lbl for _, lbl, _, _ in all_sources)
-        if has_carsi:
-            grace = 300
-        elif has_browser:
-            grace = 180
+
+        # Count how many sources already finished
+        done_count = sum(1 for f in futures if f.done())
+        remaining = len(futures) - done_count
+
+        if has_carsi and remaining > 0:
+            grace = 120  # CARSI can take time for SSO
+        elif has_browser and remaining > 2:
+            grace = 60   # Browser sources need time for login
+        elif remaining > 0:
+            grace = 10   # Quick fail for API sources
         else:
-            grace = 15
+            grace = 5    # All done, just checking
+
         log.info(f"   Racing timed out after {overall_timeout + 5}s, waiting up to {grace}s for late results...")
         success_event.wait(timeout=grace)
         if shared_result["result"] is not None:
