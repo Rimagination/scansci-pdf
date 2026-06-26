@@ -34,7 +34,7 @@ class DownloadRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = 50
 
 
 # --- Helper ---
