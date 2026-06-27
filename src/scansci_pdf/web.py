@@ -201,50 +201,73 @@ async def api_download_stream(req: DownloadRequest):
         # Start event
         yield f"data: {json.dumps({'type': 'start', 'identifier': identifier, 'task_id': task_id})}\n\n"
 
-        # Track progress via callback
-        progress_events: list[dict] = []
-        progress_lock = asyncio.Lock()
+        # Use asyncio.Queue for real-time event streaming
+        event_queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
 
         def progress_callback(event_type: str, **kwargs):
             """Called from download thread to report progress."""
             event = {'type': event_type, 'task_id': task_id, **kwargs}
-            progress_events.append(event)
+            # Thread-safe: schedule put on the event loop
+            loop.call_soon_threadsafe(event_queue.put_nowait, event)
 
         # Store active download info
         _active_downloads[task_id] = {
             "identifier": identifier,
             "status": "running",
-            "started_at": asyncio.get_event_loop().time(),
+            "started_at": loop.time(),
         }
 
-        try:
-            # Run download in thread pool with progress callback
-            result = await asyncio.to_thread(
+        # Start download in background task
+        download_task = asyncio.create_task(
+            asyncio.to_thread(
                 download, identifier,
                 _progress_callback=progress_callback,
             )
+        )
 
-            # Yield any pending progress events
-            for event in progress_events:
-                yield f"data: {json.dumps(event)}\n\n"
+        # Stream events as they arrive
+        result = None
+        try:
+            while True:
+                try:
+                    # Wait for next event with timeout
+                    event = await asyncio.wait_for(event_queue.get(), timeout=2.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                    # Check if this is a terminal event
+                    if event.get('type') in ('success', 'error'):
+                        return
+                except asyncio.TimeoutError:
+                    # No event yet, check if download is done
+                    if download_task.done():
+                        break
+                    # Send keepalive comment to prevent connection timeout
+                    yield ": keepalive\n\n"
 
-            if result.get("success"):
-                file_path = result.get("file", "")
-                source = result.get("source", "unknown")
-                _active_downloads[task_id]["status"] = "completed"
-                _active_downloads[task_id]["file"] = file_path
-                yield f"data: {json.dumps({'type': 'success', 'file': file_path, 'source': source, 'task_id': task_id})}\n\n"
-            else:
-                error = result.get("error", "Download failed")
-                _active_downloads[task_id]["status"] = "failed"
-                yield f"data: {json.dumps({'type': 'error', 'error': error, 'task_id': task_id})}\n\n"
+            # Download completed, get result
+            result = download_task.result()
         except Exception as e:
-            _active_downloads[task_id]["status"] = "error"
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'task_id': task_id})}\n\n"
-        finally:
-            # Cleanup after a delay
-            await asyncio.sleep(60)
-            _active_downloads.pop(task_id, None)
+            result = {"success": False, "error": str(e)}
+
+        # Drain any remaining events from queue
+        while not event_queue.empty():
+            try:
+                event = event_queue.get_nowait()
+                yield f"data: {json.dumps(event)}\n\n"
+            except asyncio.QueueEmpty:
+                break
+
+        # Send final result
+        if result and result.get("success"):
+            file_path = result.get("file", "")
+            source = result.get("source", "unknown")
+            _active_downloads[task_id]["status"] = "completed"
+            _active_downloads[task_id]["file"] = file_path
+            yield f"data: {json.dumps({'type': 'success', 'file': file_path, 'source': source, 'task_id': task_id})}\n\n"
+        else:
+            error = (result or {}).get("error", "Download failed")
+            _active_downloads[task_id]["status"] = "failed"
+            yield f"data: {json.dumps({'type': 'error', 'error': error, 'task_id': task_id})}\n\n"
 
     return StreamingResponse(
         event_generator(),
