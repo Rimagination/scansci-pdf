@@ -611,6 +611,8 @@ def download(
         cached_file = Path(cached.get("file", ""))
         if cached_file.exists():
             cached["cached"] = True
+            if _progress_callback:
+                _progress_callback("progress", phase="cached", message="Found in cache", source=cached.get("source", "cache"))
             if bibtex:
                 from ..bibtex import fetch_bibtex
                 cached["bibtex"] = fetch_bibtex(identifier, config)
@@ -643,6 +645,8 @@ def download(
                         "doi": doi, "file": str(candidate),
                         "source": "local_cache", "cached": True,
                     }
+                    if _progress_callback:
+                        _progress_callback("progress", phase="cached", message=f"Found existing file: {candidate.name}", source="local_cache")
                     cache_set(identifier, result, config)
                     return result
                 else:
@@ -666,6 +670,8 @@ def download(
                         "doi": doi, "file": str(candidate),
                         "source": "local_cache", "cached": True,
                     }
+                    if _progress_callback:
+                        _progress_callback("progress", phase="cached", message=f"Found existing file: {candidate.name}", source="local_cache")
                     cache_set(identifier, result, config)
                     return result
 

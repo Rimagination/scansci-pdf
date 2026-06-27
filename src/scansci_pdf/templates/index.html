@@ -351,26 +351,24 @@ function app() {
                     }
                 }
 
-                if (finalResult && finalResult.file) {
-                    // Download the file directly
-                    const fileResp = await fetch(`/api/download/file?path=${encodeURIComponent(finalResult.file)}`);
-                    if (fileResp.ok) {
-                        const blob = await fileResp.blob();
-                        const filename = finalResult.file.split('/').pop() || 'paper.pdf';
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url; a.download = filename;
-                        document.body.appendChild(a); a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
+                if (finalResult && finalResult.download_token) {
+                    // Download file via one-time token
+                    const url = '/api/download/file/' + finalResult.download_token;
+                    const a = document.createElement('a');
+                    a.href = url; a.download = finalResult.filename || 'paper.pdf';
+                    document.body.appendChild(a); a.click();
+                    document.body.removeChild(a);
 
-                        this.history.unshift({
-                            title: filename.replace('.pdf',''),
-                            identifier,
-                            source: finalResult.source || 'unknown'
-                        });
-                        if (this.history.length > 20) this.history.pop();
-                    }
+                    this.history.unshift({
+                        title: (finalResult.filename || 'paper').replace('.pdf',''),
+                        identifier,
+                        source: finalResult.source || 'unknown'
+                    });
+                    if (this.history.length > 20) this.history.pop();
+                } else if (finalResult && finalResult.error) {
+                    this.error = finalResult.error;
+                } else if (finalResult && !finalResult.download_token) {
+                    this.error = 'Download completed but file transfer failed. Please try again.';
                 }
             } catch (e) {
                 this.error = 'Network error: ' + e.message;

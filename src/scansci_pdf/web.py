@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,10 @@ app = FastAPI(title="ScanSci PDF", description="Academic paper downloader web UI
 
 # Active download tasks for SSE tracking
 _active_downloads: dict[str, dict[str, Any]] = {}
+
+# One-time download tokens: token -> {"path": str, "expires": float, "filename": str}
+_download_tokens: dict[str, dict[str, Any]] = {}
+_TOKEN_TTL = 300  # 5 minutes
 
 
 # --- Request/Response models ---
@@ -59,6 +64,30 @@ def _is_doi_or_arxiv(text: str) -> bool:
     if _DOI_PATTERN.match(text):
         return True
     return False
+
+
+def _create_download_token(file_path: str, filename: str) -> str:
+    """Create a one-time download token for a file. Returns the token string."""
+    token = uuid.uuid4().hex
+    _download_tokens[token] = {
+        "path": file_path,
+        "filename": filename,
+        "expires": time.time() + _TOKEN_TTL,
+    }
+    return token
+
+
+def _consume_download_token(token: str) -> dict[str, Any] | None:
+    """Consume a one-time download token. Returns file info or None if invalid/expired."""
+    info = _download_tokens.pop(token, None)
+    if not info:
+        return None
+    if time.time() > info["expires"]:
+        return None
+    fp = Path(info["path"])
+    if not fp.exists():
+        return None
+    return {"path": str(fp), "filename": info["filename"]}
 
 
 def _check_sources(config: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +193,19 @@ async def api_download(req: DownloadRequest):
     return JSONResponse(error_response, status_code=404)
 
 
+@app.get("/api/download/file/{token}")
+async def api_download_file(token: str):
+    """Download a file using a one-time token. Token is consumed on use."""
+    info = _consume_download_token(token)
+    if not info:
+        return JSONResponse({"success": False, "error": "Invalid or expired download token"}, status_code=404)
+    return FileResponse(
+        info["path"],
+        media_type="application/pdf",
+        filename=info["filename"],
+    )
+
+
 @app.post("/api/download/stream")
 async def api_download_stream(req: DownloadRequest):
     """Download a paper with real-time SSE status updates.
@@ -257,13 +299,24 @@ async def api_download_stream(req: DownloadRequest):
             except asyncio.QueueEmpty:
                 break
 
-        # Send final result
+        # Send final result - use one-time token for file download
         if result and result.get("success"):
             file_path = result.get("file", "")
             source = result.get("source", "unknown")
             _active_downloads[task_id]["status"] = "completed"
             _active_downloads[task_id]["file"] = file_path
-            yield f"data: {json.dumps({'type': 'success', 'file': file_path, 'source': source, 'task_id': task_id})}\n\n"
+
+            try:
+                fp = Path(file_path)
+                if fp.exists():
+                    token = _create_download_token(file_path, fp.name)
+                    log.info(f"SSE [{task_id}] success: {fp.name} ({fp.stat().st_size} bytes), token issued")
+                    yield f"data: {json.dumps({'type': 'success', 'file': file_path, 'filename': fp.name, 'source': source, 'task_id': task_id, 'download_token': token})}\n\n"
+                else:
+                    log.warning(f"SSE [{task_id}] file not found: {file_path}")
+                    yield f"data: {json.dumps({'type': 'error', 'error': 'File not found after download', 'task_id': task_id})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'error': f'Failed to prepare download: {e}', 'task_id': task_id})}\n\n"
         else:
             error = (result or {}).get("error", "Download failed")
             _active_downloads[task_id]["status"] = "failed"
@@ -329,26 +382,3 @@ async def api_active_downloads():
     })
 
 
-@app.get("/api/download/file")
-async def api_download_file(path: str):
-    """Download a file by its path. Used after SSE stream completes."""
-    if not path:
-        return JSONResponse({"error": "Missing path parameter"}, status_code=400)
-
-    file_path = Path(path)
-    if not file_path.exists():
-        return JSONResponse({"error": "File not found"}, status_code=404)
-
-    # Security: only allow files from configured output directory
-    config = load_config()
-    output_dir = Path(config.get("output_dir", ""))
-    try:
-        file_path.resolve().relative_to(output_dir.resolve())
-    except ValueError:
-        return JSONResponse({"error": "Access denied"}, status_code=403)
-
-    return FileResponse(
-        file_path,
-        media_type="application/pdf",
-        filename=file_path.name,
-    )
