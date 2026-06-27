@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .cache import cache_clear, cache_get
 from .config import get_config_safe, load_config, update_config
@@ -24,9 +25,21 @@ from .search import search_papers
 from .sources import batch_download, download
 from .tor import check_tor_circuit
 
+_config = load_config()
+_mcp_name = _config.get("mcp_server_name", "scansci-pdf")
+
+# Configure transport security for non-localhost hostnames
+_transport_security = None
+if _mcp_name not in ("127.0.0.1", "localhost", "::1"):
+    _transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[f"{_mcp_name}:*", f"{_mcp_name}"],
+    )
+
 mcp_app = FastMCP(
-    name="scansci-pdf",
+    name=_mcp_name,
     instructions="Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. Supports DOI, arXiv ID, keyword search, and resumable batch downloads.",
+    transport_security=_transport_security,
 )
 
 

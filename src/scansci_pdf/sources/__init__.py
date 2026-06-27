@@ -420,20 +420,35 @@ def _run_tiers_parallel(
                     output_path.unlink()
                 final_path.rename(output_path)
                 result["file"] = str(output_path)
+            # Cancel remaining threads immediately
+            pool.shutdown(wait=False)
+            for _, other_path in futures.values():
+                if other_path != output_path and other_path.exists():
+                    try:
+                        other_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             log.info(f"   OK {label}")
             return result
 
         # Timeout reached — give late-finishing threads a grace period.
-        # Visible browser login can take 60-300s (browser launch + SSO + redirect),
-        # so we wait much longer if browser-based sources are in the pool.
+        # Reduce grace period: if most sources already failed, don't wait long.
         has_browser = any("Browser" in lbl for _, lbl, _, _ in all_sources)
         has_carsi = any("CARSI" in lbl for _, lbl, _, _ in all_sources)
-        if has_carsi:
-            grace = 300
-        elif has_browser:
-            grace = 180
+
+        # Count how many sources already finished
+        done_count = sum(1 for f in futures if f.done())
+        remaining = len(futures) - done_count
+
+        if has_carsi and remaining > 0:
+            grace = 120  # CARSI can take time for SSO
+        elif has_browser and remaining > 2:
+            grace = 60   # Browser sources need time for login
+        elif remaining > 0:
+            grace = 10   # Quick fail for API sources
         else:
-            grace = 15
+            grace = 5    # All done, just checking
+
         log.info(f"   Racing timed out after {overall_timeout + 5}s, waiting up to {grace}s for late results...")
         success_event.wait(timeout=grace)
         if shared_result["result"] is not None:
@@ -445,6 +460,14 @@ def _run_tiers_parallel(
                     output_path.unlink()
                 final_path.rename(output_path)
                 result["file"] = str(output_path)
+            # Cancel remaining threads immediately
+            pool.shutdown(wait=False)
+            for _, other_path in futures.values():
+                if other_path != output_path and other_path.exists():
+                    try:
+                        other_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             log.info(f"   OK {label} (late)")
             return result
 
@@ -537,14 +560,17 @@ def download(
     output_dir: str | Path | None = None,
     *,
     scihub_enabled: bool | None = None,
-    use_tor: bool = False,
+    use_tor: bool | None = None,
     use_instsci: bool = False,
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
     _config: dict[str, Any] | None = None,
+    _progress_callback: Any = None,
 ) -> dict[str, Any]:
     config = _config if _config is not None else load_config()
+    if use_tor is None:
+        use_tor = config.get("use_tor_for_scihub", False)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if scihub_enabled is not None:
@@ -563,6 +589,8 @@ def download(
         cached_file = Path(cached.get("file", ""))
         if cached_file.exists():
             cached["cached"] = True
+            if _progress_callback:
+                _progress_callback("progress", phase="cached", message="Found in cache", source=cached.get("source", "cache"))
             if bibtex:
                 from ..bibtex import fetch_bibtex
                 cached["bibtex"] = fetch_bibtex(identifier, config)
@@ -595,6 +623,8 @@ def download(
                         "doi": doi, "file": str(candidate),
                         "source": "local_cache", "cached": True,
                     }
+                    if _progress_callback:
+                        _progress_callback("progress", phase="cached", message=f"Found existing file: {candidate.name}", source="local_cache")
                     cache_set(identifier, result, config)
                     return result
                 else:
@@ -618,13 +648,19 @@ def download(
                         "doi": doi, "file": str(candidate),
                         "source": "local_cache", "cached": True,
                     }
+                    if _progress_callback:
+                        _progress_callback("progress", phase="cached", message=f"Found existing file: {candidate.name}", source="local_cache")
                     cache_set(identifier, result, config)
                     return result
 
     log.info(f"ScanSci PDF - {identifier}")
+    if _progress_callback:
+        _progress_callback("progress", phase="starting", message=f"Starting download for {identifier}")
 
     if is_arxiv_identifier(identifier):
         log.info("   [L0] arXiv direct")
+        if _progress_callback:
+            _progress_callback("progress", phase="arxiv", message="Trying arXiv direct download")
         result = try_arxiv(identifier, output_path, config)
         if result:
             return _finalize_result(result, identifier, identifier, target_dir, config, rename=rename, bibtex=bibtex)
@@ -635,10 +671,14 @@ def download(
     # Phase 1: Free sources (OA + grey) — parallel race
     free_sources = _build_free_sources(doi, config)
     if free_sources:
+        if _progress_callback:
+            _progress_callback("progress", phase="free_sources", message=f"Racing {len(free_sources)} free sources...")
         result = _run_tiers_parallel(
             [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
         )
         if result:
+            if _progress_callback:
+                _progress_callback("progress", phase="completed", source=result.get("source", "unknown"), message="Download successful")
             return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
 
     # Phase 2: Institutional access — only when Phase 1 failed
@@ -646,10 +686,14 @@ def download(
         inst_sources = _build_institutional_sources(doi, config, use_instsci=use_instsci)
         if inst_sources:
             log.info("   Phase 1 failed, trying institutional access...")
+            if _progress_callback:
+                _progress_callback("progress", phase="institutional", message=f"Trying {len(inst_sources)} institutional sources...")
             result = _run_tiers_parallel(
                 [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30
             )
             if result:
+                if _progress_callback:
+                    _progress_callback("progress", phase="completed", source=result.get("source", "unknown"), message="Download successful via institutional access")
                 return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
 
     # Last resort: check if a PDF was downloaded by the institutional bridge
@@ -672,7 +716,7 @@ def download(
     except Exception:
         error_type, error_action = "", ""
 
-    hint: dict[str, Any] = {"manual_url": f"https://sci-hub.mksa.top/{doi}", "guidance": guidance}
+    hint: dict[str, Any] = {"manual_url": f"https://sci-hub.ru/{doi}", "guidance": guidance}
 
     reason = "no PDF found"
     if error_type == "paywall":
@@ -760,7 +804,7 @@ def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
         tips.append("有高校账号？运行: scansci-pdf config_set instsci_enabled true")
 
     # Manual fallback
-    tips.append(f"手动下载: https://sci-hub.mksa.top/{doi}")
+    tips.append(f"手动下载: https://sci-hub.ru/{doi}")
 
     # Network diagnostic
     tips.append("运行网络诊断: scansci-pdf network_diagnose")
@@ -976,7 +1020,7 @@ def batch_download(
     output_dir: str | Path | None = None,
     *,
     scihub_enabled: bool | None = None,
-    use_tor: bool = False,
+    use_tor: bool | None = None,
     use_instsci: bool = False,
     progress_callback: Any = None,
     batch_id: str | None = None,

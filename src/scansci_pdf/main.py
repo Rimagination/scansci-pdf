@@ -19,7 +19,7 @@ class ServerMode(str, Enum):
 @app.command("run")
 def run_server(
     mode: ServerMode = typer.Option(ServerMode.STDIO, help="Transport mode"),
-    host: str = typer.Option("0.0.0.0", help="HTTP host"),
+    host: str = typer.Option("0.0.0.0", help="HTTP bind host"),
     port: int = typer.Option(8000, help="HTTP port"),
 ) -> None:
     """Start the ScanSci PDF server."""
@@ -36,8 +36,12 @@ def run_server(
         log.info("Starting in stdio mode")
         mcp_app.run(transport="stdio")
     elif mode == ServerMode.WEB:
-        import uvicorn
-        from .web import app as web_app
+        try:
+            import uvicorn
+            from .web import app as web_app
+        except ModuleNotFoundError as e:
+            typer.echo(f"  Missing dependency: {e.name}. Install with: pip install 'scansci-pdf[web]'")
+            raise typer.Exit(1)
         log.info(f"Starting web UI on http://{host}:{port}")
         uvicorn.run(web_app, host=host, port=port)
     else:
@@ -60,8 +64,12 @@ def web_server(
     port: int = typer.Option(8080, help="Web server port"),
 ) -> None:
     """Start the ScanSci PDF web UI for browser-based paper downloading."""
-    import uvicorn
-    from .web import app as web_app
+    try:
+        import uvicorn
+        from .web import app as web_app
+    except ModuleNotFoundError as e:
+        typer.echo(f"  Missing dependency: {e.name}. Install with: pip install 'scansci-pdf[web]'")
+        raise typer.Exit(1)
     print(f"  Starting ScanSci PDF Web UI on http://{host}:{port}")
     print(f"  Open http://localhost:{port} in your browser")
     uvicorn.run(web_app, host=host, port=port)
@@ -114,10 +122,14 @@ def get_paper(
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
+    from .config import load_config
     from .sources import download
+    cfg = load_config()
     result = download(
         identifier, output or None,
-        scihub_enabled=True, use_tor=True, use_instsci=True,
+        scihub_enabled=cfg.get("scihub_enabled", True),
+        use_tor=cfg.get("use_tor_for_scihub", False),
+        use_instsci=cfg.get("instsci_enabled", False),
         bibtex=not no_bibtex,
     )
     if result.get("success"):

@@ -42,6 +42,11 @@ TOR_DOWNLOAD_MIRRORS = [
 
 TOR_VERSION = "14.0.4"
 
+# Cache failed download attempts to avoid retrying every time
+_tor_download_failed = False
+_tor_download_failed_time = 0.0
+_TOR_DOWNLOAD_COOLDOWN = 3600  # 1 hour cooldown after failed download
+
 
 def _tor_dir(config: dict[str, Any]) -> Path:
     from .config import DATA_DIR
@@ -92,6 +97,12 @@ def _download_url() -> tuple[str, str]:
 
 def download_tor(config: dict[str, Any]) -> Path | None:
     """Download and extract Tor Expert Bundle. Returns path to tor binary."""
+    global _tor_download_failed, _tor_download_failed_time
+
+    # Skip download if recently failed (cooldown)
+    if _tor_download_failed and (time.time() - _tor_download_failed_time) < _TOR_DOWNLOAD_COOLDOWN:
+        return None
+
     tor_dir = _tor_dir(config)
     tor_dir.mkdir(parents=True, exist_ok=True)
 
@@ -145,6 +156,8 @@ def download_tor(config: dict[str, Any]) -> Path | None:
             continue
 
     log.error("Failed to download Tor from all mirrors")
+    _tor_download_failed = True
+    _tor_download_failed_time = time.time()
     return None
 
 

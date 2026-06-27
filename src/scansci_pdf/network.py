@@ -71,6 +71,31 @@ def proxy_dict(proxy: str | None) -> dict[str, str] | None:
     return {"http": proxy, "https": proxy}
 
 
+_LIBGEN_HOSTS = {"libgen.li", "libgen.bz", "libgen.gs", "libgen.rs", "libgen.st"}
+
+
+def _is_scihub_libgen_url(url: str, config: dict[str, Any]) -> bool:
+    """Check if URL belongs to a Sci-Hub or LibGen domain."""
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    # LibGen mirrors
+    if any(host.endswith(h) for h in _LIBGEN_HOSTS):
+        return True
+    # Sci-Hub domains from config
+    for domain in config.get("scihub_domains") or []:
+        try:
+            d_host = urlparse(domain).netloc.lower()
+            if host == d_host or host.endswith("." + d_host):
+                return True
+        except Exception:
+            continue
+    # Fallback: known Sci-Hub patterns
+    return "sci-hub" in host
+
+
 def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False) -> str | None:
     if use_tor:
         from .tor import ensure_tor
@@ -80,9 +105,15 @@ def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False
         log.warning("Tor requested but unavailable — falling back to direct connection")
 
     explicit = os.environ.get("SCANSCI_PDF_PROXY") or config.get("network_proxy")
-    if explicit:
-        return explicit
-    return None
+    if not explicit:
+        return None
+
+    # When proxy_only_scihub is enabled, only route Sci-Hub/LibGen through proxy
+    if config.get("proxy_only_scihub", False):
+        if not _is_scihub_libgen_url(url, config):
+            return None
+
+    return explicit
 
 
 def fetch(
@@ -144,35 +175,6 @@ def _is_cloudflare_block(resp: requests.Response) -> bool:
         except Exception:
             pass
     return False
-
-
-def fetch_with_browser(
-    url: str,
-    config: dict[str, Any],
-    *,
-    stream: bool = False,
-) -> requests.Response | None:
-    """Fetch URL using CloakBrowser to bypass Cloudflare challenges."""
-    from .browser_engine import solve_url, is_available
-    if not is_available(config):
-        return None
-    result = solve_url(url, config)
-    if not result:
-        return None
-    solution = result.get("solution", {})
-    status = solution.get("status", 0)
-    if status >= 400:
-        return None
-    resp = requests.Response()
-    resp.status_code = status
-    resp._content = solution.get("response", "").encode("utf-8")
-    resp.url = solution.get("url", url)
-    cookies = solution.get("cookies", [])
-    if isinstance(cookies, list):
-        for c in cookies:
-            if "name" in c and "value" in c:
-                resp.cookies.set(c["name"], c["value"])
-    return resp
 
 
 def polite_delay(config: dict[str, Any]) -> None:
