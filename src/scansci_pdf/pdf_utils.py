@@ -49,8 +49,11 @@ def _pdf_text_sample(path: Path) -> str:
 
         with fitz.open(path) as doc:
             chunks = []
-            for page in doc[: min(2, doc.page_count)]:
-                chunks.append(page.get_text("text")[:2000])
+            # Integer indexing is the most stable PyMuPDF API across versions;
+            # avoid Document slicing so a version quirk can't be swallowed by
+            # the broad except and silently return "".
+            for i in range(min(2, doc.page_count)):
+                chunks.append(doc[i].get_text("text")[:2000])
             return "\n".join(chunks).lower()
     except Exception:
         return ""

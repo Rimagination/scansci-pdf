@@ -300,7 +300,9 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
 
     # scihub_enabled gates all shadow-library / grey sources (Sci-Hub, SciBban,
     # LibGen), matching the documented behavior in README's config reference.
-    if config.get("scihub_enabled", False):
+    # Default True mirrors load_config() and the other call sites, so a partial
+    # config dict doesn't silently disable these sources.
+    if config.get("scihub_enabled", True):
         sources.append((try_scibban, "SciBban"))
         sources.append((try_libgen, "LibGen"))
         sources.append((try_scihub, "Sci-Hub"))
