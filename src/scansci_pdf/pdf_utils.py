@@ -33,6 +33,71 @@ def is_pdf_file(path: Path) -> bool:
         return False
 
 
+def _pdf_page_count(path: Path) -> int | None:
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(path) as doc:
+            return int(doc.page_count)
+    except Exception:
+        return None
+
+
+def _pdf_text_sample(path: Path) -> str:
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(path) as doc:
+            chunks = []
+            # Integer indexing is the most stable PyMuPDF API across versions;
+            # avoid Document slicing so a version quirk can't be swallowed by
+            # the broad except and silently return "".
+            for i in range(min(2, doc.page_count)):
+                chunks.append(doc[i].get_text("text")[:2000])
+            return "\n".join(chunks).lower()
+    except Exception:
+        return ""
+
+
+def is_suspicious_pdf(path: Path) -> bool:
+    """Return True for PDFs that are likely previews/covers/supplements."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return True
+
+    if not is_pdf_file(path):
+        return True
+    if size < 50_000:
+        return True
+
+    page_count = _pdf_page_count(path)
+    if page_count is None:
+        return False
+    if page_count <= 0:
+        return True
+    if page_count == 1 and size < 400_000:
+        return True
+
+    sample = _pdf_text_sample(path)
+    if sample[:800].count("supplement") >= 2:
+        return True
+    if "supplementary information" in sample[:1200] and page_count <= 2:
+        return True
+
+    return False
+
+
+def suspicious_pdf(identifier: str, file_path: Path, source: str) -> dict[str, Any]:
+    return fail(
+        identifier,
+        "suspicious PDF (likely preview, cover page, or supplementary material)",
+        {"file": str(file_path), "source": source},
+        error_type="suspicious_pdf",
+        action="try_another_source",
+    )
+
+
 def is_plausible_pdf_url(url: str) -> bool:
     if not url or not url.startswith(("http://", "https://")):
         return False

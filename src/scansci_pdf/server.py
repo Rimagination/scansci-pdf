@@ -46,10 +46,13 @@ def scansci_pdf_smart_download(
         output_dir: Override default output directory
         bibtex: Also return BibTeX citation for this paper
     """
+    config = load_config()
+    # Honor config["scihub_enabled"]; Tor only matters when Sci-Hub is on.
+    use_tor = bool(config.get("use_tor_for_scihub", False)) and bool(config.get("scihub_enabled", False))
     result = download(
         identifier, output_dir,
-        scihub_enabled=True,
-        use_tor=True,
+        scihub_enabled=None,
+        use_tor=use_tor,
         use_instsci=True,
         bibtex=bibtex,
     )

@@ -114,10 +114,15 @@ def get_paper(
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
+    from .config import load_config
     from .sources import download
+    config = load_config()
+    # Honor config["scihub_enabled"] instead of forcing grey sources on.
+    # Tor is only relevant for Sci-Hub, so disable it when Sci-Hub is off.
+    use_tor = bool(config.get("use_tor_for_scihub", False)) and bool(config.get("scihub_enabled", False))
     result = download(
         identifier, output or None,
-        scihub_enabled=True, use_tor=True, use_instsci=True,
+        scihub_enabled=None, use_tor=use_tor, use_instsci=True,
         bibtex=not no_bibtex,
     )
     if result.get("success"):
