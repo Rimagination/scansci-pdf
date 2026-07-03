@@ -574,6 +574,36 @@ def scansci_pdf_citation(identifier: str, format: str = "bibtex") -> str:
 
 
 @mcp_app.tool()
+def scansci_pdf_paper_metadata(doi: str) -> str:
+    """Get metadata for a paper by DOI from Semantic Scholar.
+
+    Returns title, authors, year, abstract, citation count, and identifiers.
+    Lighter than fetch_paper — does not download full text.
+
+    Args:
+        doi: The DOI of the paper (e.g. "10.1038/nphys1509").
+    """
+    from .sources.semantic_scholar import get_paper
+
+    result = get_paper(f"DOI:{doi}")
+    if result is None:
+        return json.dumps({"success": False, "doi": doi, "error": "Paper not found"})
+
+    return json.dumps({
+        "success": True,
+        "doi": result.doi,
+        "title": result.title,
+        "authors": result.authors,
+        "year": result.year,
+        "journal": result.journal,
+        "abstract": result.abstract,
+        "citation_count": result.citation_count,
+        "arxiv_id": result.arxiv_id,
+        "s2_url": result.s2_url,
+    }, ensure_ascii=False)
+
+
+@mcp_app.tool()
 def scansci_pdf_zotero_push(identifier: str) -> str:
     """Push a downloaded paper to Zotero.
 
