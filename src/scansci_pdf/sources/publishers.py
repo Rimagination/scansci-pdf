@@ -84,6 +84,8 @@ DOI_PREFIX_TO_PUBLISHER: dict[str, str] = {
     "10.1364/": "OSA",
     "10.1080/": "Tandfonline",
     "10.1116/": "AIP",  # AVS (pubs.aip.org)
+    "10.1177/": "SAGE",
+    "10.1061/": "ASCE",
     "10.1146/": "AnnualReviews",
     "10.31219/": "Research Square",
     "10.21203/": "Research Square",
@@ -129,6 +131,8 @@ PUBLISHER_TOOL_MAP: dict[str, list[str]] = {
     "IEEE": ["IEEEBrowser", "Crossref", "Unpaywall"],
     "OSA": ["Crossref", "Unpaywall"],
     "Tandfonline": ["TandFBrowser", "Crossref", "Unpaywall"],
+    "SAGE": ["SAGEBrowser", "Crossref", "Unpaywall"],
+    "ASCE": ["ASCEBrowser", "Crossref", "Unpaywall"],
     "AnnualReviews": ["Crossref", "Unpaywall"],
     "KPS": ["Crossref", "Unpaywall"],
     "Beilstein": ["Crossref", "Unpaywall"],
@@ -618,6 +622,7 @@ def _browser_strategy(publisher: str) -> Any:
         try_springer_browser, try_aps_browser, try_tandfonline_browser,
         try_iop_browser, try_oxford_browser, try_acm_browser,
         try_nature_browser, try_science_browser, try_generic_browser,
+        try_sage_browser, try_asce_browser,
     )
     mapping = {
         "Elsevier": try_elsevier_browser,
@@ -634,6 +639,8 @@ def _browser_strategy(publisher: str) -> Any:
         "ACM": try_acm_browser,
         "Nature": try_nature_browser,
         "Science": try_science_browser,
+        "SAGE": try_sage_browser,
+        "ASCE": try_asce_browser,
     }
     return mapping.get(publisher, try_generic_browser)
 
@@ -689,5 +696,7 @@ _FN_MAP.update({
     "ACMBrowser": _browser_strategy("ACM"),
     "NatureBrowser": _browser_strategy("Nature"),
     "ScienceBrowser": _browser_strategy("Science"),
+    "SAGEBrowser": _browser_strategy("SAGE"),
+    "ASCEBrowser": _browser_strategy("ASCE"),
     "GenericBrowser": _browser_strategy(""),
 })
