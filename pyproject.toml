@@ -16,6 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["lxml>=4.9"]
+# vpnsci is the canonical extra (v1.7.0+). instsci is kept as a legacy alias
+# so existing `pip install scansci-pdf[instsci]` commands keep working.
+vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
 cloakbrowser = ["cloakbrowser>=0.3"]
 dev = ["pytest>=8.0"]

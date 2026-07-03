@@ -36,9 +36,9 @@ $PYTHON -m venv "$VENV_DIR"
 
 # Activate and install
 source "$VENV_DIR/bin/activate"
-echo "Installing scansci-pdf with all optional dependencies ..."
+echo "Installing scansci-pdf with recommended optional dependencies (fast + vpnsci) ..."
 pip install --upgrade pip -q
-pip install ".[tor]" -q
+pip install ".[fast,vpnsci]" -q
 
 echo ""
 echo "=== Installation Complete ==="

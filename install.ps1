@@ -36,9 +36,9 @@ New-Item -ItemType Directory -Force -Path (Split-Path $venvDir) | Out-Null
 
 # Activate and install
 & "$venvDir\Scripts\Activate.ps1"
-Write-Host "Installing scansci-pdf with all optional dependencies ..."
+Write-Host "Installing scansci-pdf with recommended optional dependencies (fast + vpnsci) ..."
 pip install --upgrade pip -q
-pip install ".[tor]" -q
+pip install ".[fast,vpnsci]" -q
 
 Write-Host ""
 Write-Host "=== Installation Complete ===" -ForegroundColor Green
