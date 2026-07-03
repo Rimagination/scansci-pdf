@@ -329,6 +329,33 @@ scansci_pdf_network_diagnose
 
 ---
 
+## 交流群 / Community
+
+扫码加入微信交流群，一起聊 **AI for Science** —— 偏 AI 应用与科研工具，也欢迎讨论 ScanSci PDF 的用法、bug 和需求。
+
+<table>
+  <tr>
+    <td width="280" align="center">
+      <img src="assets/brand/wechat-group-qr.jpg" alt="微信群二维码" width="220">
+      <br>
+      <sub>微信群 / WeChat Group</sub>
+    </td>
+    <td valign="middle">
+      <p><strong>群聊方向</strong></p>
+      <ul>
+        <li>AI 在科研场景的落地与工具链</li>
+        <li>论文检索、下载、阅读、整理的工作流</li>
+        <li>ScanSci PDF 使用问题与改进建议</li>
+      </ul>
+      <p><sub>二维码过期会更新，若扫码失效请在 issue 区留言。</sub></p>
+    </td>
+  </tr>
+</table>
+
+更偏好异步交流？欢迎直接在 [Issues](https://github.com/Rimagination/scansci-pdf/issues) 或 [Discussions](https://github.com/Rimagination/scansci-pdf/discussions) 区开贴。
+
+---
+
 ## 更多资料
 
 - [Elsevier API 全文 PDF 稳定路径](docs/elsevier-api-fulltext-guide.md)
