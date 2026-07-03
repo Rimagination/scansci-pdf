@@ -316,12 +316,13 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
     if config.get("openalex_api_key"):
         legal_sources.append((try_openalex_content_api, "OpenAlexContent"))
 
-    # Grey sources
+    # Grey / shadow-library sources (Sci-Hub, SciBban, LibGen) are all gated
+    # by scihub_enabled. Default mirrors config.DEFAULT_CONFIG (False) so a
+    # partial config dict doesn't silently enable them.
     grey_sources: list[tuple[Any, str]] = []
     if config.get("scihub_enabled", False):
         grey_sources.append((try_scibban, "SciBban"))
-    grey_sources.append((try_libgen, "LibGen"))
-    if config.get("scihub_enabled", False):
+        grey_sources.append((try_libgen, "LibGen"))
         grey_sources.append((try_scihub, "Sci-Hub"))
 
     if strategy == "scihub_only":
