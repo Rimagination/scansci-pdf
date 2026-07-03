@@ -73,3 +73,36 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Record GitHub Deployment
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          # Create a deployment for the 'pypi' environment pointing at this tag.
+          DEPLOYMENT_ID=$(gh api \
+            --method POST \
+            repos/${{ github.repository }}/deployments \
+            -f ref="$TAG" \
+            -f environment="pypi" \
+            -f description="Publish scansci-pdf $VERSION to PyPI" \
+            --jq '.id')
+
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "Failed to create deployment"
+            exit 1
+          fi
+
+          # Mark it successful with a link to the PyPI project page.
+          gh api --method POST \
+            repos/${{ github.repository }}/deployments/$DEPLOYMENT_ID/statuses \
+            -f state="success" \
+            -f environment="pypi" \
+            -f environment_url="https://pypi.org/project/scansci-pdf/$VERSION/" \
+            -f description="scansci-pdf $VERSION is live on PyPI" \
+            --silent
+
+          echo "Recorded deployment $DEPLOYMENT_ID for $TAG"
