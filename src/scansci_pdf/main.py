@@ -146,6 +146,16 @@ def browser_status() -> None:
     print(f"  CloakBrowser: {'available' if available else 'not installed'}")
 
 
+@app.command("browser-doctor")
+def browser_doctor_cmd() -> None:
+    """Report reusable shared browser runtime options without installing anything."""
+    import json as _json
+
+    from .browser_discovery import doctor
+
+    print(_json.dumps(doctor(), ensure_ascii=False))
+
+
 @app.command("import-cookies")
 def import_cookies_cmd(cookie_file: str = typer.Argument(help="Netscape-format cookie file path")) -> None:
     """Import Netscape cookies into browser context."""
