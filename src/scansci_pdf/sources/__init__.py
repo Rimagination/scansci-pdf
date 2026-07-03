@@ -41,7 +41,7 @@ from .scibban import try_scibban
 from .scihub import try_scihub
 from .semantic_scholar import try_semanticscholar
 from .unpaywall import try_unpaywall
-from .instsci import try_instsci
+from .vpnsci import try_vpnsci
 from .ezproxy import try_ezproxy
 
 # Institutional bridge — uses instsci PaperFetcher when available
@@ -74,7 +74,7 @@ def _any_institutional_path(config: dict[str, Any]) -> bool:
     """Check if any institutional access is configured."""
     return bool(
         (config.get("carsi_enabled") and config.get("carsi_idp_name", "").strip())
-        or (config.get("instsci_enabled") and (config.get("instsci_school") or config.get("instsci_base_url")))
+        or (config.get("vpnsci_enabled") and (config.get("vpnsci_school") or config.get("vpnsci_base_url")))
         or (config.get("ezproxy_enabled") and config.get("ezproxy_login_url"))
         or config.get("elsevier_api_key")
     )
@@ -276,8 +276,18 @@ def _run_tier(
 
 
 def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str]]:
-    """Build Phase 1 sources: all free/OA/grey sources, sorted by adaptive score."""
+    """Build Phase 1 sources: all free/OA/grey sources, sorted by adaptive score.
+    
+    Respects config['download_strategy']:
+      - fastest:     all sources, EMA-sorted (default)
+      - scihub_first: all sources, but grey sources sorted first
+      - scihub_only:  only SciBban + Sci-Hub + LibGen
+      - oa_first:     all sources, but OA sources sorted before grey
+      - legal_only:   exclude grey sources (SciBban, Sci-Hub, LibGen)
+    """
     from .scoring import sort_sources
+
+    strategy = config.get("download_strategy", "fastest")
 
     publisher_fast = get_publisher_fast_sources(doi)
     _fast_names = {label for _, label in publisher_fast}
@@ -291,23 +301,40 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
         if label not in _fast_names:
             extra_fast.append((fn, label))
 
-    sources = publisher_fast + extra_fast
-    sources += [(try_doaj, "DOAJ"), (try_crossref_page_scrape, "CrossrefPage")]
-    sources += [(try_europepmc, "EuropePMC"), (try_core, "CORE"), (try_pmc, "PMC")]
+    legal_sources = publisher_fast + extra_fast
+    legal_sources += [(try_doaj, "DOAJ"), (try_crossref_page_scrape, "CrossrefPage")]
+    legal_sources += [(try_europepmc, "EuropePMC"), (try_core, "CORE"), (try_pmc, "PMC")]
 
     if config.get("openalex_api_key"):
-        sources.append((try_openalex_content_api, "OpenAlexContent"))
+        legal_sources.append((try_openalex_content_api, "OpenAlexContent"))
 
+    # Grey sources
+    grey_sources: list[tuple[Any, str]] = []
     if config.get("scihub_enabled", False):
-        sources.append((try_scibban, "SciBban"))
-    sources.append((try_libgen, "LibGen"))
+        grey_sources.append((try_scibban, "SciBban"))
+    grey_sources.append((try_libgen, "LibGen"))
     if config.get("scihub_enabled", False):
-        sources.append((try_scihub, "Sci-Hub"))
+        grey_sources.append((try_scihub, "Sci-Hub"))
 
-    return sort_sources(sources)
+    if strategy == "scihub_only":
+        # Only Sci-Hub (not SciBban, not LibGen)
+        return sort_sources([(try_scihub, "Sci-Hub")]) if config.get("scihub_enabled", False) else []
+    elif strategy == "grey_only":
+        return sort_sources(grey_sources)
+    elif strategy == "legal_only":
+        return sort_sources(legal_sources)
+    elif strategy == "scihub_first":
+        # Grey sources first, then legal
+        return sort_sources(grey_sources) + sort_sources(legal_sources)
+    elif strategy == "oa_first":
+        # Legal sources first, then grey
+        return sort_sources(legal_sources) + grey_sources
+    else:
+        # fastest: all sources EMA-sorted
+        return sort_sources(legal_sources + grey_sources)
 
 
-def _build_institutional_sources(doi: str, config: dict[str, Any], *, use_instsci: bool = False) -> list[tuple[Any, str]]:
+def _build_institutional_sources(doi: str, config: dict[str, Any], *, use_vpnsci: bool = False) -> list[tuple[Any, str]]:
     """Build Phase 2 sources: institutional access only."""
     from .scoring import sort_sources
 
@@ -319,10 +346,10 @@ def _build_institutional_sources(doi: str, config: dict[str, Any], *, use_instsc
     if config.get("carsi_enabled", False) and config.get("carsi_idp_name", "").strip():
         sources.append((try_carsi, "CARSI"))
 
-    if use_instsci and config.get("instsci_enabled", False):
-        sources.append((try_instsci, "WebVPN"))
+    if use_vpnsci and config.get("vpnsci_enabled", False):
+        sources.append((try_vpnsci, "WebVPN"))
 
-    if use_instsci and config.get("ezproxy_enabled", False):
+    if use_vpnsci and config.get("ezproxy_enabled", False):
         sources.append((try_ezproxy, "EZProxy"))
 
     return sort_sources(sources)
@@ -477,27 +504,6 @@ def _run_tiers_parallel(
     return None
 
 
-def _finalize_result(
-    result: dict[str, Any],
-    identifier: str,
-    doi: str,
-    target_dir: Path,
-    config: dict[str, Any],
-    *,
-    rename: bool = True,
-    bibtex: bool = False,
-) -> dict[str, Any]:
-    """Post-download: update index, rename, cache, fetch bibtex."""
-    _update_doi_index(target_dir, doi, Path(result.get("file", "")))
-    if rename:
-        _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
-    cache_set(identifier, result, config)
-    if bibtex:
-        from ..bibtex import fetch_bibtex
-        result["bibtex"] = fetch_bibtex(doi, config)
-    return result
-
-
 def _update_doi_index(target_dir: Path, doi: str, file_path: Path) -> None:
     """Update the DOI→file index for dedup."""
     doi_index = target_dir / ".doi_index.json"
@@ -538,17 +544,20 @@ def download(
     *,
     scihub_enabled: bool | None = None,
     use_tor: bool = False,
-    use_instsci: bool = False,
+    use_vpnsci: bool = False,
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
-    _config: dict[str, Any] | None = None,
+    strategy: str | None = None,
 ) -> dict[str, Any]:
-    config = _config if _config is not None else load_config()
+    config = load_config()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if scihub_enabled is not None:
         config["scihub_enabled"] = scihub_enabled
+
+    if strategy is not None:
+        config["download_strategy"] = strategy
 
     target_dir = Path(output_dir) if output_dir else Path(config["output_dir"])
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -627,7 +636,14 @@ def download(
         log.info("   [L0] arXiv direct")
         result = try_arxiv(identifier, output_path, config)
         if result:
-            return _finalize_result(result, identifier, identifier, target_dir, config, rename=rename, bibtex=bibtex)
+            _update_doi_index(target_dir, identifier, Path(result.get("file", "")))
+            if rename:
+                _auto_rename(result, identifier, config, doi=identifier, target_dir=target_dir)
+            cache_set(identifier, result, config)
+            if bibtex:
+                from ..bibtex import fetch_bibtex
+                result["bibtex"] = fetch_bibtex(identifier, config)
+            return result
         return fail(identifier, "arXiv PDF not available")
 
     doi = normalize_doi(identifier)
@@ -639,28 +655,51 @@ def download(
             [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
         )
         if result:
-            return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
+            _update_doi_index(target_dir, doi, Path(result.get("file", "")))
+            if rename:
+                _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
+            cache_set(identifier, result, config)
+            if bibtex:
+                from ..bibtex import fetch_bibtex
+                result["bibtex"] = fetch_bibtex(doi, config)
+            return result
 
     # Phase 2: Institutional access — only when Phase 1 failed
-    if _institutional:
-        inst_sources = _build_institutional_sources(doi, config, use_instsci=use_instsci)
+    # Skip institutional fallback for grey_only/scihub_only strategy
+    if _institutional and config.get("download_strategy") not in ("scihub_only", "grey_only"):
+        inst_sources = _build_institutional_sources(doi, config, use_vpnsci=use_vpnsci)
         if inst_sources:
             log.info("   Phase 1 failed, trying institutional access...")
             result = _run_tiers_parallel(
                 [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30
             )
             if result:
-                return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
+                _update_doi_index(target_dir, doi, Path(result.get("file", "")))
+                if rename:
+                    _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
+                cache_set(identifier, result, config)
+                if bibtex:
+                    from ..bibtex import fetch_bibtex
+                    result["bibtex"] = fetch_bibtex(doi, config)
+                return result
 
-    # Last resort: check if a PDF was downloaded by the institutional bridge
-    # (e.g., WebVPN logged in but result wasn't captured due to timeout)
+    # Late capture: wait briefly for browser downloads that complete after race timeout,
+    # then scan for any PDFs that were saved to disk by racing threads.
+    import time as _time
+    _time.sleep(2)  # grace period for browser threads to finish writing
     for p in target_dir.glob(f"{safe_filename(identifier)}*.pdf"):
         if p.stat().st_size > 5000:
             result = {
                 "success": True, "identifier": identifier, "doi": doi,
-                "file": str(p), "source": "institutional:late_capture",
+                "file": str(p), "source": "late_capture",
             }
-            return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
+            cache_set(identifier, result, config)
+            if rename:
+                _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
+            if bibtex:
+                from ..bibtex import fetch_bibtex
+                result["bibtex"] = fetch_bibtex(identifier, config)
+            return result
 
     # Build actionable guidance based on what was tried
     guidance = _build_failure_guidance(doi, config)
@@ -756,8 +795,8 @@ def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
         pass
 
     # Check WebVPN
-    if not config.get("instsci_enabled"):
-        tips.append("有高校账号？运行: scansci-pdf config_set instsci_enabled true")
+    if not config.get("vpnsci_enabled"):
+        tips.append("有高校账号？运行: scansci-pdf config_set vpnsci_enabled true")
 
     # Manual fallback
     tips.append(f"手动下载: https://sci-hub.mksa.top/{doi}")
@@ -884,7 +923,7 @@ def _batch_institutional_phase(
     if not grouped and not ungrouped:
         return
 
-    institution_query = config.get("instsci_school", "")
+    institution_query = config.get("vpnsci_school", "")
     login_timeout = config.get("browser_login_timeout", 300)
 
     # Process each publisher group
@@ -966,7 +1005,7 @@ def _batch_institutional_phase(
             _save_progress(batch_id, doi, result)
             continue
         log.info(f"   [Batch] Phase 2 fallback: {doi}")
-        result = download(doi, output_dir, scihub_enabled=config.get("scihub_enabled", True), use_instsci=True, _institutional=True)
+        result = download(doi, output_dir, scihub_enabled=config.get("scihub_enabled", True), use_vpnsci=True, _institutional=True)
         results_map[doi] = result
         _save_progress(batch_id, doi, result)
 
@@ -977,7 +1016,7 @@ def batch_download(
     *,
     scihub_enabled: bool | None = None,
     use_tor: bool = False,
-    use_instsci: bool = False,
+    use_vpnsci: bool = False,
     progress_callback: Any = None,
     batch_id: str | None = None,
     resume: bool = True,
@@ -1094,7 +1133,7 @@ def batch_download(
             if elapsed < delay_between:
                 time.sleep(delay_between - elapsed)
             last_download_time[0] = time.time()
-        return download(ident, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_instsci=use_instsci, _institutional=False, _config=config)
+        return download(ident, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, _institutional=False)
 
     results: list[dict[str, Any] | None] = [None] * total
     with ThreadPoolExecutor(max_workers=workers) as pool:

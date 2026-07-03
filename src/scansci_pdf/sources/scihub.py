@@ -31,15 +31,15 @@ except ImportError:
 
 log = get_logger()
 
-# Track domains that require CloakBrowser (in-memory, per session)
+# Track domains that require browser bypass (in-memory, per session)
 _browser_domains: set[str] = set()
 
 def _mark_browser_required(domain: str, config: dict[str, Any]) -> None:
-    """Mark a domain as requiring CloakBrowser for future ranking."""
+    """Mark a domain as requiring browser bypass for future ranking."""
     _browser_domains.add(domain)
 
 def _is_browser_domain(domain: str) -> bool:
-    """Check if domain requires CloakBrowser."""
+    """Check if domain requires browser bypass."""
     return domain in _browser_domains
 
 _PROBE_TTL_HOURS = 4
@@ -79,7 +79,7 @@ def _probe_scihub_domains(config: dict[str, Any]) -> None:
     if now - last_probe < _PROBE_TTL_HOURS * 3600:
         return
 
-    proxy = select_proxy_for_url("https://sci-hub.st", config)
+    proxy = select_proxy_for_url("https://sci-hub.mksa.top", config)
     domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
     timeout = (5, 10)
 
@@ -93,12 +93,134 @@ def _probe_scihub_domains(config: dict[str, Any]) -> None:
 
 
 def _is_browser_available(config: dict[str, Any]) -> bool:
-    """Check if CloakBrowser is reachable."""
+    """Check if CloakBrowser is available."""
     try:
         from ..browser_engine import is_available
         return is_available(config)
     except Exception:
         return False
+
+
+def _solve_altcha_and_reload(
+    solve_result: dict[str, Any],
+    landing_url: str,
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Solve ALTCHA anti-bot verification on a Sci-Hub page, then reload and extract PDF.
+
+    ALTCHA is a proof-of-work CAPTCHA used by sci-hub.ru. The page shows a checkbox
+    labelled "不是" (No/Not a robot). After clicking, a proof-of-work computation runs,
+    then the page shows "您是人类！" (You are human!). Once verified, we reload the page
+    to get the actual paper content.
+    """
+    import time as _time
+
+    try:
+        from ..browser_engine import get_browser_page
+    except ImportError:
+        log.info("   [altcha] browser engine not available for ALTCHA bypass")
+        return None
+
+    page = None
+    try:
+        page = get_browser_page(config)
+        if not page:
+            log.info("   [altcha] could not get browser page")
+            return None
+
+        # Navigate to the landing URL
+        page.goto(landing_url, wait_until="domcontentloaded", timeout=20000)
+        _time.sleep(2)
+
+        # Find and click the ALTCHA checkbox
+        checkbox_selectors = [
+            "input[type='checkbox']",
+            "#altcha_checkbox",
+            "[id^='altcha_checkbox_']",
+        ]
+        clicked = False
+        for selector in checkbox_selectors:
+            try:
+                el = page.query_selector(selector)
+                if el:
+                    el.click(timeout=5000)
+                    clicked = True
+                    log.info(f"   [altcha] clicked checkbox: {selector}")
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            # Try clicking the "不是" div
+            try:
+                no_btn = page.query_selector("div[onclick='check()']")
+                if no_btn:
+                    no_btn.click(timeout=5000)
+                    clicked = True
+                    log.info("   [altcha] clicked '不是' button")
+            except Exception:
+                pass
+
+        if not clicked:
+            log.info("   [altcha] could not find checkbox/button to click")
+            return None
+
+        # Wait for verification to complete (poll for "您是人类" or "verified")
+        for i in range(15):
+            _time.sleep(1)
+            try:
+                body_text = page.evaluate("() => document.body ? document.body.innerText : ''")
+            except Exception:
+                continue
+            if "您是人类" in body_text or "verified" in body_text.lower():
+                log.info(f"   [altcha] verified after {i + 3}s")
+                break
+            if i % 5 == 4:
+                log.info(f"   [altcha] still verifying... ({i + 3}s)")
+
+        # Reload the page to get the actual paper content
+        log.info("   [altcha] reloading page after verification...")
+        page.goto(landing_url, wait_until="domcontentloaded", timeout=20000)
+        _time.sleep(2)
+
+        # Now try to extract PDF
+        try:
+            html = page.content()
+        except Exception:
+            log.info("   [altcha] failed to get page content after reload")
+            return None
+
+        from ..pdf_utils import is_pdf_file, success, extract_pdf_url_from_html
+        from ..browser_engine import download_pdf_via_browser
+
+        # Check for article not found
+        lower = html.lower()
+        if any(sig in lower for sig in ["article not found", "статья не найдена", "не найден"]):
+            log.info("   [altcha] article not found after verification")
+            return None
+
+        # Extract PDF URL
+        pdf_url = extract_pdf_url_from_html(html, landing_url)
+        if pdf_url:
+            log.info(f"   [altcha] found PDF: {pdf_url[:80]}")
+            if download_pdf_via_browser(pdf_url, output_path, config):
+                if is_pdf_file(output_path):
+                    return success(doi, output_path, "Sci-Hub(altcha)")
+
+        log.info("   [altcha] no PDF found after verification")
+        return None
+
+    except Exception as e:
+        log.info(f"   [altcha] error: {e}")
+        return None
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
 
 
 def _browser_first_download(
@@ -107,7 +229,7 @@ def _browser_first_download(
     output_path: Path,
     config: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Try Browser-first download for Sci-Hub. Bypasses Cloudflare/CAPTCHA."""
+    """Try browser-first download for Sci-Hub. Bypasses Cloudflare/CAPTCHA."""
     try:
         from ..browser_engine import solve_url, download_pdf_via_browser
         from ..pdf_utils import is_pdf_file, success, extract_pdf_url_from_html
@@ -132,6 +254,23 @@ def _browser_first_download(
             log.info(f"   [browser-first] article not found on {domain}")
             return None
 
+        # Check for ALTCHA anti-bot verification (used by sci-hub.ru and other mirrors)
+        if any(sig in lower for sig in ["altcha", "你是机器人吗", "not a robot"]):
+            log.info(f"   [browser-first] ALTCHA detected on {domain}, attempting bypass...")
+            try:
+                altcha_result = _solve_altcha_and_reload(result, landing_url, doi, output_path, config)
+                if altcha_result:
+                    return altcha_result
+            except Exception as e:
+                log.info(f"   [browser-first] ALTCHA bypass failed: {e}")
+
+        # Check for Cloudflare challenge page
+        if any(sig in lower for sig in ["checking your browser", "just a moment", "cf-browser-verification"]):
+            log.info(f"   [browser-first] Cloudflare challenge on {domain}, page may need more time")
+            # The solve_url should have waited, but if we still see the challenge,
+            # mark this domain as needing browser bypass for future attempts
+            return None
+
         # Check for empty embed (Sci-Hub has no PDF)
         if '<embed' in lower and 'src=""' in lower:
             log.info(f"   [browser-first] empty embed — article not in Sci-Hub database")
@@ -141,10 +280,10 @@ def _browser_first_download(
         pdf_url = extract_pdf_url_from_html(html, solution.get("url", landing_url))
         if pdf_url:
             log.info(f"   [browser-first] found PDF: {pdf_url[:80]}")
-            # Download via CloakBrowser (handles Cloudflare on PDF host too)
+            # Download via browser (handles Cloudflare on PDF host too)
             if download_pdf_via_browser(pdf_url, output_path, config):
                 if is_pdf_file(output_path):
-                    return success(doi, output_path, f"Sci-Hub(Browser)")
+                    return success(doi, output_path, f"Sci-Hub(browser)")
 
         # Check if the response itself is a PDF
         import base64
@@ -156,7 +295,7 @@ def _browser_first_download(
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(pdf_bytes)
                     if is_pdf_file(output_path):
-                        return success(doi, output_path, f"Sci-Hub(Browser)")
+                        return success(doi, output_path, f"Sci-Hub(browser)")
             except Exception:
                 pass
 
@@ -204,7 +343,7 @@ def try_scihub_domain(
                 # Use browser to bypass CAPTCHA
                 browser_resp = _try_browser(landing_url, config, resp)
                 if browser_resp is None:
-                    log.warning(f"   browser failed — is CloakBrowser running? Start: cd CloakBrowser && npm start")
+                    log.warning(f"   browser bypass failed — is CloakBrowser installed? Run: pip install cloakbrowser")
                     return None
                 # Get new content from browser response
                 resp = browser_resp
@@ -253,7 +392,9 @@ def _try_browser(
     original_resp: requests.Response,
 ) -> requests.Response | None:
     """Try CloakBrowser to bypass Cloudflare. Returns Response or None."""
-    from ..browser_engine import solve_url
+    if not _is_browser_available(config):
+        return None
+    from ..flaresolverr import solve_url
     result = solve_url(url, config)
     if not result:
         return None
@@ -298,11 +439,13 @@ def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: boo
         log.info(f"   Sci-Hub disabled")
         return None
 
-    # Browser-first pass: try a few reliable domains via CloakBrowser before HTTP
+    # Browser-first pass: try configured domains via browser before HTTP
     if _is_browser_available(config):
-        all_domains_for_browser = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
-        for domain in all_domains_for_browser[:4]:
-            landing_url = f"{domain}/{urllib.parse.quote(doi, safe='/')}"
+        # Use the first 5 domains from the user's configuration (or defaults)
+        configured_domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
+        browser_domains = configured_domains[:5]
+        for domain in browser_domains:
+            landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
             result = _browser_first_download(landing_url, doi, output_path, config)
             if result:
                 return result
@@ -310,6 +453,11 @@ def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: boo
     _probe_scihub_domains(config)
     all_domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
     stats = load_stats(config)
+
+    # Track failure reason for better diagnostic messages
+    _failure_reason = "all domains unreachable"
+    _any_reachable = False
+    _any_browser_tried = False
 
 
     if _HAS_COMPILED_CORE:
@@ -367,6 +515,7 @@ def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: boo
             record_result(domains[0], False, config)
         except Exception:
             record_result(domains[0], False, config)
+        log.info(f"   Sci-Hub: only domain {domains[0]} failed")
         return None
 
     # Try best domain first with short timeout
@@ -441,8 +590,8 @@ def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: boo
                 except OSError:
                     pass
 
-    # All clearnet domains failed — auto-retry with Tor + .onion
-    if not use_tor:
+    # All clearnet domains failed — auto-retry with Tor + .onion (only if config allows)
+    if not use_tor and config.get("use_tor_for_scihub", True):
         log.info("   Sci-Hub: all clearnet domains failed, retrying via Tor...")
         return try_scihub(doi, output_path, config, use_tor=True)
 
