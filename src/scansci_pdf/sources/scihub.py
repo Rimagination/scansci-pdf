@@ -93,7 +93,15 @@ def _probe_scihub_domains(config: dict[str, Any]) -> None:
 
 
 def _is_browser_available(config: dict[str, Any]) -> bool:
-    """Check if CloakBrowser is available."""
+    """Check if CloakBrowser is available. Returns False in asyncio context."""
+    # Playwright Sync API cannot run inside a running asyncio event loop, so
+    # don't even try — return False and let HTTP-only sources handle it.
+    try:
+        import asyncio
+        asyncio.get_running_loop()
+        return False
+    except RuntimeError:
+        pass
     try:
         from ..browser_engine import is_available
         return is_available(config)

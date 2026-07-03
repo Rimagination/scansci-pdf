@@ -21,6 +21,7 @@ fast = ["lxml>=4.9"]
 vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
 cloakbrowser = ["cloakbrowser>=0.3"]
+web = ["fastapi>=0.115", "jinja2>=3.1"]
 dev = ["pytest>=8.0"]
 compile = ["cython>=3.0"]
 

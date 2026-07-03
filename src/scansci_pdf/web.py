@@ -21,6 +21,7 @@ log = get_logger()
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
+templates.env.cache_size = 0
 
 app = FastAPI(title="ScanSci PDF", description="Academic paper downloader web UI")
 
@@ -119,9 +120,10 @@ async def api_download(req: DownloadRequest):
                 status_code=404,
             )
 
-    # Run download in thread pool to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: download(identifier))
+    # Run download in a worker thread to avoid blocking the event loop.
+    # asyncio.to_thread is the modern replacement for run_in_executor(None, fn)
+    # and avoids deprecation warnings around get_event_loop() in async context.
+    result = await asyncio.to_thread(download, identifier)
 
     if result.get("success"):
         file_path = result.get("file", "")

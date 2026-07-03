@@ -36,8 +36,12 @@ def run_server(
         log.info("Starting in stdio mode")
         mcp_app.run(transport="stdio")
     elif mode == ServerMode.WEB:
-        import uvicorn
-        from .web import app as web_app
+        try:
+            import uvicorn
+            from .web import app as web_app
+        except ModuleNotFoundError as e:
+            typer.echo(f"  Missing dependency: {e.name}. Install with: pip install 'scansci-pdf[web]'")
+            raise typer.Exit(1)
         log.info(f"Starting web UI on http://{host}:{port}")
         uvicorn.run(web_app, host=host, port=port)
     else:
@@ -60,8 +64,12 @@ def web_server(
     port: int = typer.Option(8080, help="Web server port"),
 ) -> None:
     """Start the ScanSci PDF web UI for browser-based paper downloading."""
-    import uvicorn
-    from .web import app as web_app
+    try:
+        import uvicorn
+        from .web import app as web_app
+    except ModuleNotFoundError as e:
+        typer.echo(f"  Missing dependency: {e.name}. Install with: pip install 'scansci-pdf[web]'")
+        raise typer.Exit(1)
     print(f"  Starting ScanSci PDF Web UI on http://{host}:{port}")
     print(f"  Open http://localhost:{port} in your browser")
     uvicorn.run(web_app, host=host, port=port)

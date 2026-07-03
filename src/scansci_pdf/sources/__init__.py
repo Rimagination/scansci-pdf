@@ -725,7 +725,7 @@ def download(
     except Exception:
         error_type, error_action = "", ""
 
-    hint: dict[str, Any] = {"manual_url": f"https://sci-hub.mksa.top/{doi}", "guidance": guidance}
+    hint: dict[str, Any] = {"manual_url": f"https://sci-hub.ru/{doi}", "guidance": guidance}
 
     reason = "no PDF found"
     if error_type == "paywall":
@@ -813,7 +813,7 @@ def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
         tips.append("有高校账号？运行: scansci-pdf config_set vpnsci_enabled true")
 
     # Manual fallback
-    tips.append(f"手动下载: https://sci-hub.mksa.top/{doi}")
+    tips.append(f"手动下载: https://sci-hub.ru/{doi}")
 
     # Network diagnostic
     tips.append("运行网络诊断: scansci-pdf network_diagnose")
