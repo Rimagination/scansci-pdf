@@ -18,7 +18,6 @@ import sys
 import tarfile
 import threading
 import time
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +33,38 @@ DEFAULT_OBFS4_BRIDGES = [
     "obfs4 51.81.223.139:50000 B3A09F6EE345B6B246D3C462FF6643BB30D639FF cert=+yoRAwJXN3Ge1mH2kDjDRTXWbJa1yANPN4kvP1H4ozuFr3S9NbfPQ6YMclexjGqIIAFJcA iat-mode=0",
 ]
 
-# Mirror URLs for downloading Tor Expert Bundle
+# Mirror URLs for downloading Tor Expert Bundle.
+# Files live under {mirror}/torbrowser/{version}/ on both mirrors.
 TOR_DOWNLOAD_MIRRORS = [
-    "https://dist.torproject.org",
-    "https://archive.torproject.org/tor-package-archive",
+    "https://dist.torproject.org/torbrowser",
+    "https://archive.torproject.org/tor-package-archive/torbrowser",
 ]
 
-TOR_VERSION = "14.0.4"
+# Tor Browser version shipping the Expert Bundle. Bump when torproject.org
+# cuts a new stable release. Verified 2026-07-04 (15.0.17, tor 0.4.9.11).
+TOR_VERSION = "15.0.17"
+
+
+def _download_url() -> tuple[str, str]:
+    """Get the download URL path and filename for the Tor Expert Bundle.
+
+    Returns ``(url_path, filename)`` where ``url_path`` is relative to a
+    mirror root (e.g. ``"15.0.17"``) and ``filename`` is the archive name.
+    All Expert Bundle archives are .tar.gz on every platform since 0.4.7.x.
+    """
+    system = platform.system()
+    machine = platform.machine().lower()
+
+    # Map (system, machine) → the os-arch slug used in the filename.
+    if system == "Windows":
+        os_arch = "windows-x86_64"  # i686 build retired; x86_64 covers all supported Windows
+    elif system == "Darwin":
+        os_arch = "macos-aarch64" if machine in ("arm64", "aarch64") else "macos-x86_64"
+    else:
+        os_arch = "linux-aarch64" if machine in ("aarch64", "arm64") else "linux-x86_64"
+
+    filename = f"tor-expert-bundle-{os_arch}-{TOR_VERSION}.tar.gz"
+    return TOR_VERSION, filename
 
 
 def _tor_dir(config: dict[str, Any]) -> Path:
@@ -70,24 +94,25 @@ def _tor_binary(config: dict[str, Any]) -> Path | None:
 
 
 def _download_url() -> tuple[str, str]:
-    """Get the download URL and filename for Tor Expert Bundle."""
+    """Get the download URL path and filename for the Tor Expert Bundle.
+
+    Returns ``(version_path, filename)`` where ``version_path`` is the
+    relative path under a mirror root (the Tor Browser version) and
+    ``filename`` is the archive name. All Expert Bundle archives are
+    .tar.gz on every platform (the legacy .zip was retired with 0.4.7.x).
+    """
     system = platform.system()
     machine = platform.machine().lower()
 
     if system == "Windows":
-        filename = f"tor-expert-bundle-{TOR_VERSION}-windows-x86_64.zip"
+        os_arch = "windows-x86_64"
     elif system == "Darwin":
-        if machine in ("arm64", "aarch64"):
-            filename = f"tor-expert-bundle-{TOR_VERSION}-macos-aarch64.tar.gz"
-        else:
-            filename = f"tor-expert-bundle-{TOR_VERSION}-macos-x86_64.tar.gz"
+        os_arch = "macos-aarch64" if machine in ("arm64", "aarch64") else "macos-x86_64"
     else:
-        if machine in ("aarch64", "arm64"):
-            filename = f"tor-expert-bundle-{TOR_VERSION}-linux-aarch64.tar.gz"
-        else:
-            filename = f"tor-expert-bundle-{TOR_VERSION}-linux-x86_64.tar.gz"
+        os_arch = "linux-aarch64" if machine in ("aarch64", "arm64") else "linux-x86_64"
 
-    return filename
+    filename = f"tor-expert-bundle-{os_arch}-{TOR_VERSION}.tar.gz"
+    return TOR_VERSION, filename
 
 
 def download_tor(config: dict[str, Any]) -> Path | None:
@@ -95,18 +120,16 @@ def download_tor(config: dict[str, Any]) -> Path | None:
     tor_dir = _tor_dir(config)
     tor_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = _download_url()
-    is_zip = filename.endswith(".zip")
-    is_targz = filename.endswith(".tar.gz")
-
+    version_path, filename = _download_url()
     # Try mirrors, using proxy if configured
     import requests as req
     proxies = {}
     proxy = os.environ.get("SCANSCI_PDF_PROXY") or os.environ.get("HTTPS_PROXY") or config.get("network_proxy")
     if proxy:
         proxies = {"http": proxy, "https": proxy}
+    # Expert Bundle archives are .tar.gz on every platform now.
     for mirror in TOR_DOWNLOAD_MIRRORS:
-        url = f"{mirror}/{filename}"
+        url = f"{mirror}/{version_path}/{filename}"
         try:
             log.info(f"Downloading Tor from {url}")
             resp = req.get(url, timeout=300, stream=True, proxies=proxies)
@@ -125,12 +148,8 @@ def download_tor(config: dict[str, Any]) -> Path | None:
             data.seek(0)
             log.info(f"Extracting Tor to {tor_dir}")
 
-            if is_zip:
-                with zipfile.ZipFile(data) as zf:
-                    zf.extractall(tor_dir)
-            elif is_targz:
-                with tarfile.open(fileobj=data, mode="r:gz") as tf:
-                    tf.extractall(tor_dir)
+            with tarfile.open(fileobj=data, mode="r:gz") as tf:
+                tf.extractall(tor_dir)
 
             # Find and set executable permission on non-Windows
             binary = _tor_binary(config)
