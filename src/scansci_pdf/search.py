@@ -5,7 +5,19 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+import requests
+
 from .config import load_config
+
+_SEARCH_TIMEOUT = 30  # seconds, longer than default because these are public APIs
+_USER_AGENT = "scansci-pdf/1.5 (https://github.com/Rimagination/scansci-pdf)"
+
+
+def _plain_session() -> requests.Session:
+    """A requests session without proxy, for public academic APIs."""
+    s = requests.Session()
+    s.headers.update({"User-Agent": _USER_AGENT, "mailto": "scansci-pdf@example.invalid"})
+    return s
 
 
 def _reconstruct_abstract(inverted_index: dict | None) -> str:
@@ -26,10 +38,8 @@ def _search_openalex(
     year_from: int | None = None, year_to: int | None = None,
     sort: str | None = None,
 ) -> list[dict[str, Any]]:
-    from .network import _get_session, request_timeout
-    config = load_config()
     try:
-        session = _get_session(config)
+        session = _plain_session()
         params: dict[str, Any] = {"search": query, "per_page": limit}
         filters = []
         if year_from or year_to:
@@ -44,15 +54,20 @@ def _search_openalex(
         resp = session.get(
             "https://api.openalex.org/works",
             params=params,
-            timeout=request_timeout(config),
+            timeout=_SEARCH_TIMEOUT,
         )
         if resp.status_code != 200:
             return []
         data = resp.json()
     except Exception:
         return []
+    return _parse_openalex_works(data.get("results", []))
+
+
+def _parse_openalex_works(works: list[dict]) -> list[dict[str, Any]]:
+    """Parse OpenAlex works into unified result format."""
     results = []
-    for work in data.get("results", []):
+    for work in works:
         doi_raw = work.get("doi", "") or ""
         doi = doi_raw.replace("https://doi.org/", "") if doi_raw else ""
         if not doi:
@@ -80,14 +95,151 @@ def _search_openalex(
     return results
 
 
-def search_papers(
-    query: str,
+def _lookup_author_id(name: str) -> tuple[str | None, str, int, int]:
+    """Resolve an author name to an OpenAlex author ID.
+
+    Returns (author_id, display_name, works_count, cited_by_count).
+    author_id is None if no match found.
+
+    Matching strategy:
+    1. Exact case-insensitive name match
+    2. If none, pick by highest works_count
+    """
+    try:
+        session = _plain_session()
+        resp = session.get(
+            "https://api.openalex.org/authors",
+            params={"search": name, "per_page": 10},
+            timeout=_SEARCH_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None, "", 0, 0
+        data = resp.json()
+    except Exception:
+        return None, "", 0, 0
+
+    candidates = data.get("results", [])
+    if not candidates:
+        return None, "", 0, 0
+
+    name_lower = name.lower().strip()
+    # Generate name variants (handle Chinese/Western name order)
+    name_parts = name_lower.split()
+    name_variants = {name_lower}
+    if len(name_parts) == 2:
+        # "Fang Jingyun" ↔ "Jingyun Fang"
+        name_variants.add(f"{name_parts[1]} {name_parts[0]}")
+    elif len(name_parts) >= 3:
+        # Try last-name-first ordering for 3+ word names
+        name_variants.add(f"{name_parts[-1]} {' '.join(name_parts[:-1])}")
+
+    # First: try exact case-insensitive name match (including variants)
+    exact_matches = [
+        a for a in candidates
+        if (a.get("display_name") or "").lower().strip() in name_variants
+    ]
+    if exact_matches:
+        best = max(
+            exact_matches,
+            key=lambda a: (a.get("cited_by_count", 0), a.get("works_count", 0)),
+        )
+    else:
+        # Fallback: highest cited_by_count (prefer authoritative consolidated profiles)
+        best = max(
+            candidates,
+            key=lambda a: (a.get("cited_by_count", 0), a.get("works_count", 0)),
+        )
+
+    author_id = best.get("id", "").split("/")[-1] if best.get("id") else ""
+    display = best.get("display_name", name)
+    works = best.get("works_count", 0)
+    cited = best.get("cited_by_count", 0)
+    return (author_id if author_id else None, display, works, cited)
+
+
+def _search_openalex_by_author(
+    author_id: str,
     limit: int = 10,
     year_from: int | None = None,
     year_to: int | None = None,
     sort: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search papers from OpenAlex + Semantic Scholar + Crossref in parallel."""
+    """Search OpenAlex works by author ID."""
+    try:
+        session = _plain_session()
+        filters = [f"authorships.author.id:{author_id}"]
+        if year_from or year_to:
+            y_from = year_from or 1900
+            y_to = year_to or 2026
+            filters.append(f"publication_year:{y_from}-{y_to}")
+
+        params: dict[str, Any] = {
+            "filter": ",".join(filters),
+            "per_page": limit,
+        }
+        if sort:
+            sort_key = sort if ":" in sort else f"{sort}:desc"
+            params["sort"] = sort_key
+
+        resp = session.get(
+            "https://api.openalex.org/works",
+            params=params,
+            timeout=_SEARCH_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
+    return _parse_openalex_works(data.get("results", []))
+
+
+def search_papers(
+    query: str = "",
+    limit: int = 10,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    sort: str | None = None,
+    *,
+    author: str | None = None,
+    author_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search papers from OpenAlex + Semantic Scholar + Crossref in parallel.
+
+    When `author` or `author_id` is provided, searches by author instead of keyword.
+    - `author`: resolves author name → OpenAlex author ID → works
+    - `author_id`: directly searches works by OpenAlex author ID
+    """
+    # --- Author-based search (fast path) ---
+    if author_id or author:
+        matched_name = None
+        matched_works = 0
+        matched_cited = 0
+        if author and not author_id:
+            resolved, matched_name, matched_works, matched_cited = _lookup_author_id(author)
+            if not resolved:
+                return []
+            author_id = resolved
+
+        if author_id:
+            results = _search_openalex_by_author(
+                author_id, limit=limit,
+                year_from=year_from, year_to=year_to, sort=sort,
+            )
+            # Attach author match metadata to first result
+            if results and (matched_name or author):
+                results[0]["_author_match"] = {
+                    "name": matched_name or author or "",
+                    "id": author_id,
+                    "works_count": matched_works,
+                    "cited_by_count": matched_cited,
+                }
+            return results
+
+    # --- Keyword-based search (existing parallel path) ---
+    if not query:
+        return []
+
     all_results: list[dict[str, Any]] = []
     per_source = max(5, limit)
 
@@ -138,10 +290,8 @@ def _search_semantic_scholar(
     year_from: int | None = None, year_to: int | None = None,
 ) -> list[dict[str, Any]]:
     import time
-    from .network import _get_session, request_timeout
-    config = load_config()
     try:
-        session = _get_session(config)
+        session = _plain_session()
         params: dict[str, Any] = {
             "query": query,
             "limit": limit,
@@ -159,7 +309,7 @@ def _search_semantic_scholar(
             resp = session.get(
                 "https://api.semanticscholar.org/graph/v1/paper/search",
                 params=params,
-                timeout=request_timeout(config),
+                timeout=_SEARCH_TIMEOUT,
             )
             if resp.status_code == 200:
                 break
@@ -199,10 +349,8 @@ def _search_crossref(
     query: str, limit: int = 10,
     year_from: int | None = None, year_to: int | None = None,
 ) -> list[dict[str, Any]]:
-    from .network import _get_session, request_timeout
-    config = load_config()
     try:
-        session = _get_session(config)
+        session = _plain_session()
         params: dict[str, Any] = {
             "query": query,
             "rows": limit,
@@ -219,7 +367,7 @@ def _search_crossref(
         resp = session.get(
             "https://api.crossref.org/works",
             params=params,
-            timeout=request_timeout(config),
+            timeout=_SEARCH_TIMEOUT,
         )
         if resp.status_code != 200:
             return []

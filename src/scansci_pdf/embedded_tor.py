@@ -271,20 +271,32 @@ class EmbeddedTor:
 # Global singleton for embedded Tor process
 _embedded_tor: EmbeddedTor | None = None
 _tor_lock = threading.Lock()
+_tor_unavailable_since: float = 0.0  # timestamp when Tor last failed
+_TOR_UNAVAILABLE_TTL = 3600  # 1 hour before retrying Tor download
 
 
 def get_embedded_tor(config: dict[str, Any]) -> EmbeddedTor | None:
-    """Get or create a global embedded Tor instance."""
-    global _embedded_tor
+    """Get or create a global embedded Tor instance.
+
+    If Tor download previously failed, skips retry for 1 hour to avoid
+    blocking on unreachable torproject.org mirrors.
+    """
+    global _embedded_tor, _tor_unavailable_since
     with _tor_lock:
         if _embedded_tor and _embedded_tor.is_running():
             return _embedded_tor
+
+        # Fast skip: Tor download previously failed within the TTL
+        if _tor_unavailable_since and (time.time() - _tor_unavailable_since) < _TOR_UNAVAILABLE_TTL:
+            return None
 
         use_bridges = config.get("tor_use_bridges", False)
         tor = EmbeddedTor(config, use_bridges=use_bridges)
         if tor.start():
             _embedded_tor = tor
+            _tor_unavailable_since = 0.0  # reset on success
             return tor
+        _tor_unavailable_since = time.time()  # cache failure timestamp
         return None
 
 

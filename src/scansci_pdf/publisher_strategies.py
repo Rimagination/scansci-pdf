@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,10 @@ log = get_logger()
 # Module-level error tracking for caller introspection
 _last_error_type: str = ""
 _last_error_action: str = ""
+
+# Global lock to prevent multiple visible browser windows in parallel racing
+_visible_browser_lock = threading.Lock()
+_visible_browser_active = False
 
 
 def get_last_error() -> tuple[str, str]:
@@ -77,23 +82,24 @@ def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict |
     """Open visible CloakBrowser with persistent profile. Falls back to ephemeral."""
     if not _HAS_CLOAKBROWSER:
         raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
-    from .browser_engine import _build_browser_args
     profile_dir = _get_profile_dir(config, publisher)
     browser = None
-    args = _build_browser_args(config)
 
     try:
         ctx = launch_persistent_context(
             str(profile_dir),
             headless=False, humanize=True,
-            args=args,
+            args=["--disable-features=CrossOriginOpenerPolicy"],
         )
         page = ctx.new_page()
         log.info(f"   [{publisher}] persistent browser profile: {profile_dir}")
+        # Ensure cookies are loaded from saved file
+        _restore_cookies_to_context(ctx, config)
     except Exception as _e:
         log.info(f"   [{publisher}] persistent context unavailable ({_e}), using ephemeral")
         _vp = viewport or {"width": 1440, "height": 900}
-        browser = launch(headless=False, humanize=True, args=args)
+        browser = launch(headless=False, humanize=True,
+                         args=["--disable-features=CrossOriginOpenerPolicy"])
         ctx = browser.new_context(viewport=_vp)
         _restore_cookies_to_context(ctx, config)
         page = ctx.new_page()
@@ -115,7 +121,7 @@ def _save_all_cookie_formats(
     publisher: str,
     config: dict[str, Any],
 ) -> None:
-    """Save cookies in all formats: JSON, Netscape, publisher subset, + bridge to CloakBrowser."""
+    """Save cookies in all formats: JSON, Netscape, publisher subset, + bridge to browser-engine."""
     from .config import DATA_DIR
     from .browser_cookies import cookies_to_netscape, _save_cookies_json
 
@@ -134,7 +140,7 @@ def _save_all_cookie_formats(
     (carsi_dir / f"{publisher.lower()}.json").write_text(
         json.dumps(cookie_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # 2. Save Netscape format (for CloakBrowser import)
+    # 2. Save Netscape format (for browser-engine import)
     netscape_text = cookies_to_netscape(cookies)
     netscape_file = cache_dir / "publisher_cookies.txt"
     netscape_file.write_text(netscape_text, encoding="utf-8")
@@ -149,27 +155,28 @@ def _save_all_cookie_formats(
         "aps.org", "journals.aps.org", "aip.org", "pubs.aip.org",
         "dl.acm.org", "acm.org", "science.org", "sciencemag.org",
         "ascelibrary.org", "sagepub.com", "journals.sagepub.com",
+        "royalsocietypublishing.org", "copernicus.org",
     ]
     pub_cookies = [c for c in cookie_data
                    if any(c.get("domain", "").endswith(d) for d in _pub_domains)]
     if pub_cookies:
         _save_cookies_json(pub_cookies, cache_dir / "publisher_cookies.json")
 
-    # 4. Bridge to CloakBrowser headless service
+    # 4. Bridge to browser-engine headless service
     try:
         from .browser_engine import import_cookies, is_available
         if is_available(config):
             imported = import_cookies(str(netscape_file), config)
-            log.info(f"   [{publisher}] bridged {imported} cookies to CloakBrowser service")
+            log.info(f"   [{publisher}] bridged {imported} cookies to browser-engine service")
     except Exception as _e:
-        log.info(f"   [{publisher}] CloakBrowser bridge note: {_e}")
+        log.info(f"   [{publisher}] browser-engine bridge note: {_e}")
 
     log.info(f"   [{publisher}] saved {len(cookies)} cookies in all formats")
 
 
 def _detect_paywall(html: str, status_code: int = 0) -> bool:
     """Detect if the page is a paywall/login wall rather than anti-bot challenge."""
-    lower = html[:50000].lower()
+    lower = html.lower()
     # Paywall indicators
     paywall_signals = [
         "sign in to access", "login to access", "institutional access",
@@ -208,7 +215,7 @@ def _has_publisher_cookies(config: dict[str, Any]) -> bool:
 
 
 def _inject_cookies_to_tab(tab_id: str, config: dict[str, Any], publisher: str) -> None:
-    """Inject saved publisher + CARSI cookies into CloakBrowser session."""
+    """Inject saved publisher + CARSI cookies into browser-engine session."""
     from .browser_engine import import_cookies
     from .config import DATA_DIR
     cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
@@ -244,7 +251,7 @@ def _inject_cookies_to_tab(tab_id: str, config: dict[str, Any], publisher: str) 
 def _try_institutional_login(tab_id: str, config: dict[str, Any], publisher: str) -> bool:
     """Try institutional login (OpenAthens/CARSI) when paywall detected.
 
-    Works within the existing CloakBrowser tab:
+    Works within the existing browser-engine tab:
     1. Find and click "Institutional login" / SSO link
     2. Search for configured institution
     3. Wait for user to complete CAS login
@@ -347,7 +354,7 @@ def _try_institutional_login(tab_id: str, config: dict[str, Any], publisher: str
     needs_login = any(x in current_url.lower() for x in _ak) or any(x in current_title for x in _at)
 
     if needs_login:
-        # CloakBrowser is headless — user can't see the tab
+        # browser-engine is headless — user can't see the tab
         # Open a visible browser window for the CAS login
         log.info(f"   [{publisher}] CAS login required — opening visible browser...")
         return _visible_institutional_login(current_url, config, publisher, idp_name, idp_en, tab_id)
@@ -524,9 +531,9 @@ def _visible_browser_download(
                         pass
 
         # Wait for Cloudflare challenge to resolve (visible browser can pass it)
-        from .network import is_cloudflare_challenge
         for _cf_wait in range(12):
-            if is_cloudflare_challenge(page.title() or ""):
+            _cf_title = (page.title() or "").lower()
+            if any(_sig in _cf_title for _sig in ("just a moment", "attention required", "verify", "security check", "请稍候", "正在验证", "checking", "cloudflare")):
                 log.info(f"   [{publisher}] Cloudflare challenge detected, waiting... ({_cf_wait+1}/12)")
                 time.sleep(5)
             else:
@@ -635,7 +642,7 @@ def _visible_browser_download(
         log.info(f"   [{publisher}] login successful, downloading PDF...")
         time.sleep(3)
 
-        # Save cookies for future use (all formats + bridge to CloakBrowser)
+        # Save cookies for future use (all formats + bridge to browser-engine)
         try:
             cookies = context.cookies()
             _save_all_cookie_formats(cookies, publisher, config)
@@ -794,6 +801,27 @@ def _direct_pdf_urls(doi: str, publisher: str) -> list[str]:
     elif publisher == "ACM":
         urls.append(f"https://dl.acm.org/doi/pdf/{doi}")
 
+    elif publisher == "SAGE":
+        # DOI-resolved host may be journals.sagepub.com or sage.cnpereading.com
+        urls.append(f"https://journals.sagepub.com/doi/pdf/{doi}?download=true")
+        urls.append(f"https://journals.sagepub.com/doi/pdf/{doi}")
+
+    elif publisher == "ASCE":
+        doi_upper = doi.upper()
+        urls.append(f"https://ascelibrary.org/doi/pdf/{doi_upper}?download=true")
+        urls.append(f"https://ascelibrary.org/doi/pdf/{doi_upper}")
+        urls.append(f"https://ascelibrary.org/doi/pdf/{doi}?download=true")
+
+    elif publisher == "Royal Society":
+        urls.append(f"https://royalsocietypublishing.org/doi/pdf/{doi}")
+        urls.append(f"https://royalsocietypublishing.org/doi/epdf/{doi}")
+
+    elif publisher == "Copernicus":
+        # Copernicus uses journal-specific subdomains; resolve DOI first
+        # Typical DOI: 10.5194/hess-22-3433-2018
+        urls.append(f"https://www.copernicus.org/publications/{doi}")
+        urls.append(f"https://www.copernicus.org/articles/{doi}")
+
     return urls
 
 
@@ -876,6 +904,27 @@ _PDF_LINK_SELECTORS: dict[str, list[str]] = {
         'a[href*="/doi/pdf/"]',
         'a[title*="PDF" i]',
     ],
+    "SAGE": [
+        'a[href*="/doi/pdf/"]',
+        'a[title*="PDF" i]',
+        'a[href*=".pdf"]',
+    ],
+    "ASCE": [
+        'a[href*="/doi/pdf/"]',
+        'a[title*="PDF" i]',
+        'a[href*="download=true"]',
+    ],
+    "Royal Society": [
+        'a[href*="/doi/pdf/"]',
+        'a[href*="/doi/epdf/"]',
+        'a[title*="PDF" i]',
+    ],
+    "Copernicus": [
+        'a[href*="/pdf"]',
+        'a[href*=".pdf"]',
+        'a[title*="PDF" i]',
+        'a[class*="pdf"]',
+    ],
 }
 
 # ============================================================
@@ -927,7 +976,9 @@ def _chinese_to_pinyin_token(name: str) -> str:
         name = name.replace(suffix, "")
     return name
 
-# Chinese → English university name mapping for institution search (CARSI/OpenAthens WAYF)
+# Chinese → English university name mapping for institution search (CARSI/OpenAthens WAYF).
+# This is a lookup table used by _translate_institution_name(). Order is not significant —
+# the tool does NOT default to any school; the user must configure their own institution.
 _IDP_MAP: dict[str, str] = {
     "清华大学": "Tsinghua", "北京大学": "Peking", "浙江大学": "Zhejiang",
     "复旦大学": "Fudan", "上海交通大学": "Shanghai Jiao Tong",
@@ -1276,6 +1327,290 @@ def _extract_pdf_from_page(
 def _is_campus_network(config: dict[str, Any]) -> bool:
     """Check if user is on campus network (IP-authenticated access)."""
     return config.get("is_campus_network", False)
+
+
+def _browser_download_visible(
+    doi: str,
+    article_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    publisher: str,
+) -> bool:
+    """Launch visible CloakBrowser to download PDF when browser service is offline.
+
+    Opens a visible browser window, navigates to the article page, finds the
+    PDF link via CSS selectors, and downloads it. If paywall is detected,
+    attempts institutional login (CARSI/OpenAthens).
+
+    Persistent browser profile keeps cookies between sessions. When session
+    cookies expire server-side, re-triggers SSO (IdP may auto-login if its
+    own session is still active).
+    """
+    from .pdf_utils import is_pdf_file
+    import base64
+
+    log.info(f"   [{publisher}] launching visible browser for {article_url[:80]}")
+
+    with _visible_browser(config, publisher) as (context, page):
+        # Intercept PDF responses during navigation
+        _captured_pdf: bytes | None = None
+        _nonlocal = {"pdf": None}
+
+        def _on_response(response):
+            try:
+                ct = response.headers.get("content-type", "")
+                url = response.url.lower()
+                if ("application/pdf" in ct or url.endswith(".pdf")) and response.status < 400:
+                    body = response.body()
+                    if body and body[:5] == b"%PDF-":
+                        _nonlocal["pdf"] = body
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
+
+        def _navigate_article():
+            """Navigate to article and return (title, html)."""
+            try:
+                page.goto(article_url, wait_until="domcontentloaded", timeout=60000)
+                time.sleep(3)
+            except Exception as e:
+                log.info(f"   [{publisher}] page load warning: {e}")
+            return page.title(), page.content()
+
+        title, html = _navigate_article()
+        log.info(f"   [{publisher}] page: '{title[:50]}' {page.url[:80]}")
+
+        # SSO login loop — handles both first login and session expiry
+        max_login_attempts = 2
+        for login_attempt in range(max_login_attempts):
+            if not _detect_paywall(html):
+                break
+
+            log.info(f"   [{publisher}] paywall detected (attempt {login_attempt + 1})")
+            idp_name = config.get("carsi_idp_name", "")
+            if not idp_name:
+                log.info(f"   [{publisher}] no carsi_idp_name configured, cannot login")
+                return False
+
+            idp_en = _IDP_MAP.get(idp_name, idp_name)
+
+            # Click SSO link
+            sso_clicked = page.evaluate("""
+                (() => {
+                    const links = [...document.querySelectorAll('a')];
+                    for (const a of links) {
+                        const href = (a.href || '').toLowerCase();
+                        const text = (a.innerText || '').toLowerCase();
+                        if (href.includes('ssostart') || href.includes('saml') || href.includes('shibboleth')
+                            || href.includes('institutional-login') || href.includes('federation')
+                            || (text.includes('institutional') && text.includes('login'))
+                            || text.includes('access through your institution')
+                            || text.includes('access through institution')) {
+                            a.click();
+                            return a.href;
+                        }
+                    }
+                    return null;
+                })()
+            """)
+            if not sso_clicked:
+                log.info(f"   [{publisher}] no SSO link found on page")
+                return False
+
+            log.info(f"   [{publisher}] clicked SSO: {str(sso_clicked)[:60]}")
+            # Wait for SSO redirects to settle (ACS → OpenAthens → IdP)
+            # Use long sleep since multiple redirects happen
+            time.sleep(15)
+
+            # Search for institution — retry on context destruction
+            for _attempt in range(3):
+                try:
+                    si = (page.query_selector('#searchInstitution')
+                          or page.query_selector('input[placeholder*="University"]')
+                          or page.query_selector('input[placeholder*="Organization"]'))
+                    if si:
+                        si.fill(idp_en)
+                        time.sleep(3)
+                        # Use keyboard to select first result (more reliable than click)
+                        si.press('ArrowDown')
+                        time.sleep(1)
+                        si.press('Enter')
+                        time.sleep(5)
+                    break
+                except Exception as e:
+                    if "navigation" in str(e).lower() or "destroyed" in str(e).lower():
+                        time.sleep(5)
+                        continue
+                    log.info(f"   [{publisher}] institution search: {e}")
+                    break
+
+            # Wait for user to complete CAS login
+            print(f"\n  请在浏览器中完成机构登录 ({idp_name})")
+            print("  登录成功后浏览器会自动跳转回文章页面\n")
+
+            logged_in = False
+            for _ in range(100):
+                time.sleep(3)
+                try:
+                    cur_title = page.title()
+                    cur_url = page.url
+                except Exception:
+                    # Page might be navigating, wait and retry
+                    time.sleep(2)
+                    continue
+                is_auth = any(x in cur_title for x in _AUTH_TITLES)
+                is_auth_url = any(x in cur_url.lower() for x in _AUTH_KEYWORDS)
+                if not is_auth and not is_auth_url:
+                    log.info(f"   [{publisher}] login successful!")
+                    logged_in = True
+                    # Save cookies
+                    try:
+                        cookies = context.cookies()
+                        _save_all_cookie_formats(cookies, publisher, config)
+                    except Exception:
+                        pass
+                    break
+
+            if not logged_in:
+                log.info(f"   [{publisher}] login not completed")
+                return False
+
+            # Reload article page after login
+            title, html = _navigate_article()
+            log.info(f"   [{publisher}] after login: '{title[:50]}'")
+
+        # Check if captured PDF from response interceptor (e.g., auto-download)
+        if _nonlocal["pdf"]:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(_nonlocal["pdf"])
+            if is_pdf_file(output_path):
+                log.info(f"   [{publisher}] PDF captured via response interceptor")
+                return True
+
+        # Find PDF link
+        pdf_url = _find_pdf_link(page, publisher)
+        if not pdf_url:
+            log.info(f"   [{publisher}] no PDF link found on article page")
+            return False
+
+        log.info(f"   [{publisher}] found PDF: {pdf_url[:80]}")
+
+        # Download PDF: try expect_download first, then response capture
+        _nonlocal["pdf"] = None
+        try:
+            with page.expect_download(timeout=30000) as dl_info:
+                page.click(f'a[href*="pdf"]', timeout=5000)
+            download = dl_info.value
+            download.save_as(str(output_path))
+            if is_pdf_file(output_path):
+                log.info(f"   [{publisher}] download via expect_download succeeded")
+                return True
+        except Exception as e:
+            log.info(f"   [{publisher}] expect_download: {e}")
+
+        # Check response interceptor
+        if _nonlocal["pdf"]:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(_nonlocal["pdf"])
+            if is_pdf_file(output_path):
+                log.info(f"   [{publisher}] PDF captured via interceptor after click")
+                return True
+
+        # Fallback: navigate to PDF URL
+        _nonlocal["pdf"] = None
+        try:
+            resp = page.goto(pdf_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)
+            # Check interceptor first
+            if _nonlocal["pdf"]:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(_nonlocal["pdf"])
+                if is_pdf_file(output_path):
+                    log.info(f"   [{publisher}] PDF captured via interceptor after nav")
+                    return True
+            # Check response body
+            if resp and resp.status < 400:
+                body = resp.body()
+                if body and body[:5] == b"%PDF-":
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(body)
+                    if is_pdf_file(output_path):
+                        log.info(f"   [{publisher}] PDF from response body")
+                        return True
+        except Exception as e:
+            log.info(f"   [{publisher}] PDF nav error: {e}")
+
+        # Last resort: fetch API with credentials
+        try:
+            pdf_data = page.evaluate("""
+                async () => {
+                    try {
+                        const resp = await fetch(window.location.href, {
+                            credentials: 'include',
+                            headers: {'Accept': 'application/pdf'}
+                        });
+                        if (!resp.ok) return null;
+                        const ct = resp.headers.get('content-type') || '';
+                        if (ct.includes('pdf')) {
+                            const buf = await resp.arrayBuffer();
+                            return btoa(String.fromCharCode(...new Uint8Array(buf)));
+                        }
+                        return null;
+                    } catch (e) { return null; }
+                }
+            """)
+            if pdf_data:
+                pdf_bytes = base64.b64decode(pdf_data)
+                if pdf_bytes[:5] == b"%PDF-":
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(pdf_bytes)
+                    if is_pdf_file(output_path):
+                        log.info(f"   [{publisher}] PDF via fetch API")
+                        return True
+        except Exception:
+            pass
+
+        log.info(f"   [{publisher}] no PDF found via visible browser")
+        return False
+
+
+def _find_pdf_link(page: Any, publisher: str) -> str | None:
+    """Find PDF download link on article page using CSS selectors and JS."""
+    from urllib.parse import urljoin
+
+    selectors = _PDF_LINK_SELECTORS.get(publisher, _PDF_LINK_SELECTORS.get("Elsevier", []))
+    for sel in selectors:
+        try:
+            el = page.query_selector(sel)
+            if el:
+                href = el.get_attribute("href")
+                if href:
+                    if href.startswith("/"):
+                        href = urljoin(page.url, href)
+                    return href
+        except Exception:
+            continue
+
+    # JS extraction fallback
+    try:
+        url = page.evaluate("""
+            (() => {
+                const meta = document.querySelector('meta[name="citation_pdf_url"]');
+                if (meta) return meta.content;
+                const links = [...document.querySelectorAll('a')];
+                for (const a of links) {
+                    const href = (a.href || '').toLowerCase();
+                    if (href.includes('/pdf/') || href.includes('.pdf') || href.includes('pdfdirect')) {
+                        return a.href;
+                    }
+                }
+                return null;
+            })()
+        """)
+        return url
+    except Exception:
+        return None
 
 
 def _browser_download(
@@ -1686,9 +2021,30 @@ def _browser_download_with_fallback(
     if result:
         return True
 
-    # If paywall or navigate failure, try visible browser with SSO login
     err_type, err_action = get_last_error()
-    if err_type in ("paywall", "navigate_failed", "cloudflare_blocked") and config.get("carsi_idp_name"):
+
+    # browser service offline + CloakBrowser available → launch visible browser directly
+    global _visible_browser_active
+    if err_type == "browser_unavailable" and _HAS_CLOAKBROWSER:
+        if _visible_browser_lock.acquire(blocking=False):
+            try:
+                if _visible_browser_active:
+                    log.info(f"   [{publisher}] visible browser already active, skipping")
+                    return False
+                _visible_browser_active = True
+                log.info(f"   [{publisher}] browser service offline, launching CloakBrowser directly")
+                if _browser_download_visible(doi, article_url, output_path, config, publisher):
+                    return True
+            except Exception as e:
+                log.info(f"   [{publisher}] visible browser error: {e}")
+            finally:
+                _visible_browser_active = False
+                _visible_browser_lock.release()
+        else:
+            log.info(f"   [{publisher}] visible browser busy, skipping")
+
+    # Paywall/navigate failure → try visible browser with SSO login
+    elif err_type in ("paywall", "navigate_failed", "cloudflare_blocked") and config.get("carsi_idp_name"):
         log.info(f"   [{publisher}] headless failed ({err_type}), trying visible browser fallback...")
         try:
             vbd_result = _visible_browser_download(doi, article_url, output_path, config, publisher)
@@ -1745,327 +2101,6 @@ def _persist_api_cookies(session: Any, config: dict[str, Any]) -> int:
     return meaningful
 
 
-def _elsevier_header(headers: Any, name: str) -> str:
-    """Return a response header value using case-insensitive matching."""
-    if not headers:
-        return ""
-    value = headers.get(name)
-    if value is not None:
-        return str(value)
-    needle = name.lower()
-    for key, value in headers.items():
-        if str(key).lower() == needle:
-            return str(value)
-    return ""
-
-
-def _elsevier_response_is_pdf(resp: Any) -> bool:
-    content_type = _elsevier_header(getattr(resp, "headers", {}), "content-type").lower()
-    content = getattr(resp, "content", b"") or b""
-    return "pdf" in content_type or content[:5] == b"%PDF-"
-
-
-def _elsevier_response_is_xml(resp: Any) -> bool:
-    content_type = _elsevier_header(getattr(resp, "headers", {}), "content-type").lower()
-    content = (getattr(resp, "content", b"") or b"").lstrip()
-    return (
-        "xml" in content_type
-        or content.startswith(b"<?xml")
-        or content.startswith(b"<full-text-retrieval-response")
-    )
-
-
-def _elsevier_response_text(resp: Any) -> str:
-    text = getattr(resp, "text", None)
-    if isinstance(text, str):
-        return text
-    content = getattr(resp, "content", b"") or b""
-    return content.decode("utf-8", errors="replace")
-
-
-def _elsevier_xml_local_name(name: str) -> str:
-    return name.rsplit("}", 1)[-1].split(":", 1)[-1].lower()
-
-
-def _elsevier_element_text(el: Any) -> str:
-    return " ".join(" ".join(el.itertext()).split())
-
-
-def _elsevier_looks_like_pdf_eid(value: str) -> bool:
-    lowered = value.strip().lower()
-    return bool(lowered) and (lowered.endswith(".pdf") or ".pdf" in lowered)
-
-
-def _elsevier_article_eid_to_main_pdf(value: str) -> str:
-    candidate = value.strip()
-    if candidate.lower().startswith("eid:"):
-        candidate = candidate.split(":", 1)[1].strip()
-    if not candidate.startswith("1-s2.0-"):
-        return ""
-    if candidate.lower().endswith(".pdf"):
-        return candidate
-    return f"{candidate}-main.pdf"
-
-
-def _elsevier_attachment_container(el: Any, parent_map: dict[Any, Any]) -> Any:
-    node = parent_map.get(el, el)
-    while node is not None:
-        local = _elsevier_xml_local_name(str(node.tag))
-        if "attachment" in local or "object" in local:
-            return node
-        node = parent_map.get(node)
-    return parent_map.get(el, el)
-
-
-def _elsevier_attachment_metadata(el: Any) -> str:
-    parts: list[str] = []
-    for node in el.iter():
-        local = _elsevier_xml_local_name(str(node.tag))
-        text = _elsevier_element_text(node)
-        if text:
-            parts.append(f"{local}:{text}")
-        for attr_name, attr_value in node.attrib.items():
-            attr_local = _elsevier_xml_local_name(str(attr_name))
-            if attr_value:
-                parts.append(f"{attr_local}:{attr_value}")
-    return " ".join(parts).lower()
-
-
-def _elsevier_attachment_score(eid: str, metadata: str) -> int:
-    haystack = f"{eid} {metadata}".lower()
-    score = 0
-    if eid.lower().endswith(".pdf"):
-        score += 20
-    if "pdf" in haystack:
-        score += 10
-    if "main" in haystack or "full-text" in haystack or "fulltext" in haystack:
-        score += 100
-    if "page-count" in haystack or "pages" in haystack:
-        score += 5
-    if "attachment-size" in haystack or "filesize" in haystack or "file-size" in haystack:
-        score += 5
-    if any(marker in haystack for marker in (
-        "supplement", "supplementary", "mmc", "appendix", "graphical", "thumbnail",
-    )):
-        score -= 100
-    return score
-
-
-def _extract_elsevier_pdf_attachment_eids(xml_text: str) -> list[str]:
-    """Extract candidate publisher PDF object EIDs from Elsevier full-text XML."""
-    import xml.etree.ElementTree as ET
-
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        log.info(f"   [ElsevierAPI] XML parse failed: {exc}")
-        return []
-
-    parent_map = {child: parent for parent in root.iter() for child in parent}
-    candidates: list[tuple[int, int, str]] = []
-    seen: set[str] = set()
-
-    for el in root.iter():
-        found: list[str] = []
-        local = _elsevier_xml_local_name(str(el.tag))
-        if local in {"attachment-eid", "object-eid"}:
-            text = _elsevier_element_text(el)
-            if _elsevier_looks_like_pdf_eid(text):
-                found.append(text)
-        elif local in {"eid", "identifier"}:
-            text = _elsevier_element_text(el)
-            main_pdf = _elsevier_article_eid_to_main_pdf(text)
-            if main_pdf:
-                found.append(main_pdf)
-
-        for attr_name, attr_value in el.attrib.items():
-            attr_local = _elsevier_xml_local_name(str(attr_name))
-            if attr_local in {"attachment-eid", "object-eid", "eid"}:
-                value = str(attr_value).strip()
-                if _elsevier_looks_like_pdf_eid(value):
-                    found.append(value)
-                else:
-                    main_pdf = _elsevier_article_eid_to_main_pdf(value)
-                    if main_pdf:
-                        found.append(main_pdf)
-
-        for eid in found:
-            if eid in seen:
-                continue
-            seen.add(eid)
-            container = _elsevier_attachment_container(el, parent_map)
-            metadata = _elsevier_attachment_metadata(container)
-            candidates.append((
-                _elsevier_attachment_score(eid, metadata),
-                len(candidates),
-                eid,
-            ))
-
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return [eid for _, _, eid in candidates]
-
-
-def _elsevier_pdf_page_count(content: bytes) -> int | None:
-    """Best-effort page count for detecting Elsevier one-page preview PDFs."""
-    try:
-        import fitz  # type: ignore[import-not-found]
-    except Exception:
-        return None
-
-    try:
-        with fitz.open(stream=content, filetype="pdf") as doc:
-            return int(doc.page_count)
-    except Exception:
-        return None
-
-
-def _save_elsevier_pdf_content(
-    doi: str,
-    output_path: Path,
-    content: bytes,
-    config: dict[str, Any],
-    source: str,
-    *,
-    reject_single_page: bool = False,
-) -> dict[str, Any] | None:
-    from .pdf_utils import is_pdf_file, success
-
-    if len(content) < config.get("min_pdf_size_bytes", 10000):
-        log.info(f"   [ElsevierAPI] response too small ({len(content)} bytes)")
-        return None
-    if reject_single_page:
-        page_count = _elsevier_pdf_page_count(content)
-        if page_count == 1:
-            output_path.unlink(missing_ok=True)
-            log.info(f"   [ElsevierAPI] direct PDF is a 1-page preview for {doi}")
-            return None
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(content)
-    if is_pdf_file(output_path):
-        log.info(f"   [ElsevierAPI] downloaded {len(content)} bytes for {doi}")
-        return success(doi, output_path, source)
-
-    output_path.unlink(missing_ok=True)
-    return None
-
-
-def _try_elsevier_object_pdf_from_xml(
-    doi: str,
-    output_path: Path,
-    config: dict[str, Any],
-    session: Any,
-    article_url: str,
-    headers: dict[str, str],
-    first_resp: Any,
-    *,
-    full_xml_already_tried: bool = False,
-) -> dict[str, Any] | None:
-    import urllib.parse
-
-    xml_resp = None
-    if (
-        first_resp is not None
-        and getattr(first_resp, "status_code", 0) == 200
-        and _elsevier_response_is_xml(first_resp)
-    ):
-        xml_resp = first_resp
-
-    if xml_resp is None:
-        xml_headers = dict(headers)
-        xml_headers["Accept"] = "application/xml"
-        param_options = [None] if full_xml_already_tried else [{"view": "FULL"}, None]
-        for params in param_options:
-            try:
-                request_kwargs: dict[str, Any] = {
-                    "headers": xml_headers,
-                    "timeout": 30,
-                    "allow_redirects": True,
-                }
-                if params:
-                    request_kwargs["params"] = params
-                candidate = session.get(article_url, **request_kwargs)
-            except Exception as exc:
-                log.info(f"   [ElsevierAPI] XML request failed: {exc}")
-                continue
-
-            if getattr(candidate, "status_code", 0) != 200:
-                view_name = "FULL XML" if params else "XML"
-                log.info(
-                    f"   [ElsevierAPI] {view_name} HTTP "
-                    f"{getattr(candidate, 'status_code', 0)} for {doi}"
-                )
-                continue
-            if not _elsevier_response_is_xml(candidate):
-                content_type = _elsevier_header(
-                    getattr(candidate, "headers", {}),
-                    "content-type",
-                )
-                view_name = "FULL XML" if params else "XML"
-                log.info(
-                    f"   [ElsevierAPI] {view_name} request returned non-XML "
-                    f"({content_type[:50]})"
-                )
-                continue
-
-            xml_resp = candidate
-            break
-
-        if xml_resp is None:
-            return None
-
-    eids = _extract_elsevier_pdf_attachment_eids(_elsevier_response_text(xml_resp))
-    if not eids:
-        log.info(f"   [ElsevierAPI] XML has no PDF attachment EID for {doi}")
-        return None
-
-    object_headers = dict(headers)
-    object_headers["Accept"] = "application/pdf"
-    for eid in eids:
-        object_url = (
-            "https://api.elsevier.com/content/object/eid/"
-            f"{urllib.parse.quote(eid, safe='')}"
-        )
-        try:
-            object_resp = session.get(
-                object_url,
-                headers=object_headers,
-                timeout=30,
-                allow_redirects=True,
-            )
-        except Exception as exc:
-            log.info(f"   [ElsevierAPI] object {eid} request failed: {exc}")
-            continue
-
-        if getattr(object_resp, "status_code", 0) != 200:
-            log.info(
-                f"   [ElsevierAPI] object {eid} HTTP "
-                f"{getattr(object_resp, 'status_code', 0)}"
-            )
-            continue
-        if not _elsevier_response_is_pdf(object_resp):
-            content_type = _elsevier_header(
-                getattr(object_resp, "headers", {}),
-                "content-type",
-            )
-            log.info(f"   [ElsevierAPI] object {eid} returned non-PDF ({content_type[:50]})")
-            continue
-
-        result = _save_elsevier_pdf_content(
-            doi,
-            output_path,
-            getattr(object_resp, "content", b"") or b"",
-            config,
-            "ElsevierAPI",
-            reject_single_page=True,
-        )
-        if result:
-            log.info(f"   [ElsevierAPI] downloaded object PDF via attachment EID {eid}")
-            return result
-
-    return None
-
-
 def try_elsevier_api(
     doi: str, output_path: Path, config: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -2089,11 +2124,13 @@ def try_elsevier_api(
                  f"Run scansci_pdf_elsevier_setup to configure (free).")
         return None
 
-    from .network import USER_AGENT, proxy_dict, select_proxy_for_url
+    from .pdf_utils import is_pdf_file, success
+    from .network import USER_AGENT
 
     url = f"https://api.elsevier.com/content/article/doi/{doi}"
 
     headers: dict[str, str] = {
+        "Accept": "application/pdf",
         "User-Agent": USER_AGENT,
         "X-ELS-APIKey": api_key,
     }
@@ -2101,89 +2138,53 @@ def try_elsevier_api(
     if insttoken:
         headers["X-ELS-InstToken"] = insttoken
 
-    proxy = select_proxy_for_url(url, config)
-    configured_proxies = proxy_dict(proxy)
-    route_options: list[tuple[str, dict[str, str]]] = [("direct", {})]
-    if configured_proxies:
-        route_options.append(("configured proxy", configured_proxies))
-
     import requests
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
+    except Exception as e:
+        log.info(f"   [ElsevierAPI] request failed: {e}")
+        return None
 
-    for route_name, proxies in route_options:
-        try:
-            session = requests.Session()
-            session.trust_env = False
-            if proxies:
-                session.proxies = proxies
+    if resp.status_code != 200:
+        if resp.status_code in (403, 429):
+            log.info(f"   [ElsevierAPI] HTTP {resp.status_code} — "
+                     f"API 配额可能已耗尽，自动切换浏览器策略。")
+        else:
+            log.info(f"   [ElsevierAPI] HTTP {resp.status_code} for {doi}")
+        return None
 
-            log.info(f"   [ElsevierAPI] trying {route_name} route")
-            xml_headers = dict(headers)
-            xml_headers["Accept"] = "application/xml"
-            resp = session.get(
-                url,
-                headers=xml_headers,
-                params={"view": "FULL"},
-                timeout=30,
-                allow_redirects=True,
-            )
-        except Exception as e:
-            log.info(f"   [ElsevierAPI] {route_name} FULL XML request failed: {e}")
-            continue
+    content_type = resp.headers.get("Content-Type", "")
+    is_pdf = "pdf" in content_type or resp.content[:5] == b"%PDF-"
 
-        if resp is not None and resp.status_code != 200:
-            if resp.status_code in (403, 429):
-                log.info(
-                    f"   [ElsevierAPI] {route_name} HTTP {resp.status_code}; "
-                    "API access may be unavailable or rate limited"
-                )
-            else:
-                log.info(f"   [ElsevierAPI] {route_name} HTTP {resp.status_code} for {doi}")
+    if is_pdf:
+        # API returned PDF directly — save it
+        if len(resp.content) < config.get("min_pdf_size_bytes", 10000):
+            log.info(f"   [ElsevierAPI] response too small ({len(resp.content)} bytes)")
+            return None
 
-        if resp is not None and resp.status_code == 200 and _elsevier_response_is_pdf(resp):
-            result = _save_elsevier_pdf_content(
-                doi,
-                output_path,
-                resp.content,
-                config,
-                "ElsevierAPI",
-                reject_single_page=True,
-            )
-            if result:
-                try:
-                    _persist_api_cookies(session, config)
-                except Exception:
-                    pass
-                return result
-
-        result = _try_elsevier_object_pdf_from_xml(
-            doi,
-            output_path,
-            config,
-            session,
-            url,
-            headers,
-            resp,
-            full_xml_already_tried=True,
-        )
-        if result:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(resp.content)
+        if is_pdf_file(output_path):
+            log.info(f"   [ElsevierAPI] downloaded {len(resp.content)} bytes for {doi}")
+            # Still persist cookies for future use by other strategies
             try:
                 _persist_api_cookies(session, config)
             except Exception:
                 pass
-            return result
+            return success(doi, output_path, "ElsevierAPI")
 
-        content_type = _elsevier_header(
-            getattr(resp, "headers", {}) if resp is not None else {},
-            "content-type",
-        )
-        log.info(
-            f"   [ElsevierAPI] {route_name} non-PDF response "
-            f"({content_type[:50]}), trying next route if available"
-        )
-        try:
-            _persist_api_cookies(session, config)
-        except Exception as e:
-            log.info(f"   [ElsevierAPI] cookie persist failed: {e}")
+        output_path.unlink(missing_ok=True)
+        return None
+
+    # Non-PDF response (XML/JSON metadata) — API key lacks direct PDF access.
+    # Persist cookies from the redirect chain so browser strategy can reuse them.
+    log.info(f"   [ElsevierAPI] non-PDF response ({content_type[:50]}), persisting cookies")
+    try:
+        _persist_api_cookies(session, config)
+    except Exception as e:
+        log.info(f"   [ElsevierAPI] cookie persist failed: {e}")
 
     return None
 
@@ -2627,6 +2628,139 @@ def try_science_browser(
     if _browser_download_with_fallback(doi, article_url, output_path, config, "Science"):
         if is_pdf_file(output_path):
             return success(doi, output_path, "Science(Browser)")
+    return None
+
+
+def try_sage_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """SAGE Journals browser strategy.
+
+    Supports journals.sagepub.com and sage.cnpereading.com regional frontends
+    by resolving DOI first and using host-relative PDF candidates.
+    """
+    from .pdf_utils import is_pdf_file, success
+
+    for url in _direct_pdf_urls(doi, "SAGE"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "SAGE(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "SAGE"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "SAGE(Browser)")
+    return None
+
+
+def try_asce_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """ASCE Library browser strategy.
+
+    ASCE challenges plain HTTP requests with Cloudflare, so browser path
+    is the primary strategy. DOI case must be uppercased for ASCE URLs.
+    """
+    from .pdf_utils import is_pdf_file, success
+
+    for url in _direct_pdf_urls(doi, "ASCE"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "ASCE(Direct)")
+
+    article_url = f"https://ascelibrary.org/doi/{doi.upper()}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "ASCE"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "ASCE(Browser)")
+    return None
+
+
+# ============================================================
+# Royal Society browser
+# ============================================================
+
+def try_royalsociety_browser(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Royal Society Publishing browser strategy.
+
+    Tries direct HTTP PDF URLs first (royalsocietypublishing.org serves PDFs
+    without anti-bot for many articles), then falls back to browser for
+    paywalled or Cloudflare-protected content.
+    """
+    from .pdf_utils import is_pdf_file, success
+
+    for url in _direct_pdf_urls(doi, "Royal Society"):
+        if _try_http_download(url, output_path, config):
+            if is_pdf_file(output_path):
+                return success(doi, output_path, "Royal Society(Direct)")
+
+    article_url = f"https://doi.org/{doi}"
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Royal Society"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Royal Society(Browser)")
+    return None
+
+
+# ============================================================
+# Copernicus direct download
+# ============================================================
+
+def try_copernicus_direct(
+    doi: str, output_path: Path, config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Copernicus Publications direct download strategy.
+
+    Copernicus (EGU journals) provides open-access PDFs at predictable URLs.
+    Resolves DOI to article page, then constructs PDF URL from article path.
+    """
+    from .pdf_utils import is_pdf_file, success
+    import requests
+
+    article_url = f"https://doi.org/{doi}"
+    try:
+        resp = requests.head(article_url, allow_redirects=True, timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        final_url = resp.url
+
+        # Strategy 1: Extract citation_pdf_url from article page HTML
+        try:
+            page_resp = requests.get(final_url, timeout=10,
+                                     headers={"User-Agent": "Mozilla/5.0"})
+            pdf_match = re.search(
+                r'citation_pdf_url["\s]+content="([^"]+)"', page_resp.text[:20000], re.I)
+            if pdf_match:
+                pdf_url = pdf_match.group(1)
+                if pdf_url.startswith("/"):
+                    from urllib.parse import urlparse as _up
+                    base = _up(final_url)
+                    pdf_url = f"{base.scheme}://{base.netloc}{pdf_url}"
+                if _try_http_download(pdf_url, output_path, config):
+                    if is_pdf_file(output_path):
+                        return success(doi, output_path, "Copernicus(Direct)")
+        except Exception:
+            pass
+
+        # Strategy 2: Construct PDF URL from article path
+        # Resolved URL: https://www.{journal}.net/articles/{vol}/{id}/{year}/
+        # PDF URL:      https://www.{journal}.net/articles/{vol}/{id}/{year}/{slug}.pdf
+        # where slug = journal-abbrev-vol-id-year (from DOI: 10.5194/journal-vol-id-year)
+        doi_parts = doi.split("/")[-1] if "/" in doi else doi  # e.g. "hess-26-3433-2024"
+        base_url = final_url.rstrip("/")
+        for pdf_candidate in [
+            f"{base_url}/{doi_parts}.pdf",
+            f"{base_url}.pdf",
+        ]:
+            if _try_http_download(pdf_candidate, output_path, config):
+                if is_pdf_file(output_path):
+                    return success(doi, output_path, "Copernicus(Direct)")
+    except Exception:
+        pass
+
+    # Fallback to browser
+    if _browser_download_with_fallback(doi, article_url, output_path, config, "Copernicus"):
+        if is_pdf_file(output_path):
+            return success(doi, output_path, "Copernicus(Browser)")
     return None
 
 

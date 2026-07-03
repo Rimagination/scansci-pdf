@@ -1,6 +1,6 @@
-"""Browser engine: CloakBrowser-based replacement for CloakBrowser daemon API.
+"""Browser engine: CloakBrowser-based replacement for camofox daemon API.
 
-Provides the same public API as the old browser_engine.py (is_available, solve_url,
+Provides the same public API as the old camofox.py (is_available, solve_url,
 get_cookies, get_html, import_cookies, evaluate_js, create_tab, close_tab,
 navigate_tab, get_snapshot, download_pdf_via_browser, fetch_url,
 get_captured_responses, close_all_tabs) but uses CloakBrowser's direct
@@ -53,16 +53,6 @@ import threading as _threading
 _tls = _threading.local()
 
 
-def _build_browser_args(config: dict[str, Any] | None = None) -> list[str]:
-    """Build Chromium launch args from config (proxy, flags, etc.)."""
-    args = ["--disable-features=CrossOriginOpenerPolicy"]
-    if config:
-        proxy = config.get("browser_static_proxy", "")
-        if proxy:
-            args.append(f"--proxy-server={proxy}")
-    return args
-
-
 def _get_shared_browser(config: dict[str, Any] | None = None):
     """Get or create a browser for the current thread. Returns (browser, context)."""
     browser = getattr(_tls, "browser", None)
@@ -92,7 +82,7 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
         headless = config.get("browser_headless", False)
         humanize = config.get("browser_humanize", True)
 
-    args = _build_browser_args(config)
+    args = ["--disable-features=CrossOriginOpenerPolicy"]
     browser = launch(headless=headless, humanize=humanize, args=args)
     context = browser.new_context()
     _tls.browser = browser
@@ -101,49 +91,19 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
     return browser, context
 
 
-def get_persistent_context(
-    profile_dir: str | Path,
-    config: dict[str, Any] | None = None,
-):
-    """Get or create a persistent browser context for fingerprint consistency.
-
-    Unlike launch() + cookie restore, persistent context preserves:
-    - Browser fingerprint (canvas, WebGL, audio, fonts)
-    - Cookies and localStorage across restarts
-    - Login sessions without re-authentication
-
-    This is the recommended approach for publisher sessions that need
-    stable identity across multiple download runs.
+def get_browser_page(config: dict[str, Any] | None = None):
+    """Get a new page from the shared browser (for custom browser interactions).
+    
+    Returns a Playwright Page object that the caller must close after use.
+    Returns None if the browser is not available.
     """
     if not _check_cloakbrowser():
-        raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
-
+        return None
     try:
-        from .cloakbrowser_compat import prepare_cloakbrowser_runtime
-        prepare_cloakbrowser_runtime()
+        _browser, context = _get_shared_browser(config)
+        return context.new_page()
     except Exception:
-        pass
-
-    from cloakbrowser import launch_persistent_context
-
-    headless = False
-    humanize = True
-    if config:
-        headless = config.get("browser_headless", False)
-        humanize = config.get("browser_humanize", True)
-
-    args = _build_browser_args(config)
-    profile_path = Path(profile_dir)
-    profile_path.mkdir(parents=True, exist_ok=True)
-
-    ctx = launch_persistent_context(
-        str(profile_path),
-        headless=headless,
-        humanize=humanize,
-        args=args,
-    )
-    logger.info(f"browser_engine: persistent context ready at {profile_path}")
-    return ctx
+        return None
 
 
 def shutdown_shared_browser():
@@ -173,7 +133,7 @@ def _ensure_compat():
 
 
 # ---------------------------------------------------------------------------
-# Public API — drop-in replacements for browser_engine.py functions
+# Public API — drop-in replacements for camofox.py functions
 # ---------------------------------------------------------------------------
 
 def is_available(config: dict[str, Any] | None = None) -> bool:
@@ -455,6 +415,8 @@ def download_pdf_via_browser(
             "just a moment", "attention required",
             "security check", "captcha",
             "请稍候", "正在验证", "checking your browser",
+            # ALTCHA anti-bot verification (used by sci-hub.ru and other Sci-Hub mirrors)
+            "altcha", "你是机器人吗", "not a robot", "nope",
         ]):
             logger.info("browser_engine: anti-bot challenge detected, waiting...")
             time.sleep(10)
@@ -630,6 +592,10 @@ def download_pdf_via_browser(
                 page.close()
             except Exception:
                 pass
+
+
+# Backward-compat alias
+download_pdf_via_camofox = download_pdf_via_browser
 
 
 def _is_pdf_url(url: str) -> bool:

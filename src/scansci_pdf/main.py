@@ -112,20 +112,28 @@ def get_paper(
     identifier: str = typer.Argument(help="DOI or arXiv ID"),
     output: str = typer.Option("", help="Output directory"),
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
+    strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
     from .sources import download
+    from .config import load_config, update_config
+
     result = download(
         identifier, output or None,
-        scihub_enabled=True, use_tor=True, use_instsci=True,
+        scihub_enabled=True, use_tor=True, use_vpnsci=True,
         bibtex=not no_bibtex,
+        strategy=strategy if strategy else None,
     )
     if result.get("success"):
         print(f"  OK: {result.get('file', '')}")
         print(f"  Source: {result.get('source', '?')}")
     else:
         print(f"  FAILED: {result.get('error', 'unknown')}")
-        print(f"  Hint: 运行 scansci-pdf login 配置机构代理，或检查网络连接")
+        hint = result.get('agent_hint', '')
+        if hint:
+            print(f"  Hint: {hint}")
+        else:
+            print(f"  Hint: 运行 scansci-pdf login 配置机构代理，或检查网络连接")
 
 
 @app.command("browser-status")
@@ -136,16 +144,6 @@ def browser_status() -> None:
     config = load_config()
     available = is_available(config)
     print(f"  CloakBrowser: {'available' if available else 'not installed'}")
-
-
-@app.command("browser-doctor")
-def browser_doctor_cmd() -> None:
-    """Report reusable shared browser runtime options without installing anything."""
-    import json as _json
-
-    from .browser_discovery import doctor
-
-    print(_json.dumps(doctor(), ensure_ascii=False))
 
 
 @app.command("import-cookies")
@@ -184,7 +182,7 @@ def coverage_report(
     config = load_config()
     if no_browser:
         config["browser_headless"] = True
-        config["instsci_enabled"] = False
+        config["vpnsci_enabled"] = False
         config["carsi_enabled"] = False
 
     dois = [line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
@@ -262,8 +260,8 @@ def setup_school(
     config = load_config()
 
     if show:
-        print(f"  School:           {config.get('instsci_school', '(not set)')}")
-        print(f"  WebVPN base URL:  {config.get('instsci_base_url', '(not set)')}")
+        print(f"  School:           {config.get('vpnsci_school', '(not set)')}")
+        print(f"  WebVPN base URL:  {config.get('vpnsci_base_url', '(not set)')}")
         print(f"  EZproxy URL:      {config.get('ezproxy_login_url', '(not set)')}")
         print(f"  CARSI enabled:    {config.get('carsi_enabled', False)}")
         print(f"  CARSI IdP:        {config.get('carsi_idp_name', '(not set)')}")
@@ -290,8 +288,8 @@ def setup_school(
         raise typer.Exit(1)
 
     chosen = matches[0]
-    config["instsci_school"] = chosen.name
-    config["instsci_base_url"] = chosen.host
+    config["vpnsci_school"] = chosen.name
+    config["vpnsci_base_url"] = chosen.host
     save_config(config)
     print(f"  Configured: {chosen.name}")
     print(f"  Type:       {chosen.school_type}")
@@ -359,11 +357,10 @@ def batch_fetch_cmd(
     input_file: str = typer.Argument(help="File with one DOI/URL per line"),
     output: str = typer.Option("", help="Output directory"),
     format: str = typer.Option("json", help="Output format: json, text"),
+    scihub: bool = typer.Option(False, "--scihub", help="Use Sci-Hub racing engine (includes grey sources) instead of institutional cascade"),
 ) -> None:
-    """Batch fetch papers via institutional cascade."""
+    """Batch fetch papers. Default: institutional cascade. Use --scihub for grey-source racing."""
     import json as _json
-    from .institutional.config_adapter import ConfigAdapter
-    from .institutional.fetcher import PaperFetcher
 
     dois = [
         line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
@@ -372,6 +369,21 @@ def batch_fetch_cmd(
     if not dois:
         print("  No DOIs/URLs found in input file.")
         return
+
+    if scihub:
+        # Use the source-racing engine (includes Sci-Hub/SciBban/LibGen)
+        from .sources import batch_download
+        output_dir = output if output else None
+        results = batch_download(dois, output_dir=output_dir, scihub_enabled=True)
+        if format == "json":
+            out_path = Path(output or ".") / "batch_results.json"
+            out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"\n  Results saved to: {out_path}")
+        return
+
+    # Default: institutional cascade (PaperFetcher)
+    from .institutional.config_adapter import ConfigAdapter
+    from .institutional.fetcher import PaperFetcher
 
     config = ConfigAdapter.load()
     if output:
@@ -405,7 +417,7 @@ def elsevier_setup(
     api_key: str = typer.Option("", help="Elsevier API key"),
     inst_token: str = typer.Option("", help="Elsevier institutional token"),
 ) -> None:
-    """Configure Elsevier API access for ScienceDirect full-text retrieval."""
+    """Configure Elsevier API access for direct full-text retrieval."""
     from .config import load_config, save_config
 
     config = load_config()
@@ -425,15 +437,7 @@ def elsevier_setup(
         has_token = bool(config.get("elsevier_insttoken"))
         print(f"  Elsevier API key:   {'set' if has_key else '(not set)'}")
         print(f"  Elsevier inst token: {'set' if has_token else '(not set)'}")
-        print("\n  Get a free API key:")
-        print("    1. Visit https://dev.elsevier.com/")
-        print("    2. Sign in, open My API Key / API Key Settings, create a key")
-        print("    3. If asked, choose ScienceDirect / Article Retrieval permissions")
-        print("\n  Usage:")
-        print("    scansci-pdf elsevier-setup --api-key YOUR_KEY")
-        print("    scansci-pdf elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN")
-        print("\n  Closed full text depends on institutional subscription and request IP.")
-        print("  Campus/VPN users should let api.elsevier.com use the institution route.")
+        print(f"\n  Usage: scansci-pdf elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN")
 
 
 @app.command("session-doctor")
@@ -525,13 +529,64 @@ def publisher_batch_cmd(
     print(f"\n  Results: {success}/{len(dois)} downloaded")
 
 
+@app.command("search")
+def search_cmd(
+    query: str = typer.Argument("", help="Search query (keywords, author, title)"),
+    limit: int = typer.Option(10, help="Max results"),
+    year_from: int = typer.Option(None, help="Start year"),
+    year_to: int = typer.Option(None, help="End year"),
+    sort: str = typer.Option("", help="Sort: cited_by_count, publication_date"),
+    json_output: bool = typer.Option(True, help="Output as JSON (default)"),
+    author: str = typer.Option("", "--author", help="Search by author name (resolves to OpenAlex author ID)"),
+    author_id: str = typer.Option("", "--author-id", help="Search by OpenAlex author ID directly"),
+) -> None:
+    """Search academic papers via OpenAlex, Semantic Scholar, and Crossref.
+
+    Results include DOI, title, authors, year, and citation count.
+    Use the DOIs with 'scansci-pdf get' or 'scansci-pdf batch' to download.
+
+    Examples:
+      scansci-pdf search "carbon cycle" --limit 10 --sort cited_by_count
+      scansci-pdf search --author "Fang Jingyun" --limit 10 --sort cited_by_count
+      scansci-pdf search --author-id A5102961214 --limit 10 --sort cited_by_count
+    """
+    import json as _json
+    from .search import search_papers
+
+    if author or author_id:
+        # Author-based search
+        results = search_papers(
+            limit=limit, year_from=year_from, year_to=year_to, sort=sort,
+            author=author if author else None,
+            author_id=author_id if author_id else None,
+        )
+        # Show author match info
+        if results and results[0].get("_author_match"):
+            match = results[0].pop("_author_match")
+            print(f"  Author: {match['name']} (ID:{match['id']}, works:{match['works_count']}, cited:{match['cited_by_count']})")
+    else:
+        sort_key = sort if sort else None
+        results = search_papers(query, limit=limit, year_from=year_from, year_to=year_to, sort=sort_key)
+
+    if json_output:
+        print(_json.dumps({"results": results}, indent=2, ensure_ascii=False))
+    else:
+        for i, r in enumerate(results, 1):
+            authors = ", ".join(r.get("authors", [])[:3] or [])
+            cited = r.get("cited_by_count", 0)
+            print(f"{i:2d}. {r.get('title', '?')[:80]}")
+            print(f"    {authors}  ({r.get('year', '?')})  cited={cited}  doi:{r.get('doi', '?')}")
+            if i < len(results):
+                print()
+
+
 @app.command("config-cmd")
 def config_show(
     key: str = typer.Argument("", help="Config key to show/set"),
     value: str = typer.Argument("", help="Value to set"),
 ) -> None:
     """Show or set configuration values."""
-    from .config import load_config, save_config
+    from .config import load_config, save_config, update_config
 
     config = load_config()
 
@@ -550,9 +605,12 @@ def config_show(
         print(f"  {key} = {v}")
         return
 
-    config[key] = value
-    save_config(config)
-    print(f"  Set {key} = {value}")
+    # Use update_config for proper type coercion and validation
+    try:
+        update_config(key, value)
+        print(f"  Set {key} = {value}")
+    except ValueError as e:
+        print(f"  Error: {e}")
 
 
 def main() -> None:
