@@ -66,6 +66,10 @@ _BROWSER_SOURCE_LABELS = frozenset({
     "NatureBrowser", "ScienceBrowser", "SAGEBrowser", "ASCEBrowser",
     "RoyalSocietyBrowser", "CopernicusDirect",
     "GenericBrowser", "WebVPN", "CARSI", "EZProxy",
+    # Sci-Hub launches CloakBrowser internally (browser-first pass +
+    # Cloudflare/ALTCHA challenge solving), so it must participate in the
+    # global browser-source concurrency budget.
+    "Sci-Hub",
 })
 
 

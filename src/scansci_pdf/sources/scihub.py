@@ -589,6 +589,15 @@ def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: boo
                 return {"success": True, "identifier": doi, "doi": doi,
                         "file": str(output_path), "source": "Sci-Hub(recovered)"}
         return None
+    finally:
+        # Ensure no CloakBrowser subprocess is left behind after Sci-Hub
+        # attempts (browser-first pass, Cloudflare/ALTCHA challenge solving).
+        # Idempotent — safe to call even when nothing was launched.
+        try:
+            from ..browser_engine import shutdown_shared_browser
+            shutdown_shared_browser()
+        except Exception:
+            pass
 
 
 def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_tor: bool = False) -> dict[str, Any] | None:
@@ -597,8 +606,12 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         log.info(f"   Sci-Hub disabled")
         return None
 
-    # Browser-first pass: race configured domains via browser in parallel
-    if _is_browser_available(config):
+    # Browser-first pass: race configured domains via browser in parallel.
+    # Opt-in (default off) — opening CloakBrowser for every Sci-Hub attempt
+    # is slow and can leave orphan Chromium processes (issue #19). The HTTP
+    # path below still works; browser is only tried when explicitly enabled
+    # or as a Cloudflare/ALTCHA challenge fallback.
+    if config.get("scihub_browser_first_enabled", False) and _is_browser_available(config):
         configured_domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
         browser_domains = configured_domains[:5]
         max_workers = min(config.get("scihub_browser_workers", 3), len(browser_domains))

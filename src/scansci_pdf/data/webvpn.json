@@ -283,6 +283,11 @@
     },
     "湖南机电职业技术学院": {
       "host": "webvpn.hnjdzy.edu.cn"
+    },
+    "中南大学": {
+      "host": "vpn.csu.edu.cn",
+      "type": "atrust",
+      "gateway": "vpn.csu.edu.cn"
     }
   },
   "江苏": {
