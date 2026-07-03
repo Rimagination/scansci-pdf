@@ -122,13 +122,29 @@ def fetch_json(
     headers: dict[str, str] | None = None,
     use_tor: bool = False,
 ) -> dict[str, Any] | None:
+    # In-memory probe cache: avoid hammering metadata endpoints during racing.
+    ttl = float(config.get("json_probe_cache_seconds", 0) or 0)
+    now = time.time()
+    if ttl > 0:
+        cached = _json_cache.get(url)
+        if cached is not None and _json_cache_expires.get(url, 0) > now:
+            return cached
     try:
         resp = fetch(url, config, headers={"Accept": "application/json", **(headers or {})}, use_tor=use_tor)
         if resp.status_code >= 400:
             return None
-        return resp.json()
+        data = resp.json()
     except Exception:
         return None
+    if ttl > 0:
+        _json_cache[url] = data
+        _json_cache_expires[url] = now + ttl
+    return data
+
+
+# Module-level JSON probe caches (see fetch_json). Mutable for test reset.
+_json_cache: dict[str, dict[str, Any]] = {}
+_json_cache_expires: dict[str, float] = {}
 
 
 def _is_cloudflare_block(resp: requests.Response) -> bool:
@@ -176,6 +192,10 @@ def fetch_with_browser(
 
 
 def polite_delay(config: dict[str, Any]) -> None:
+    # Polite delay is opt-in: only sleep when fixed_request_delay_enabled is True.
+    # Without it, racing/parallel sources would be needlessly slowed.
+    if not config.get("fixed_request_delay_enabled", False):
+        return
     lo = float(config.get("request_delay_min", 0))
     hi = float(config.get("request_delay_max", 0))
     if hi > 0:

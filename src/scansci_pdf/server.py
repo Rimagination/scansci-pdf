@@ -280,6 +280,14 @@ def scansci_pdf_health_check(detailed: bool = False) -> str:
 
 
 @mcp_app.tool()
+def scansci_pdf_browser_doctor() -> str:
+    """Report reusable shared browser runtime options before suggesting installs."""
+    from .browser_discovery import doctor
+
+    return json.dumps(doctor(), ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
 def scansci_pdf_source_scores() -> str:
     """Show adaptive source health scores based on download history.
 
