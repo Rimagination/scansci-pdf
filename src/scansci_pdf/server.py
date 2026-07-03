@@ -359,7 +359,8 @@ def scansci_pdf_auto_setup() -> str:
         set_probe_timestamp(config_copy, timestamp=0)
         _probe_scihub_domains(config_copy)
         stats = load_stats(config_copy)
-        reachable = [d for d, s in stats.items() if s.get("reachable") and not d.startswith("_")]
+        reachable = [d for d, s in stats.items()
+                     if not d.startswith("_") and isinstance(s, dict) and s.get("reachable")]
         report["actions"].append(f"Sci-Hub: {len(reachable)} domains reachable")
         report["status"]["scihub_domains"] = reachable[:5]
     except Exception as e:
