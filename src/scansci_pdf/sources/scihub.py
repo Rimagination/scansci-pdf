@@ -282,8 +282,12 @@ def _browser_first_download(
             log.info(f"   [browser-first] found PDF: {pdf_url[:80]}")
             # Download via browser (handles Cloudflare on PDF host too)
             if download_pdf_via_browser(pdf_url, output_path, config):
-                if is_pdf_file(output_path):
-                    return success(doi, output_path, f"Sci-Hub(browser)")
+                # Retry is_pdf_file check — browser may still be flushing to disk
+                for _retry in range(5):
+                    if is_pdf_file(output_path):
+                        return success(doi, output_path, f"Sci-Hub(browser)")
+                    time.sleep(0.2)
+                log.info(f"   [browser-first] downloaded but file not recognized as PDF")
 
         # Check if the response itself is a PDF
         import base64
@@ -433,20 +437,173 @@ def download_pdf_from_scihub(
     return download_pdf(url, output_path, config, source, require_pdf_like_url=False, use_tor=use_tor, cookies=cookies)
 
 
+def _race_browser_domains(
+    domains: list[str],
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    max_workers: int = 3,
+) -> dict[str, Any] | None:
+    """Race multiple Sci-Hub domains using multiple tabs in ONE browser.
+
+    Instead of spawning N threads each with their own browser (heavy),
+    this opens N tabs in a single browser context and polls them in
+    round-robin. The browser's internal network stack handles all tabs
+    concurrently, so we get real parallelism without multiple processes.
+
+    Each tab writes to its own temp output file to avoid conflicts.
+    The winning file is renamed to output_path; loser tabs and temp
+    files are cleaned up.
+    """
+    from ..browser_engine import _get_shared_browser, is_available as _browser_available
+
+    if not _browser_available(config):
+        return None
+
+    try:
+        browser, context = _get_shared_browser(config)
+    except Exception as e:
+        log.info(f"   Sci-Hub: cannot get browser: {e}")
+        return None
+
+    log.info(f"   Sci-Hub: racing {len(domains)} browser domains via tabs (1 browser)...")
+
+    # Phase 1: Fire all navigations — open a tab per domain, trigger navigation
+    # without blocking (use JS location assignment, returns immediately)
+    tabs: list[tuple[str, Any, Path]] = []  # (domain, page, temp_output)
+    for domain in domains:
+        landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
+        safe_suffix = domain.split("//")[-1].replace(".", "_").replace("/", "_")[:25]
+        temp_output = output_path.parent / f"{output_path.stem}_browser_{safe_suffix}.pdf"
+        try:
+            page = context.new_page()
+            # Fire-and-forget via JS — navigate without blocking so all tabs load concurrently
+            page.evaluate(f"window.location.href = '{landing_url}'")
+            tabs.append((domain, page, temp_output))
+        except Exception as e:
+            log.info(f"   Sci-Hub: tab open failed for {domain}: {e}")
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    if not tabs:
+        return None
+
+    # Wait a moment for all navigations to start, then poll for DOM readiness
+    time.sleep(1.5)
+
+    # Phase 2: Poll tabs in round-robin — wait for DOM, then extract PDF URL
+    deadline = time.time() + 30
+    winner: tuple[dict[str, Any], Path] | None = None
+
+    while time.time() < deadline and winner is None:
+        for domain, page, temp_output in tabs:
+            try:
+                # Wait for this tab's DOM to be ready (short timeout per check)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=3000)
+                except Exception:
+                    pass  # Not ready yet, try next tab
+
+                html = page.content()
+                if len(html) < 5000:
+                    continue
+
+                lower = html.lower()
+                # Skip if still on Cloudflare challenge or article not found
+                if any(sig in lower for sig in ["checking your browser", "just a moment"]):
+                    continue
+                if any(sig in lower for sig in ["article not found", "статья не найдена"]):
+                    log.info(f"   Sci-Hub: {domain} — article not found")
+                    continue
+
+                # Try to extract PDF URL
+                pdf_url = extract_pdf_url_from_html(html, page.url)
+                if pdf_url:
+                    log.info(f"   Sci-Hub: {domain} found PDF, downloading...")
+                    from ..browser_engine import download_pdf_via_browser
+                    if download_pdf_via_browser(pdf_url, temp_output, config):
+                        # Verify PDF file — retry with backoff (browser may still flush)
+                        for _retry in range(10):
+                            if temp_output.exists() and temp_output.stat().st_size > 5000:
+                                if is_pdf_file(temp_output):
+                                    result = success(doi, temp_output, f"Sci-Hub(tab:{domain.split('//')[-1][:15]})")
+                                    winner = (result, temp_output)
+                                    break
+                            time.sleep(0.3)
+                        if winner is not None:
+                            break
+                        else:
+                            log.info(f"   Sci-Hub: {domain} download finished but PDF check failed")
+            except Exception:
+                continue
+        if winner is None:
+            time.sleep(0.3)
+
+    # Phase 3: Cleanup — close all tabs, remove loser temp files
+    for domain, page, temp_output in tabs:
+        try:
+            page.close()
+        except Exception:
+            pass
+        if winner is None or temp_output != winner[1]:
+            if temp_output.exists():
+                try:
+                    temp_output.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    if winner is not None:
+        result, temp_output = winner
+        if temp_output != output_path and temp_output.exists():
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path.exists():
+                output_path.unlink()
+            temp_output.rename(output_path)
+            result["file"] = str(output_path)
+        return result
+
+    log.info("   Sci-Hub: no tab found a PDF")
+    return None
+
+
 def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: bool = False) -> dict[str, Any] | None:
+    try:
+        return _try_scihub_impl(doi, output_path, config, use_tor)
+    except Exception as e:
+        log.info(f"   Sci-Hub: unexpected error: {type(e).__name__}: {e}")
+        # Check if a PDF was written to disk despite the exception
+        if output_path.exists():
+            from ..pdf_utils import is_pdf_file as _is_pdf
+            if _is_pdf(output_path):
+                log.info(f"   Sci-Hub: recovered PDF after {type(e).__name__}")
+                return {"success": True, "identifier": doi, "doi": doi,
+                        "file": str(output_path), "source": "Sci-Hub(recovered)"}
+        return None
+
+
+def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_tor: bool = False) -> dict[str, Any] | None:
     log.info(f"   try_scihub called for {doi}")
     if not config.get("scihub_enabled", False):
         log.info(f"   Sci-Hub disabled")
         return None
 
-    # Browser-first pass: try configured domains via browser before HTTP
+    # Browser-first pass: race configured domains via browser in parallel
     if _is_browser_available(config):
-        # Use the first 5 domains from the user's configuration (or defaults)
         configured_domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
         browser_domains = configured_domains[:5]
-        for domain in browser_domains:
-            landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
-            result = _browser_first_download(landing_url, doi, output_path, config)
+        max_workers = min(config.get("scihub_browser_workers", 3), len(browser_domains))
+
+        if max_workers <= 1 or len(browser_domains) == 1:
+            # Single worker or single domain: skip thread pool overhead
+            for domain in browser_domains:
+                landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
+                result = _browser_first_download(landing_url, doi, output_path, config)
+                if result:
+                    return result
+        else:
+            result = _race_browser_domains(browser_domains, doi, output_path, config, max_workers)
             if result:
                 return result
 

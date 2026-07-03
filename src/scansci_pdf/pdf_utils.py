@@ -62,6 +62,47 @@ def _response_looks_pdf(resp: requests.Response, first_chunk: bytes) -> bool:
     return first_chunk.startswith(b"%PDF-") or "application/pdf" in ctype
 
 
+def is_suspicious_pdf(path: Path) -> bool:
+    """Check if a PDF looks like a cover page or preview (not full text).
+
+    Heuristics (all must match to be suspicious):
+      - Very small file (< 50 KB): likely a 1-page cover
+      - Has at most 1 page: preview/cover page
+    """
+    try:
+        size = path.stat().st_size
+        # Large files (> 100KB) are almost certainly full text
+        if size > 100_000:
+            return False
+        # Very small files are suspicious regardless
+        if size < 50_000:
+            return True
+        # For files between 50KB-100KB, check page count
+        with path.open("rb") as fh:
+            content = fh.read(512_000)
+        # Count PDF page objects: look for "/Type /Page" not followed by "s"
+        import re
+        pages = len(re.findall(rb"/Type\s*/Page\b", content))
+        if pages <= 1:
+            return True
+        return False
+    except OSError:
+        return False
+
+
+def suspicious_pdf(identifier: str, file_path: Path, source_label: str) -> dict[str, Any]:
+    """Build a result dict for a suspicious/preview PDF (not full text)."""
+    return {
+        "success": False,
+        "identifier": identifier,
+        "doi": identifier,
+        "file": str(file_path),
+        "source": source_label,
+        "error_type": "suspicious_pdf",
+        "reason": "PDF appears to be a cover page or preview (too small / too few pages)",
+    }
+
+
 def success(identifier: str, file_path: Path, source: str) -> dict[str, Any]:
     size_kb = round(file_path.stat().st_size / 1024, 1)
     return {

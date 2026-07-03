@@ -67,6 +67,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "use_tor_for_scihub": True,
     "google_scholar_limit": 5,
     "max_browser_workers": 1,
+    "scihub_browser_workers": 3,  # Number of Sci-Hub domains to race in parallel via browser
     "host_concurrency": {},
     "auto_rename": True,
     "zotero_api_key": "",

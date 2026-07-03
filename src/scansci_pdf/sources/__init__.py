@@ -185,6 +185,14 @@ def _try_source(
     except Exception as e:
         latency_ms = (time.time() - t0) * 1000
         error_type = classify_error(exception=e)
+        # Check if a valid PDF was actually written to disk despite the exception
+        # (common with Sci-Hub: browser download succeeds but post-download logic raises)
+        from ..pdf_utils import is_pdf_file as _is_pdf
+        if output_path.exists() and _is_pdf(output_path):
+            log.info(f"   OK {label} (recovered after {error_type})")
+            record_result(label, True, latency_ms)
+            return {"success": True, "identifier": doi, "doi": doi,
+                    "file": str(output_path), "source": label}
         record_result(label, False, latency_ms, error_type)
         advice = get_user_advice(error_type, label)
         log.info(f"   FAIL {label}: {error_type} — {advice}")
@@ -533,9 +541,14 @@ def _auto_rename(result: dict[str, Any], identifier: str, config: dict[str, Any]
         if new_path and new_path != file_path:
             result["file"] = str(new_path)
             result["renamed"] = True
+            log.info(f"   Renamed: {file_path.name} -> {new_path.name}")
             # Update DOI→file index for dedup
             if target_dir and _doi:
                 _update_doi_index(target_dir, _doi, new_path)
+        else:
+            log.info(f"   Kept original name: {file_path.name}")
+    else:
+        log.info(f"   No metadata for rename, keeping: {file_path.name}")
 
 
 def download(

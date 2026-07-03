@@ -110,7 +110,7 @@ def login(
 @app.command("get")
 def get_paper(
     identifier: str = typer.Argument(help="DOI or arXiv ID"),
-    output: str = typer.Option("", help="Output directory"),
+    output: str = typer.Option(".", help="Output directory (default: current directory)"),
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
     strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
 ) -> None:
@@ -119,7 +119,7 @@ def get_paper(
     from .config import load_config, update_config
 
     result = download(
-        identifier, output or None,
+        identifier, output,
         scihub_enabled=True, use_tor=True, use_vpnsci=True,
         bibtex=not no_bibtex,
         strategy=strategy if strategy else None,
@@ -324,20 +324,19 @@ def list_schools_cmd(
 @app.command("fetch")
 def fetch_paper_cmd(
     identifier: str = typer.Argument(help="DOI or article URL"),
-    output: str = typer.Option("", help="Output directory"),
+    output: str = typer.Option(".", help="Output directory (default: current directory)"),
     format: str = typer.Option("markdown", help="Output format: markdown, json, text"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Skip cache"),
 ) -> None:
     """Fetch a paper via 7-step institutional cascade.
-
+    
     Cascade: cache → OA → Elsevier API → DOI resolve → CARSI → publisher → browser → gateway.
     """
     from .institutional.config_adapter import ConfigAdapter
     from .institutional.fetcher import PaperFetcher
 
     config = ConfigAdapter.load()
-    if output:
-        config._config["output_dir"] = output
+    config._config["output_dir"] = output
 
     fetcher = PaperFetcher(config)
     result = fetcher.fetch_with_result(identifier, use_cache=not no_cache)
@@ -355,12 +354,13 @@ def fetch_paper_cmd(
 @app.command("batch")
 def batch_fetch_cmd(
     input_file: str = typer.Argument(help="File with one DOI/URL per line"),
-    output: str = typer.Option("", help="Output directory"),
+    output: str = typer.Option(".", help="Output directory (default: current directory)"),
     format: str = typer.Option("json", help="Output format: json, text"),
     scihub: bool = typer.Option(False, "--scihub", help="Use Sci-Hub racing engine (includes grey sources) instead of institutional cascade"),
 ) -> None:
     """Batch fetch papers. Default: institutional cascade. Use --scihub for grey-source racing."""
     import json as _json
+    from .config import load_config as _load_config
 
     dois = [
         line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
@@ -370,13 +370,21 @@ def batch_fetch_cmd(
         print("  No DOIs/URLs found in input file.")
         return
 
-    if scihub:
+    # Auto-detect: if download_strategy is grey/scihub-oriented, switch to racing engine
+    _cfg = _load_config()
+    _strategy = _cfg.get("download_strategy", "fastest")
+    _auto_scihub = scihub or _strategy in ("scihub_only", "grey_only", "scihub_first")
+    if not scihub and _auto_scihub:
+        print(f"  Auto-switching to Sci-Hub racing engine (download_strategy={_strategy})")
+
+    if _auto_scihub:
         # Use the source-racing engine (includes Sci-Hub/SciBban/LibGen)
         from .sources import batch_download
-        output_dir = output if output else None
-        results = batch_download(dois, output_dir=output_dir, scihub_enabled=True)
+        results = batch_download(dois, output_dir=output, scihub_enabled=True)
+        # Verify file existence for each "success" result before writing report
+        _verify_batch_results(results, output)
         if format == "json":
-            out_path = Path(output or ".") / "batch_results.json"
+            out_path = Path(output) / "batch_results.json"
             out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"\n  Results saved to: {out_path}")
         return
@@ -386,8 +394,7 @@ def batch_fetch_cmd(
     from .institutional.fetcher import PaperFetcher
 
     config = ConfigAdapter.load()
-    if output:
-        config._config["output_dir"] = output
+    config._config["output_dir"] = output
 
     fetcher = PaperFetcher(config)
     results = []
@@ -396,7 +403,14 @@ def batch_fetch_cmd(
         print(f"  [{i}/{len(dois)}] {doi}")
         try:
             result = fetcher.fetch_with_result(doi)
-            results.append(result.to_dict())
+            result_dict = result.to_dict()
+            # Verify file actually exists on disk for success status
+            if result_dict.get("status") == "success" or result_dict.get("success"):
+                pdf_path = result_dict.get("file") or result_dict.get("pdf_path", "")
+                if pdf_path and not Path(pdf_path).exists():
+                    result_dict["status"] = "error"
+                    result_dict["error"] = "PDF file not found on disk (may have been saved elsewhere)"
+            results.append(result_dict)
             status = result.status
             quality = result.quality
             print(f"         → {status} ({quality})")
@@ -407,9 +421,31 @@ def batch_fetch_cmd(
     fetcher.close()
 
     if format == "json":
-        out_path = Path(output or ".") / "batch_results.json"
+        out_path = Path(output) / "batch_results.json"
         out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"\n  Results saved to: {out_path}")
+
+
+def _verify_batch_results(results: dict, output_dir: str) -> None:
+    """Verify that 'success' results have actual files on disk; fix stale entries."""
+    output_path = Path(output_dir)
+    for r in results.get("results", []):
+        if r.get("success"):
+            file_path = r.get("file", "")
+            if file_path and not Path(file_path).exists():
+                # Check if file exists under a different name in the output dir
+                doi = r.get("doi", "")
+                if doi:
+                    from .identifiers import safe_filename
+                    safe = safe_filename(doi)
+                    found = list(output_path.glob(f"{safe}*.pdf"))
+                    if found:
+                        r["file"] = str(found[0])
+                    else:
+                        r["success"] = False
+                        r["error"] = "File missing from disk"
+                        results["succeeded"] = max(0, results.get("succeeded", 1) - 1)
+                        results["failed"] = results.get("failed", 0) + 1
 
 
 @app.command("elsevier-setup")
@@ -498,7 +534,7 @@ def federated_login(
 def publisher_batch_cmd(
     input_file: str = typer.Argument(help="File with one DOI per line"),
     publisher: str = typer.Option("", help="Publisher key (auto-detected if omitted)"),
-    output: str = typer.Option("", help="Output directory"),
+    output: str = typer.Option(".", help="Output directory (default: current directory)"),
     max_workers: str = typer.Option("1", help="Number of parallel workers"),
 ) -> None:
     """Batch download papers via publisher-specific workflows."""
@@ -513,8 +549,7 @@ def publisher_batch_cmd(
         return
 
     config = load_config()
-    if output:
-        config["output_dir"] = output
+    config["output_dir"] = output
 
     print(f"  Batch: {len(dois)} DOIs")
     print(f"  Publisher: {publisher or 'auto-detect'}")
