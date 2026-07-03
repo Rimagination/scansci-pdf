@@ -64,17 +64,17 @@ def push_to_zotero(
         resp = requests.post(
             f"{base_url}/items",
             headers=headers,
-            json={"items": [item_data]},
+            json=[item_data],
             timeout=30,
         )
         if resp.status_code not in (200, 201):
             return {"success": False, "error": f"Zotero API error: {resp.status_code}"}
 
         result = resp.json()
-        if not result.get("successful"):
+        if not (result.get("success") or result.get("successful")):
             return {"success": False, "error": "No successful items"}
 
-        zotero_key = list(result["successful"].keys())[0] if result["successful"] else None
+        zotero_key = _created_object_key(result)
         if not zotero_key:
             return {"success": False, "error": "No key returned"}
 
@@ -164,7 +164,7 @@ def _upload_attachment(
         resp = requests.post(
             f"{base_url}/items",
             headers=headers,
-            json={"items": [attachment_data]},
+            json=[attachment_data],
             timeout=30,
         )
         if resp.status_code not in (200, 201):
@@ -172,7 +172,7 @@ def _upload_attachment(
             return False
 
         result = resp.json()
-        att_key = list(result.get("successful", {}).keys())[0] if result.get("successful") else None
+        att_key = _created_object_key(result)
         if not att_key:
             return False
 
@@ -200,3 +200,23 @@ def _upload_attachment(
     except Exception as e:
         log.warning(f"Zotero: attachment error: {e}")
         return False
+
+
+def _created_object_key(result: dict[str, Any]) -> str | None:
+    """Extract the Zotero object key from a write response."""
+    successful = result.get("successful") or result.get("success") or {}
+    if not successful:
+        return None
+
+    saved_object = next(iter(successful.values()))
+    if isinstance(saved_object, str):
+        return saved_object
+    if isinstance(saved_object, dict):
+        key = saved_object.get("key")
+        if isinstance(key, str):
+            return key
+        data = saved_object.get("data", {})
+        if isinstance(data, dict) and isinstance(data.get("key"), str):
+            return data["key"]
+
+    return None
