@@ -83,13 +83,12 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
           # Create a deployment for the 'pypi' environment pointing at this tag.
-          DEPLOYMENT_ID=$(gh api \
-            --method POST \
-            repos/${{ github.repository }}/deployments \
-            -f ref="$TAG" \
-            -f environment="pypi" \
-            -f description="Publish scansci-pdf $VERSION to PyPI" \
-            --jq '.id')
+          # auto_merge:false avoids a 409 when master has moved past the tag.
+          DEPLOYMENT_ID=$(echo "{\"ref\":\"$TAG\",\"environment\":\"pypi\",\"description\":\"Publish scansci-pdf $VERSION to PyPI\",\"required_contexts\":[],\"auto_merge\":false}" \
+            | gh api --method POST \
+              repos/${{ github.repository }}/deployments \
+              --input - \
+              --jq '.id')
 
           if [ -z "$DEPLOYMENT_ID" ]; then
             echo "Failed to create deployment"
