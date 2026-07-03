@@ -18,8 +18,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
-from .extractors import pdf_extractor
-from .publisher_pdf_router import (
+from ..extractors import pdf_extractor
+from ..publisher_pdf_router import (
     build_pdf_candidates,
     extract_elsevier_pii,
     is_pdf_candidate_url,
@@ -399,7 +399,7 @@ class PublisherBatchDownloader:
         return target
 
     def _launch_context(self, profile_dir: str | Path | None = None):
-        from .cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
+        from ..cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
 
         ensure_cloakbrowser_platform_compatible()
         from cloakbrowser import launch_persistent_context

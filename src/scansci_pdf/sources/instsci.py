@@ -43,6 +43,16 @@ except ImportError:
 
 log = get_logger()
 
+# Config key migration: v1.7.0 renamed instsci_* → vpnsci_*.  Prefer the new
+# vpnsci_* keys, fall back to legacy instsci_* so existing user configs keep
+# working.  Both naming conventions resolve to the same value.
+def _cfg(config: dict[str, Any], suffix: str, default: Any = None) -> Any:
+    """Read a config value trying vpnsci_<suffix> then instsci_<suffix>."""
+    if "vpnsci_" + suffix in config:
+        return config["vpnsci_" + suffix]
+    return config.get("instsci_" + suffix, default)
+
+
 # Rate limiting between WebVPN requests
 _last_instsci_time = 0.0
 _INSTSCI_DELAY_MIN = 2.0
@@ -61,7 +71,7 @@ def _instsci_rate_limit() -> None:
 
 
 def instsci_cookie_path(config: dict[str, Any]) -> Path:
-    configured = config.get("instsci_cookie_file")
+    configured = _cfg(config, "cookie_file")
     if configured:
         return Path(configured).expanduser()
     from ..config import DEFAULT_CONFIG
@@ -69,15 +79,15 @@ def instsci_cookie_path(config: dict[str, Any]) -> Path:
 
 
 def instsci_is_configured(config: dict[str, Any]) -> bool:
-    return bool(config.get("instsci_enabled") and _get_webvpn_base(config))
+    return bool(_cfg(config, "enabled", False) and _get_webvpn_base(config))
 
 
 def _get_webvpn_base(config: dict[str, Any]) -> str:
     """Get WebVPN base URL, resolving from school if needed."""
-    base = config.get("instsci_base_url", "").strip()
+    base = _cfg(config, "base_url", "").strip()
     if base:
         return base.rstrip("/")
-    school = config.get("instsci_school", "")
+    school = _cfg(config, "school", "")
     if school:
         try:
             from ..schools import get_school
@@ -106,7 +116,7 @@ def _get_aes():
 def _get_school_keys(config: dict[str, Any]) -> tuple[bytes, bytes]:
     """Get AES key and IV for the configured school."""
     default_key = b"wrdvpnisthebest!"
-    school = config.get("instsci_school", "")
+    school = _cfg(config, "school", "")
     if school:
         try:
             from ..schools import get_school
@@ -236,7 +246,7 @@ def _is_campus_connector_mode(config: dict[str, Any]) -> bool:
     if not proxy:
         return False
     # If school type is easyconnect or atrust, use direct access via SOCKS5
-    school = config.get("instsci_school", "")
+    school = _cfg(config, "school", "")
     if school:
         try:
             from ..schools import get_school
@@ -981,7 +991,7 @@ def try_instsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     Note: CARSI is now a standalone source tier (carsi_source.try_carsi),
     called independently from the download orchestrator.
     """
-    if not config.get("instsci_enabled", False):
+    if not _cfg(config, "enabled", False):
         return None
 
     # Step 0: SOCKS5 campus connector mode (EasyConnect/aTrust) — direct access
