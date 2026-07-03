@@ -500,7 +500,7 @@ def _run_tiers_parallel(
 
         log.info(f"   All sources failed")
     finally:
-        pool.shutdown(wait=False)
+        pool.shutdown(wait=True, cancel_futures=True)
         # Cleanup temp files
         for _, other_path in futures.values():
             if other_path != output_path and other_path.exists():
