@@ -17,7 +17,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # contents: write + deployments: write are required by the
+      # "Record GitHub Deployment" step to create a deployment on the tag ref
+      # and post its status. With only contents:read, gh api returned
+      # HTTP 403 "Resource not accessible by integration" on v1.8.0.
+      contents: write
+      deployments: write
       id-token: write
 
     steps:
