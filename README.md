@@ -289,6 +289,19 @@ pip install "scansci-pdf[cloakbrowser]"
 scansci-pdf browser-doctor
 ```
 
+CloakBrowser 是反爬检测对抗库，**指纹补丁和检测规则更新频繁**。如果以前能下载的站点突然开始被 Cloudflare/CAPTCHA 拦截、出现 403 或空响应，大概率是本地 cloakbrowser 版本过期，建议定期升级：
+
+```bash
+pip install -U cloakbrowser
+```
+
+可以用以下任一命令检查当前版本是否过旧（离线比对，不会联网上报）：
+
+```bash
+scansci-pdf doctor          # 表格中 package: cloakbrowser 行，过旧会标黄
+scansci-pdf browser-doctor  # JSON 中 cloakbrowser_version.status = outdated
+```
+
 ---
 
 ## 故障排查
@@ -320,6 +333,20 @@ scansci_pdf_network_diagnose
 - 确认安装了完整依赖：`pip install "scansci-pdf[cloakbrowser,instsci]"`
 - 在可见浏览器中完成登录、验证码或二次验证
 - 登录后重新运行下载命令
+
+### 浏览器下载以前能用，现在被拦
+
+出版商和 Cloudflare 会持续更新反爬检测，cloakbrowser 也需要跟着升级来应对。如果以前能正常下载的出版商站点突然返回 403、长时间空白、跳到 CAPTCHA 或 Cloudflare 验证页，先检查 cloakbrowser 是否过旧：
+
+```bash
+scansci-pdf doctor
+```
+
+如果 `package: cloakbrowser` 标黄并提示 `outdated`，升级即可：
+
+```bash
+pip install -U cloakbrowser
+```
 
 ### 下载速度慢
 

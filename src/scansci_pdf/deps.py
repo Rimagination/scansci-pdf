@@ -107,6 +107,17 @@ def print_status() -> None:
             has_optional = True
         log.info(f"  [{status}] {module} - {info['description']}")
 
+    # cloakbrowser iterates on anti-detection patches fast; flag stale installs
+    # so users know to upgrade even when the package is present.
+    if report["optional"].get("cloakbrowser", {}).get("available"):
+        try:
+            from .cli import _cloakbrowser_version_status
+            cb_status, cb_detail = _cloakbrowser_version_status()
+            if cb_status == "outdated":
+                log.warning(f"  [STALE] cloakbrowser {cb_detail}")
+        except Exception:
+            pass
+
     if has_optional:
         log.info("  Install optional deps: pip install scansci-pdf[fast,vpnsci]")
 

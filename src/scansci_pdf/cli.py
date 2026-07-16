@@ -92,6 +92,39 @@ def _installed_package_version(name: str) -> str:
         return ""
 
 
+# Minimum recommended cloakbrowser version. cloakbrowser iterates on
+# fingerprint patches and anti-detection fixes very frequently; older versions
+# fall behind bot-detection heuristics and start failing silently. This is a
+# soft floor surfaced by `doctor`/`check`/`browser-doctor` (offline, no network),
+# not a hard install requirement. Bump it whenever you pin a new floor in
+# pyproject.toml.
+CLOAKBROWSER_RECOMMENDED_MIN = "0.4.11"
+
+
+def _parse_version_tuple(v: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for token in (v or "").split("."):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _cloakbrowser_version_status() -> tuple[str, str]:
+    """Return (status, detail) for the installed cloakbrowser.
+
+    status is one of: not_installed / outdated / ok. detail carries the version
+    (and an upgrade hint when outdated). Kept offline: anti-detection tooling
+    version checks should not phone home.
+    """
+    version = _installed_package_version("cloakbrowser")
+    if not version:
+        return ("not_installed", "not installed (pip install 'scansci-pdf[cloakbrowser]')")
+    if _parse_version_tuple(version) < _parse_version_tuple(CLOAKBROWSER_RECOMMENDED_MIN):
+        hint = f"{version} (outdated, recommend >={CLOAKBROWSER_RECOMMENDED_MIN}: pip install -U cloakbrowser)"
+        return ("outdated", hint)
+    return ("ok", version)
+
+
 def _doctor_checks() -> list[tuple[str, str, str]]:
     import shutil
     checks: list[tuple[str, str, str]] = [
@@ -100,9 +133,13 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
     for command in ("scansci-pdf", "scansci-pdf-mcp"):
         path = shutil.which(command)
         checks.append((command, "ok" if path else "warning", path or "not found on PATH"))
-    for package in ("scansci-pdf", "pymupdf", "cloakbrowser"):
+    # scansci-pdf + pymupdf: simple installed/missing check
+    for package in ("scansci-pdf", "pymupdf"):
         version = _installed_package_version(package)
         checks.append((f"package: {package}", "ok" if version else "warning", version or "not installed"))
+    # cloakbrowser: also flag stale versions (anti-detection patches age fast)
+    cb_status, cb_detail = _cloakbrowser_version_status()
+    checks.append(("package: cloakbrowser", cb_status if cb_status != "not_installed" else "warning", cb_detail))
     try:
         from .cloakbrowser_compat import configure_builtin_cloakbrowser
         cache_dir = configure_builtin_cloakbrowser(create_dir=False)
@@ -122,7 +159,7 @@ def doctor():
     table.add_column("Item", width=24)
     table.add_column("Status", width=10)
     table.add_column("Detail", overflow="fold")
-    styles = {"ok": "green", "warning": "yellow", "info": "cyan"}
+    styles = {"ok": "green", "warning": "yellow", "info": "cyan", "outdated": "yellow", "not_installed": "yellow"}
     for label, status, detail in _doctor_checks():
         style = styles.get(status, "white")
         table.add_row(label, f"[{style}]{status}[/{style}]", detail)

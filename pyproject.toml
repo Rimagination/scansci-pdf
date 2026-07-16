@@ -1,6 +1,6 @@
 [project]
 name = "scansci-pdf"
-version = "1.7.1"
+version = "1.8.0"
 description = "MCP server for academic paper downloading with Sci-Hub, OA sources, multi-university WebVPN, and Tor support"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -20,7 +20,7 @@ fast = ["lxml>=4.9"]
 # so existing `pip install scansci-pdf[instsci]` commands keep working.
 vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
-cloakbrowser = ["cloakbrowser>=0.3"]
+cloakbrowser = ["cloakbrowser>=0.4.11"]
 web = ["fastapi>=0.115", "jinja2>=3.1"]
 dev = ["pytest>=8.0"]
 compile = ["cython>=3.0"]

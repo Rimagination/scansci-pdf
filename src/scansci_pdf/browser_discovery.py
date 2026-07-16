@@ -174,7 +174,21 @@ class BrowserRuntimeResolver:
 
 
 def doctor() -> Dict[str, Any]:
-    return BrowserRuntimeResolver().doctor()
+    result = BrowserRuntimeResolver().doctor()
+    # Surface cloakbrowser version freshness. cloakbrowser iterates on
+    # anti-detection patches fast; surfacing staleness here lets users
+    # diagnose silent bot-detection failures via scansci-pdf browser-doctor.
+    try:
+        from .cli import _cloakbrowser_version_status, CLOAKBROWSER_RECOMMENDED_MIN
+        cb_status, cb_detail = _cloakbrowser_version_status()
+        result["cloakbrowser_version"] = {
+            "status": cb_status,
+            "detail": cb_detail,
+            "recommended_min": CLOAKBROWSER_RECOMMENDED_MIN,
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        result["cloakbrowser_version"] = {"status": "unknown", "detail": str(exc)}
+    return result
 
 
 def main(argv: Optional[List[str]] = None) -> int:
