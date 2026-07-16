@@ -231,7 +231,9 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `auto_rename` | `true` | 自动按作者/标题重命名 |
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
 | `network_proxy` | 空 | HTTP/SOCKS 代理地址 |
-| `batch_workers` | `10` | 批量下载并发数 |
+| `batch_workers` | `10` | 批量下载并发数（被封 IP 时建议调低到 2） |
+| `request_delay_min` | `2.0` | 请求间随机延迟下限（秒） |
+| `request_delay_max` | `5.0` | 请求间随机延迟上限（秒） |
 | `instsci_enabled` | `false` | 启用 WebVPN |
 | `instsci_school` | 空 | WebVPN 学校名称 |
 | `carsi_enabled` | `false` | 启用 CARSI |
@@ -346,6 +348,34 @@ scansci-pdf doctor
 
 ```bash
 pip install -U cloakbrowser
+```
+
+### 被 ACS 等出版商封 IP（IP Address Blocked）
+
+批量下载 ACS（`pubs.acs.org`）等出版商时，可能遇到整页报错：
+
+> IP Address Blocked — Your IP address has been blocked automatically due to unusual behavior. Contact ipblock@acs.org.
+
+这是出版商的自动反爬封锁。机构出口 IP（如校园网 `166.111.x.x`）是共享的，**一个人触发就可能让整段 IP 被封**，所以容易"经常有人遇到"。
+
+**立即解除**（封禁在出版商侧，代码改不了）：
+
+- 邮件 `ipblock@acs.org` 申诉，附上被封 IP，通常 1–3 个工作日解封
+- 换出口 IP（代理 / 手机热点）可绕过，但会失去机构订阅授权，只能下 OA 论文
+- 部分封锁会在 24–48 小时后自动解除
+
+**预防**（降低被封概率）——让请求看起来像人在浏览，而不是 10 线程同时打：
+
+```bash
+scansci-pdf config-cmd batch_workers 2          # 调低并发（默认 10）
+scansci-pdf config-cmd request_delay_min 5      # 拉大随机延迟下限（默认 2）
+scansci-pdf config-cmd request_delay_max 12     # 拉大随机延迟上限（默认 5）
+```
+
+**自动停损**：从 v1.9.0 起，批量任务一旦**连续 3 次**检测到 IP 被封（ACS 封锁页 / HTTP 403 / 429），会自动取消剩余下载，避免越踩越深。无需配置，默认开启。触发时终端会显示：
+
+```
+⚠ 已自动停止：连续检测到 IP 被出版商封禁（N 篇返回 ip_blocked），剩余任务已取消。
 ```
 
 ### 下载速度慢

@@ -80,6 +80,17 @@ def _print_batch_summary(summary: dict, *, extra_lines: list[str] | None = None)
     )
     console.print(f"[dim]PDF dir: {summary['pdf_dir']}[/dim]")
     console.print(f"[dim]Manifest: {summary['manifest']}[/dim]")
+    # Auto-stop banner: make clear the batch was halted, not finished cleanly.
+    if summary.get("auto_stopped"):
+        n = summary.get("ip_blocked_count", 0)
+        console.print(
+            f"[yellow bold]⚠ 已自动停止：[/yellow bold]连续检测到 IP 被出版商封禁"
+            f"（{n} 篇返回 ip_blocked），剩余任务已取消。"
+        )
+        console.print(
+            "[yellow]应对：调低 batch_workers、增大 request_delay_min/max，"
+            "或参考 README「被封 IP」章节。[/yellow]"
+        )
     for line in extra_lines or []:
         console.print(line)
 

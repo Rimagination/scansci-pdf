@@ -48,6 +48,18 @@ RETRYABLE_REASONS = {
     "challenge_or_viewer_timeout",
 }
 
+# Consecutive ip_blocked results from one run that halt the remaining records.
+# An ACS / publisher IP block is not transient for the session (the IP stays
+# blocked), so continuing only deepens it. 3 tolerates a stray single-record 403
+# (e.g. one entitlement miss) while still tripping fast on a real block.
+# NOTE: "ip_blocked" is intentionally NOT in RETRYABLE_REASONS.
+IP_BLOCK_STOP_THRESHOLD = 3
+
+# HTTP status codes that, when seen on a publisher PDF/article endpoint, are
+# treated as an IP block signal. 403 is ACS's block-page status; 429 is the
+# generic rate-limit/block code.
+_IP_BLOCK_STATUS_CODES = {403, 429}
+
 # Reusable JS helpers injected into page.evaluate() calls
 _JS_VISIBLE = """(el) => {
     const rect = el.getBoundingClientRect();
@@ -256,6 +268,9 @@ class PublisherBatchDownloader:
         self.pdf_timeout_ms = max(1, pdf_timeout_sec) * 1_000
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
+        # Set True by _run_once/_run_once_parallel when IP_BLOCK_STOP_THRESHOLD
+        # consecutive ip_blocked results trip an auto-stop. Read by run_records.
+        self._ip_block_stopped: bool = False
 
     def run_records(
         self,
@@ -298,6 +313,8 @@ class PublisherBatchDownloader:
                 else:
                     records_to_run.append(record)
 
+        self._ip_block_stopped = False  # reset; set by _run_once(_parallel) on trip
+
         results = self._run_once(
             records_to_run,
             run_path / "primary",
@@ -306,6 +323,7 @@ class PublisherBatchDownloader:
             phase="primary",
             concurrency=worker_count,
         )
+        primary_ip_blocked = self._ip_block_stopped
         primary_counts = self._count_results(results)
         target_reached = bool(target and self._count_verified(results) >= target)
         if target_reached and len(results) < len(records_to_run):
@@ -319,7 +337,10 @@ class PublisherBatchDownloader:
         ]
 
         retry_results: list[DownloadResult] = []
-        if retry_failed and failed_records and not target_reached:
+        # Skip the retry pass entirely when the primary pass was auto-stopped
+        # for an IP block — retrying against a still-blocked IP only deepens it.
+        retry_skipped_ip_block = primary_ip_blocked
+        if retry_failed and failed_records and not target_reached and not retry_skipped_ip_block:
             remaining_target = target - self._count_verified(results) if target else None
             retry_results = self._run_once(
                 failed_records,
@@ -349,6 +370,13 @@ class PublisherBatchDownloader:
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
         summary["browser_profile_dir"] = str(Path(self.config.get("chrome_profile_dir", "")))
+        # Surface auto-stop so callers (CLI/MCP) can tell a halt from a clean
+        # finish. ip_block_count is how many records came back ip_blocked in the
+        # primary pass (the trip trigger).
+        ip_blocked_total = sum(1 for r in results if r.reason == "ip_blocked")
+        summary["auto_stopped"] = bool(retry_skipped_ip_block)
+        summary["stop_reason"] = "ip_blocked" if retry_skipped_ip_block else ""
+        summary["ip_blocked_count"] = ip_blocked_total
         (run_path / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -378,6 +406,7 @@ class PublisherBatchDownloader:
 
         results: list[DownloadResult] = []
         verified_count = 0
+        consecutive_ip_blocks = 0
 
         context = self._launch_context()
         try:
@@ -388,6 +417,15 @@ class PublisherBatchDownloader:
                     verified_count += 1
                 self._append_attempt(attempt_cache_path, result, phase)
                 self._write_results(run_dir / "summary_partial.json", results)
+                # Auto-stop on consecutive IP blocks (serial mirror of the
+                # parallel path's stop_event logic).
+                if result.reason == "ip_blocked":
+                    consecutive_ip_blocks += 1
+                    if consecutive_ip_blocks >= IP_BLOCK_STOP_THRESHOLD:
+                        self._ip_block_stopped = True
+                        break
+                else:
+                    consecutive_ip_blocks = 0
                 if target_verified and verified_count >= target_verified:
                     break
         finally:
@@ -430,6 +468,13 @@ class PublisherBatchDownloader:
         results_lock = threading.Lock()
         attempt_lock = threading.Lock()
 
+        # Auto-stop state: once IP_BLOCK_STOP_THRESHOLD consecutive records come
+        # back ip_blocked, the remaining records are skipped. A blocked IP does
+        # not unblock mid-run, so churning the rest only deepens the block.
+        stop_event = threading.Event()
+        ip_block_count = {"n": 0}
+        count_lock = threading.Lock()
+
         def record_result(index: int, result: DownloadResult) -> None:
             with results_lock:
                 results_by_index[index] = result
@@ -437,6 +482,19 @@ class PublisherBatchDownloader:
                 self._write_results(run_dir / "summary_partial.json", partial)
             with attempt_lock:
                 self._append_attempt(attempt_cache_path, result, phase)
+            # Escalate to a hard stop after N consecutive IP blocks.
+            if result.reason == "ip_blocked":
+                with count_lock:
+                    ip_block_count["n"] += 1
+                    tripped = ip_block_count["n"] >= IP_BLOCK_STOP_THRESHOLD
+                if tripped and not stop_event.is_set():
+                    stop_event.set()
+                    self._ip_block_stopped = True
+            elif result.ok or result.reason:
+                # A success or any non-block failure resets the streak — only
+                # *consecutive* blocks should trip the stop.
+                with count_lock:
+                    ip_block_count["n"] = 0
 
         # Single shared context — login state fully preserved
         context = self._launch_context(profile_dir=profile_dir)
@@ -444,6 +502,8 @@ class PublisherBatchDownloader:
 
         def run_worker(items: list[tuple[int, PaperRecord]]) -> None:
             for item_index, record in items:
+                if stop_event.is_set():
+                    break  # IP block tripped — skip the rest of this chunk
                 page = page_pool.acquire()
                 try:
                     record_result(item_index, self.fetch_one(page, record, run_dir))
@@ -661,7 +721,8 @@ class PublisherBatchDownloader:
             result.title = self._title(page)
             result.state = "article_loaded"
             self._hold_after_login(page, result)
-            pdf_bytes, pdf_url = self._capture_pdf(page, record.doi, result)
+            ip_block: str | None = None
+            pdf_bytes, pdf_url, ip_block = self._capture_pdf(page, record.doi, result)
             if not pdf_bytes:
                 if self._looks_logged_out(page):
                     self._event(result, "auth_wall_after_pdf_attempt", getattr(page, "url", ""))
@@ -669,13 +730,25 @@ class PublisherBatchDownloader:
                         result.final_url = page.url
                         result.title = self._title(page)
                         result.state = "article_loaded_after_sso"
-                        pdf_bytes, pdf_url = self._capture_pdf(page, record.doi, result)
+                        pdf_bytes, pdf_url, cap_block = self._capture_pdf(page, record.doi, result)
+                        ip_block = ip_block or cap_block
                     elif self._article_access_available(page):
                         self._event(result, "login_completed_after_timeout", getattr(page, "url", ""))
                         result.final_url = page.url
                         result.title = self._title(page)
                         result.state = "article_loaded_after_sso"
-                        pdf_bytes, pdf_url = self._capture_pdf(page, record.doi, result)
+                        pdf_bytes, pdf_url, cap_block = self._capture_pdf(page, record.doi, result)
+                        ip_block = ip_block or cap_block
+                    # An IP block is terminal for this session — surface it ahead
+                    # of any auth-wall reason so the batch can auto-stop instead
+                    # of pointlessly retrying login against a blocked IP.
+                    if ip_block:
+                        result.reason = "ip_blocked"
+                        result.state = "ip_blocked"
+                        result.final_url = page.url
+                        result.title = self._title(page)
+                        self._write_diagnostic(page, result, run_dir)
+                        return result
                     block_reason = self._login_block_reason(page)
                     if not pdf_bytes and (block_reason or self._looks_logged_out(page)):
                         result.reason = block_reason or "sso_required"
@@ -692,6 +765,13 @@ class PublisherBatchDownloader:
                         self._write_diagnostic(page, result, run_dir)
                         return result
                 else:
+                    if ip_block:
+                        result.reason = "ip_blocked"
+                        result.state = "ip_blocked"
+                        result.final_url = page.url
+                        result.title = self._title(page)
+                        self._write_diagnostic(page, result, run_dir)
+                        return result
                     block_reason = self._login_block_reason(page)
                     result.reason = block_reason or "pdf_not_captured"
                     result.state = result.reason
@@ -699,6 +779,14 @@ class PublisherBatchDownloader:
                     result.title = self._title(page)
                     self._write_diagnostic(page, result, run_dir)
                     return result
+
+            if not pdf_bytes:
+                result.reason = "pdf_not_captured"
+                result.state = "pdf_not_captured"
+                result.final_url = page.url
+                result.title = self._title(page)
+                self._write_diagnostic(page, result, run_dir)
+                return result
 
             if not pdf_bytes:
                 result.reason = "pdf_not_captured"
@@ -1707,14 +1795,32 @@ class PublisherBatchDownloader:
             except Exception:
                 continue
 
-    def _capture_pdf(self, page: Any, doi: str, result: DownloadResult) -> tuple[bytes | None, str]:
-        captured: dict[str, Any] = {"bytes": None, "url": "", "deferred_url": ""}
+    def _capture_pdf(self, page: Any, doi: str, result: DownloadResult) -> tuple[bytes | None, str, str | None]:
+        """Capture the PDF for ``doi`` from ``page``.
+
+        Returns ``(body, url, block_reason)`` where ``block_reason`` is
+        ``"ip_blocked"`` if a publisher IP-block signal (403/429 or block page)
+        was observed during capture, else ``None``.
+        """
+        captured: dict[str, Any] = {"bytes": None, "url": "", "deferred_url": "", "block_reason": None}
 
         def on_response(response: Any) -> None:
             if captured["bytes"]:
                 return
             try:
                 url = response.url
+                status = getattr(response, "status", None)
+                # Detect a publisher IP-block response before anything else:
+                # a 403/429 on a PDF/article endpoint means our IP is blocked,
+                # and continuing to churn只会加深封锁。
+                if status in _IP_BLOCK_STATUS_CODES and not captured["block_reason"]:
+                    try:
+                        snippet = response.text()[:8192] if hasattr(response, "text") else response.body()
+                    except Exception:
+                        snippet = ""
+                    if self._is_ip_block_response(status, snippet):
+                        captured["block_reason"] = "ip_blocked"
+                        self._event(result, "ip_blocked_response", f"{status} {url}")
                 content_type = (response.headers.get("content-type") or "").lower()
                 if self._is_supplementary_url(url):
                     return
@@ -1724,6 +1830,12 @@ class PublisherBatchDownloader:
                     captured["deferred_url"] = url
                     return
                 body = response.body()
+                # Body-level block-page detection (some block pages are 200
+                # with an HTML "IP Address Blocked" body).
+                if not body[:5] == b"%PDF-" and not captured["block_reason"]:
+                    if self._is_ip_block_response(None, body):
+                        captured["block_reason"] = "ip_blocked"
+                        self._event(result, "ip_blocked_body", url)
                 if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
                     captured["bytes"] = body
                     captured["url"] = url
@@ -1736,10 +1848,12 @@ class PublisherBatchDownloader:
             if self._click_pdf_entry(page, result, doi=doi):
                 time.sleep(5)
                 if not captured["bytes"]:
-                    body, final_url = self._fetch_page_state_pdf(page)
+                    body, final_url, block_reason = self._fetch_page_state_pdf(page)
                     if body:
                         captured["bytes"] = body
                         captured["url"] = final_url
+                    if block_reason and not captured["block_reason"]:
+                        captured["block_reason"] = block_reason
             for pdf_url in self._pdf_candidates(page, doi):
                 if captured["bytes"]:
                     break
@@ -1763,10 +1877,12 @@ class PublisherBatchDownloader:
                                 captured["bytes"] = body
                                 captured["url"] = response.url
                     if not captured["bytes"]:
-                        body, final_url = self._fetch_page_state_pdf(page, response, [str(captured["deferred_url"])])
+                        body, final_url, block_reason = self._fetch_page_state_pdf(page, response, [str(captured["deferred_url"])])
                         if body:
                             captured["bytes"] = body
                             captured["url"] = final_url
+                        if block_reason and not captured["block_reason"]:
+                            captured["block_reason"] = block_reason
                 except Exception as exc:
                     self._event(result, "pdf_navigation_error", f"{type(exc).__name__}: {exc}")
                     if self._is_download_navigation_abort(exc):
@@ -1777,17 +1893,19 @@ class PublisherBatchDownloader:
                 self._wait_for_challenge(page, result)
                 time.sleep(3)
                 if not captured["bytes"]:
-                    body, final_url = self._fetch_page_state_pdf(page, extra_urls=[str(captured["deferred_url"])])
+                    body, final_url, block_reason = self._fetch_page_state_pdf(page, extra_urls=[str(captured["deferred_url"])])
                     if body:
                         captured["bytes"] = body
                         captured["url"] = final_url
                         break
+                    if block_reason and not captured["block_reason"]:
+                        captured["block_reason"] = block_reason
         finally:
             try:
                 page.remove_listener("response", on_response)
             except Exception:
                 pass
-        return captured["bytes"], str(captured["url"])
+        return captured["bytes"], str(captured["url"]), captured["block_reason"]
 
     def _click_pdf_entry(self, page: Any, result: DownloadResult, *, doi: str = "") -> bool:
         if self.profile.name.lower() == "elsevier":
@@ -1998,14 +2116,25 @@ class PublisherBatchDownloader:
         page: Any,
         response: Any | None = None,
         extra_urls: list[str] | None = None,
-    ) -> tuple[bytes | None, str]:
+    ) -> tuple[bytes | None, str, str | None]:
+        """Try to fetch a PDF from URLs visible in the page state.
+
+        Returns ``(body, url, block_reason)`` — ``block_reason`` is propagated
+        up from :meth:`_fetch_pdf_url` so an IP block observed on the plain-HTTP
+        fallback path is not lost.
+        """
         for fallback_url in self._page_state_pdf_urls(page, response, extra_urls):
             if not self._is_pdf_candidate_url(fallback_url) or self._is_supplementary_url(fallback_url):
                 continue
-            body, final_url = self._fetch_pdf_url_with_browser_state(fallback_url, page)
+            body, final_url, block_reason = self._fetch_pdf_url_with_browser_state(fallback_url, page)
             if body:
-                return body, final_url
-        return None, ""
+                return body, final_url, None
+            if block_reason:
+                # Keep trying only the URL that produced a real PDF; but remember
+                # the block signal so the caller can escalate even if no PDF is
+                # ever captured.
+                return None, final_url, block_reason
+        return None, "", None
 
     def _page_state_pdf_urls(
         self,
@@ -2092,7 +2221,7 @@ class PublisherBatchDownloader:
         message = str(exc)
         return "Download is starting" in message or "net::ERR_ABORTED" in message
 
-    def _fetch_pdf_url_with_browser_state(self, url: str, page: Any) -> tuple[bytes | None, str]:
+    def _fetch_pdf_url_with_browser_state(self, url: str, page: Any) -> tuple[bytes | None, str, str | None]:
         try:
             signature = inspect.signature(self._fetch_pdf_url)
         except (TypeError, ValueError):
@@ -2121,7 +2250,44 @@ class PublisherBatchDownloader:
             return self._wait_for_challenge(page, result, deadline=deadline)
         return self._wait_for_challenge(page, result)
 
-    def _fetch_pdf_url(self, url: str, *, page: Any | None = None) -> tuple[bytes | None, str]:
+    def _is_ip_block_response(self, status_code: int | None, body_or_text: str | bytes | None) -> bool:
+        """Return True if this response looks like a publisher IP block.
+
+        Detects two independent signals so a block is caught whichever path it
+        surfaces on:
+        - HTTP status 403 (ACS serves its block page with 403) or 429
+        - Body text containing ACS's block-page markers, e.g.
+          "IP Address Blocked", "your IP address has been blocked", or the
+          contact mailbox "ipblock@acs.org"
+
+        ``body_or_text`` may be bytes or str; only a prefix is inspected.
+        """
+        if status_code is not None and status_code in _IP_BLOCK_STATUS_CODES:
+            return True
+        if not body_or_text:
+            return False
+        if isinstance(body_or_text, bytes):
+            try:
+                body_or_text = body_or_text[:8192].decode("utf-8", errors="ignore")
+            except Exception:
+                return False
+        text = body_or_text[:8192].lower()
+        if "ipblock@acs.org" in text:
+            return True
+        # "ip address" near "blocked" covers "IP Address Blocked" and
+        # "your IP address has been blocked automatically".
+        if "ip address" in text and "block" in text:
+            return True
+        return False
+
+    def _fetch_pdf_url(self, url: str, *, page: Any | None = None) -> tuple[bytes | None, str, str | None]:
+        """Fetch a PDF URL with the browser's cookies/headers.
+
+        Returns ``(body, final_url, block_reason)``. ``block_reason`` is
+        ``"ip_blocked"`` when the publisher returned a 403/429 or an IP-block
+        page (so the caller can stop the batch instead of churning); ``None``
+        otherwise.
+        """
         headers = self._pdf_request_headers(url, page)
         try:
             resp = requests.get(
@@ -2130,12 +2296,14 @@ class PublisherBatchDownloader:
                 timeout=(10, 60),
                 allow_redirects=True,
             )
+            if self._is_ip_block_response(resp.status_code, resp.text):
+                return None, resp.url, "ip_blocked"
             body = resp.content
             if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
-                return body, resp.url
+                return body, resp.url, None
         except Exception:
-            return None, url
-        return None, resp.url
+            return None, url, None
+        return None, resp.url, None
 
     def _pdf_request_headers(self, url: str, page: Any | None = None) -> dict[str, str]:
         headers: dict[str, str] = {"User-Agent": "scansci-pdf/1.5"}
