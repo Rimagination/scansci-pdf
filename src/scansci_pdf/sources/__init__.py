@@ -5,17 +5,20 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import shutil
 import threading
 import time
+import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..cache import cache_get, cache_set
 from ..config import load_config, DATA_DIR
 from ..identifiers import is_arxiv_identifier, normalize_doi, safe_filename
 from ..log import get_logger
-from ..pdf_utils import fail
+from ..pdf_utils import fail, publish_pdf_file_atomic
 from ..rename import rename_pdf, generate_filename as rename_pdf_generate_filename
 
 # Import compiled core functions if available (Cython .pyd/.so)
@@ -41,22 +44,8 @@ from .scibban import try_scibban
 from .scihub import try_scihub
 from .semantic_scholar import try_semanticscholar
 from .unpaywall import try_unpaywall
-from .vpnsci import try_vpnsci
+from .instsci import try_instsci
 from .ezproxy import try_ezproxy
-
-# Institutional bridge — uses instsci PaperFetcher when available
-def _try_institutional_bridge(doi: str, output_path: Path, config: dict) -> dict | None:
-    """Lazy-loaded instsci institutional bridge."""
-    try:
-        from ..institutional.instsci_bridge import try_institutional
-        return try_institutional(doi, output_path, config)
-    except ImportError:
-        return None
-
-# Global semaphore to limit concurrent browser-based sources across all DOI
-# Prevents batch_workers × browser_sources_per_DOI explosion of Chrome windows
-_browser_semaphore: threading.Semaphore | None = None
-_browser_semaphore_lock = threading.Lock()
 
 # Source labels that require launching a browser (CloakBrowser)
 _BROWSER_SOURCE_LABELS = frozenset({
@@ -69,104 +58,187 @@ _BROWSER_SOURCE_LABELS = frozenset({
     # Sci-Hub launches CloakBrowser internally (browser-first pass +
     # Cloudflare/ALTCHA challenge solving), so it must participate in the
     # global browser-source concurrency budget.
-    "Sci-Hub",
+    "LibGen", "Sci-Hub", "ScienceDirect", "PublisherDirect",
 })
 
+
+class _CombinedCancelEvent(threading.Event):
+    """Event view that becomes set when any constituent event is set."""
+
+    def __init__(self, *events: threading.Event | None) -> None:
+        super().__init__()
+        self._events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return super().is_set() or any(event.is_set() for event in self._events)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while not self.is_set():
+            if deadline is None:
+                wait_for = 0.05
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self.is_set()
+                wait_for = min(0.05, remaining)
+            super().wait(wait_for)
+        return True
 
 
 def _any_institutional_path(config: dict[str, Any]) -> bool:
     """Check if any institutional access is configured."""
     return bool(
         (config.get("carsi_enabled") and config.get("carsi_idp_name", "").strip())
-        or (config.get("vpnsci_enabled") and (config.get("vpnsci_school") or config.get("vpnsci_base_url")))
+        or (
+            (config.get("vpnsci_enabled") or config.get("instsci_enabled"))
+            and (
+                config.get("vpnsci_school")
+                or config.get("vpnsci_base_url")
+                or config.get("instsci_school")
+                or config.get("instsci_base_url")
+            )
+        )
         or (config.get("ezproxy_enabled") and config.get("ezproxy_login_url"))
         or config.get("elsevier_api_key")
     )
 
 
-def _get_browser_semaphore(config: dict[str, Any]) -> threading.Semaphore:
-    """Get or create the global browser concurrency semaphore."""
-    global _browser_semaphore
-    max_workers = config.get("max_browser_workers", 1)
-    if _browser_semaphore is None:
-        with _browser_semaphore_lock:
-            if _browser_semaphore is None:
-                _browser_semaphore = threading.Semaphore(max_workers)
-    return _browser_semaphore
+def _browser_worker_limit(config: dict[str, Any]) -> int:
+    """Compatibility shim for the browser engine's single global limiter."""
+    from ..browser_engine import _browser_worker_limit as engine_worker_limit
+    return engine_worker_limit(config)
 from .carsi_source import try_carsi
 
 __all__ = ["download", "batch_download"]
 
-_cleanup_done = False
+_cleanup_done_dirs: set[Path] = set()
+_cleanup_lock = threading.Lock()
+_STALE_RACE_DIR_AGE_SECONDS = 3600
+_SCIHUB_RACE_SUFFIX_LENGTH = 8
+_SCIHUB_RACE_SUFFIX_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def _is_managed_race_dir(path: Path) -> bool:
+    name = path.name
+    if name.startswith(".race-"):
+        suffix = name.removeprefix(".race-").lower()
+        return len(suffix) == 32 and all(char in "0123456789abcdef" for char in suffix)
+    if name.startswith(".scihub-race-"):
+        suffix = name.removeprefix(".scihub-race-")
+        return (
+            len(suffix) == _SCIHUB_RACE_SUFFIX_LENGTH
+            and all(char in _SCIHUB_RACE_SUFFIX_CHARS for char in suffix)
+        )
+    return False
 
 
 def _cleanup_stale_files(target_dir: Path) -> None:
     """Remove orphaned .part files and racing temp files from previous runs."""
-    global _cleanup_done
-    if _cleanup_done:
-        return
-    _cleanup_done = True
-    if not target_dir.exists():
-        return
-    count = 0
-    for f in target_dir.iterdir():
-        if not f.is_file():
-            continue
-        name = f.name
-        # Skip hidden files (like .doi_index.json)
-        if name.startswith("."):
-            continue
-        # Always clean up .part files
-        if name.endswith(".part"):
-            try:
-                f.unlink()
-                count += 1
-            except OSError:
-                pass
-            continue
-        # Clean up racing temp files: DOI-based identifier + source label suffix
-        # e.g. 10_1038_nature12373_Unpaywall.pdf, 10_1016_test_scihub_st.pdf
-        # Must start with 10_ (DOI prefix) and have at least 4 segments (10_NNNN_suffix_label)
-        if name.endswith(".pdf") and name.startswith("10_"):
-            stem = name[:-4]  # remove .pdf
-            # Split from the right to get the last segment as the source label
-            parts = stem.rsplit("_", 1)
-            if len(parts) == 2:
-                base, label = parts
-                # Verify: base must look like a DOI (10_NNNN_... with at least 4 segments)
-                # and label must be a source name (letters, not just a number)
-                base_parts = base.split("_")
-                if (len(base_parts) >= 3
-                        and base_parts[0] == "10"
-                        and base_parts[1].isdigit()
-                        and len(base_parts[1]) >= 3
-                        and any(c.isalpha() for c in label)):
-                    try:
-                        f.unlink()
+    resolved_target = target_dir.resolve()
+    with _cleanup_lock:
+        if resolved_target in _cleanup_done_dirs:
+            return
+        if not target_dir.exists():
+            return
+
+        count = 0
+        now = time.time()
+        for f in target_dir.iterdir():
+            if (
+                f.is_dir()
+                and not f.is_symlink()
+                and _is_managed_race_dir(f)
+            ):
+                try:
+                    if now - f.stat().st_mtime >= _STALE_RACE_DIR_AGE_SECONDS:
+                        shutil.rmtree(f)
                         count += 1
-                    except OSError:
-                        pass
+                except OSError:
+                    pass
+                continue
+            if not f.is_file():
+                continue
+            name = f.name
+            # Skip hidden files (like .doi_index.json)
+            if name.startswith("."):
+                continue
+            # Always clean up .part files
+            if name.endswith(".part"):
+                try:
+                    f.unlink()
+                    count += 1
+                except OSError:
+                    pass
+                continue
+            # Clean up racing temp files: DOI-based identifier + source label suffix
+            # e.g. 10_1038_nature12373_Unpaywall.pdf, 10_1016_test_scihub_st.pdf
+            # Must start with 10_ and have a source-like suffix.
+            if name.endswith(".pdf") and name.startswith("10_"):
+                stem = name[:-4]
+                parts = stem.rsplit("_", 1)
+                if len(parts) == 2:
+                    base, label = parts
+                    base_parts = base.split("_")
+                    if (len(base_parts) >= 3
+                            and base_parts[0] == "10"
+                            and base_parts[1].isdigit()
+                            and len(base_parts[1]) >= 3
+                            and any(c.isalpha() for c in label)):
+                        try:
+                            f.unlink()
+                            count += 1
+                        except OSError:
+                            pass
+        _cleanup_done_dirs.add(resolved_target)
     if count > 0:
         log.info(f"Cleaned up {count} stale temp files")
 
 
 def _try_source(
-    source_fn: Any, doi: str, output_path: Path, config: dict[str, Any], label: str, use_tor: bool = False
+    source_fn: Any,
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    label: str,
+    use_tor: bool = False,
+    cancel_event: threading.Event | None = None,
+    on_success: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any] | None:
     from .scoring import record_result, classify_error, get_user_advice
     t0 = time.time()
 
-    # Limit concurrency for browser-based sources
+    if cancel_event is not None and cancel_event.is_set():
+        return None
+
     is_browser = label in _BROWSER_SOURCE_LABELS
-    sem = _get_browser_semaphore(config) if is_browser else None
-    if sem:
-        sem.acquire()
+    from .. import browser_engine
+    previous_cancel_event = browser_engine._set_thread_cancel_event(cancel_event)
+    slot_lease = None
     try:
+        if is_browser:
+            # A worker thread can be reused after a previous fail-closed
+            # shutdown. Retry those exact owner-thread handles before waiting
+            # for a new permit; never launch a replacement beside them.
+            if (
+                browser_engine._thread_browser_resources_present()
+                and browser_engine.shutdown_shared_browser() is False
+            ):
+                log.info(
+                    f"   FAIL {label}: previous browser could not be closed; "
+                    "retaining its global browser slot"
+                )
+                return None
+            slot_lease = browser_engine.browser_slot(config, cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         sig = inspect.signature(source_fn)
+        kwargs: dict[str, Any] = {}
         if "use_tor" in sig.parameters:
-            result = source_fn(doi, output_path, config, use_tor=use_tor)
-        else:
-            result = source_fn(doi, output_path, config)
+            kwargs["use_tor"] = use_tor
+        if "cancel_event" in sig.parameters:
+            kwargs["cancel_event"] = cancel_event
+        result = source_fn(doi, output_path, config, **kwargs)
         latency_ms = (time.time() - t0) * 1000
         if result:
             result["doi"] = doi
@@ -182,10 +254,17 @@ def _try_source(
                         record_result(label, False, latency_ms, "suspicious_pdf")
                         return suspicious_pdf(doi, fp, label)
                 record_result(label, True, latency_ms)
+                if (
+                    on_success is not None
+                    and not (cancel_event is not None and cancel_event.is_set())
+                ):
+                    on_success(result)
             else:
                 error_type = classify_error(result.get("status_code", 0))
                 record_result(label, False, latency_ms, error_type)
         return result
+    except browser_engine.BrowserOperationCancelled:
+        return None
     except Exception as e:
         latency_ms = (time.time() - t0) * 1000
         error_type = classify_error(exception=e)
@@ -202,8 +281,12 @@ def _try_source(
         log.info(f"   FAIL {label}: {error_type} — {advice}")
         return None
     finally:
-        if sem:
-            sem.release()
+        try:
+            browser_engine.shutdown_shared_browser()
+        finally:
+            browser_engine._set_thread_cancel_event(previous_cancel_event)
+            if slot_lease is not None:
+                slot_lease.close()
 
 
 def _run_tier(
@@ -228,10 +311,8 @@ def _run_tier(
             if result and result.get("success"):
                 final_path = Path(result.get("file", ""))
                 if final_path != output_path and final_path.exists():
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    if output_path.exists():
-                        output_path.unlink()
-                    final_path.rename(output_path)
+                    if not publish_pdf_file_atomic(final_path, output_path):
+                        return None
                     result["file"] = str(output_path)
                 log.info(f"   OK {label}")
                 return result
@@ -262,10 +343,8 @@ def _run_tier(
                 if result and result.get("success"):
                     final_path = Path(result.get("file", ""))
                     if final_path != output_path and final_path.exists():
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        if output_path.exists():
-                            output_path.unlink()
-                        final_path.rename(output_path)
+                        if not publish_pdf_file_atomic(final_path, output_path):
+                            return None
                         result["file"] = str(output_path)
                     for _, other_path in futures.values():
                         if other_path != output_path and other_path.exists():
@@ -347,22 +426,29 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
         return sort_sources(legal_sources + grey_sources)
 
 
-def _build_institutional_sources(doi: str, config: dict[str, Any], *, use_vpnsci: bool = False) -> list[tuple[Any, str]]:
+def _build_institutional_sources(
+    doi: str,
+    config: dict[str, Any],
+    *,
+    use_vpnsci: bool = False,
+    use_instsci: bool = False,
+) -> list[tuple[Any, str]]:
     """Build Phase 2 sources: institutional access only."""
     from .scoring import sort_sources
 
     sources: list[tuple[Any, str]] = []
 
-    if _any_institutional_path(config):
-        sources.append((_try_institutional_bridge, "InstSci"))
-
     if config.get("carsi_enabled", False) and config.get("carsi_idp_name", "").strip():
         sources.append((try_carsi, "CARSI"))
 
-    if use_vpnsci and config.get("vpnsci_enabled", False):
-        sources.append((try_vpnsci, "WebVPN"))
+    use_webvpn = use_vpnsci or use_instsci
+    if use_webvpn and (
+        config.get("vpnsci_enabled", False)
+        or config.get("instsci_enabled", False)
+    ):
+        sources.append((try_instsci, "WebVPN"))
 
-    if use_vpnsci and config.get("ezproxy_enabled", False):
+    if use_webvpn and config.get("ezproxy_enabled", False):
         sources.append((try_ezproxy, "EZProxy"))
 
     return sort_sources(sources)
@@ -376,6 +462,7 @@ def _run_tiers_parallel(
     config: dict[str, Any],
     use_tor: bool,
     overall_timeout: int,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any] | None:
     """Race all tiers in parallel. First successful tier wins.
 
@@ -383,17 +470,7 @@ def _run_tiers_parallel(
     success immediately, even if it's running inside a nested parallel
     call (like Sci-Hub domain racing).
     """
-    # Delegate to compiled racing engine if available
-    if _HAS_COMPILED_CORE:
-        all_sources = []
-        for tier_sources, tier_label, tier_timeout in tiers:
-            for fn, label in tier_sources:
-                all_sources.append((fn, label, tier_label, tier_timeout))
-        return _run_parallel_race_compiled(
-            all_sources, doi, target_dir, output_path, config,
-            use_tor, overall_timeout, _try_source, safe_filename, log,
-        )
-    if not tiers:
+    if not tiers or (cancel_event is not None and cancel_event.is_set()):
         return None
 
     # Flatten all sources across tiers with their labels
@@ -405,76 +482,186 @@ def _run_tiers_parallel(
     if not all_sources:
         return None
 
+    source_workers = 1 if not config.get("parallel_sources", True) else int(config.get("source_workers", 4))
+    source_workers = max(1, min(source_workers, len(all_sources)))
+    race_dir = target_dir / f".race-{uuid.uuid4().hex}"
+    race_dir.mkdir(parents=True, exist_ok=True)
+
+    def source_output(label: str) -> Path:
+        return race_dir / f"{safe_filename(label)}-{uuid.uuid4().hex}.pdf"
+
     # If only one source, run directly
     if len(all_sources) == 1:
         fn, label, tier_label, timeout = all_sources[0]
-        src_output = target_dir / f"{safe_filename(doi)}_{label}.pdf"
-        result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
-        if result and result.get("success"):
-            final_path = Path(result.get("file", ""))
-            if final_path != output_path and final_path.exists():
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                final_path.rename(output_path)
-                result["file"] = str(output_path)
-            return result
-        return None
+        src_output = source_output(label)
+        try:
+            result = _try_source(
+                fn,
+                doi,
+                src_output,
+                config,
+                label,
+                use_tor=use_tor,
+                cancel_event=cancel_event,
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            if result and result.get("success"):
+                final_path = Path(result.get("file", ""))
+                if final_path != output_path and final_path.exists():
+                    if not publish_pdf_file_atomic(
+                        final_path,
+                        output_path,
+                        cancel_event,
+                    ):
+                        return None
+                    result["file"] = str(output_path)
+                return result
+            return None
+        finally:
+            shutil.rmtree(race_dir, ignore_errors=True)
 
-    # Shared result: any thread can publish success here, signaled via Event
+    # Reserve the winner while its source slot is still held. Readiness is
+    # signaled only after _try_source finishes browser cleanup and releases it.
     result_lock = threading.Lock()
     success_event = threading.Event()
-    cancel_event = threading.Event()
-    shared_result: dict[str, Any] = {"result": None}
+    race_stop_event = threading.Event()
+    source_cancel_event = _CombinedCancelEvent(race_stop_event, cancel_event)
+    shared_result: dict[str, Any] = {
+        "result": None,
+        "winner_token": None,
+        "ready": False,
+    }
+
+    def _reserve_success(result, label, src_output, winner_token):
+        if source_cancel_event.is_set():
+            return
+        with result_lock:
+            if shared_result["result"] is None and not source_cancel_event.is_set():
+                shared_result["result"] = (result, label, src_output)
+                shared_result["winner_token"] = winner_token
+                race_stop_event.set()
 
     def _try_and_publish(fn, label, src_output):
-        # Skip if another source already succeeded
-        if cancel_event.is_set():
+        if source_cancel_event.is_set():
             return None
-        result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
-        if result and result.get("success"):
-            with result_lock:
-                if shared_result["result"] is None:
-                    shared_result["result"] = (result, label, src_output)
-                    cancel_event.set()
-                    success_event.set()
+        winner_token = object()
+        result = _try_source(
+            fn,
+            doi,
+            src_output,
+            config,
+            label,
+            use_tor=use_tor,
+            cancel_event=source_cancel_event,
+            on_success=lambda result: _reserve_success(
+                result,
+                label,
+                src_output,
+                winner_token,
+            ),
+        )
+        with result_lock:
+            is_winner = shared_result["winner_token"] is winner_token
+            if is_winner:
+                shared_result["ready"] = True
+        if is_winner:
+            success_event.set()
         return result
 
-    log.info(f"   Racing {len(all_sources)} sources across {len(tiers)} tiers (parallel)...")
-    pool = ThreadPoolExecutor(max_workers=len(all_sources))
+    def completed_result():
+        with result_lock:
+            if not shared_result["ready"]:
+                return None
+            return shared_result["result"]
+
+    def winner_cleanup_pending() -> bool:
+        with result_lock:
+            return (
+                shared_result["result"] is not None
+                and not shared_result["ready"]
+            )
+
+    def wait_for_result(
+        timeout: float,
+        *,
+        stop_when_all_done: bool = False,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            if success_event.is_set():
+                return True
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            if stop_when_all_done and all(future.done() for future in futures):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if winner_cleanup_pending():
+                    success_event.wait(timeout=0.1)
+                    continue
+                return False
+            success_event.wait(timeout=min(0.1, remaining))
+
+    def cleanup_when_finished() -> None:
+        for future in futures:
+            try:
+                future.result()
+            except Exception:
+                pass
+        shutil.rmtree(race_dir, ignore_errors=True)
+
+    def stop_remaining_sources() -> None:
+        nonlocal pool_stopped
+        if pool_stopped:
+            return
+        race_stop_event.set()
+        for future in futures:
+            future.cancel()
+        # Future.cancel() only removes work that has not started. Running
+        # sources must finish their owner-thread ``_try_source`` cleanup before
+        # this race can return; otherwise Playwright objects and browser permits
+        # escape into an untracked daemon cleanup thread.
+        pool.shutdown(wait=True, cancel_futures=True)
+        pool_stopped = True
+
+    log.info(f"   Racing {len(all_sources)} sources across {len(tiers)} tiers ({source_workers} workers)...")
+    pool = ThreadPoolExecutor(max_workers=source_workers)
     futures = {}
+    pool_stopped = False
     try:
         for fn, label, tier_label, tier_timeout in all_sources:
-            src_output = target_dir / f"{safe_filename(doi)}_{label}.pdf"
+            src_output = source_output(label)
             futures[pool.submit(_try_and_publish, fn, label, src_output)] = (label, src_output)
 
         # Wait for first success or overall timeout - instant notification via Event
-        success_event.wait(timeout=overall_timeout + 5)
+        wait_for_result(overall_timeout + 5)
 
-        if shared_result["result"] is not None:
-            result, label, src_output = shared_result["result"]
+        if cancel_event is not None and cancel_event.is_set():
+            log.info(f"   Download cancelled; stopping source race")
+            return None
+
+        ready_result = completed_result()
+        if ready_result is not None:
+            result, label, src_output = ready_result
+            stop_remaining_sources()
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             final_path = Path(result.get("file", ""))
             if final_path != output_path and final_path.exists():
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                final_path.rename(output_path)
+                if not publish_pdf_file_atomic(
+                    final_path,
+                    output_path,
+                    cancel_event,
+                ):
+                    return None
                 result["file"] = str(output_path)
-            # Cancel remaining threads immediately
-            pool.shutdown(wait=False)
-            for _, other_path in futures.values():
-                if other_path != output_path and other_path.exists():
-                    try:
-                        other_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
             log.info(f"   OK {label}")
             return result
 
         # Timeout reached — give late-finishing threads a grace period.
-        # Visible browser login can take 60-300s (browser launch + SSO + redirect),
-        # so we wait much longer if browser-based sources are in the pool.
-        has_browser = any("Browser" in lbl for _, lbl, _, _ in all_sources)
+        # Browser sources need a longer grace period than API-only sources.
+        has_browser = any(lbl in _BROWSER_SOURCE_LABELS for _, lbl, _, _ in all_sources)
         has_carsi = any("CARSI" in lbl for _, lbl, _, _ in all_sources)
         if has_carsi:
             grace = 300
@@ -483,54 +670,88 @@ def _run_tiers_parallel(
         else:
             grace = 15
         log.info(f"   Racing timed out after {overall_timeout + 5}s, waiting up to {grace}s for late results...")
-        success_event.wait(timeout=grace)
-        if shared_result["result"] is not None:
-            result, label, src_output = shared_result["result"]
+        wait_for_result(grace, stop_when_all_done=True)
+        if cancel_event is not None and cancel_event.is_set():
+            log.info(f"   Download cancelled during source grace period")
+            return None
+        ready_result = completed_result()
+        if ready_result is not None:
+            result, label, src_output = ready_result
+            stop_remaining_sources()
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             final_path = Path(result.get("file", ""))
             if final_path != output_path and final_path.exists():
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                final_path.rename(output_path)
+                if not publish_pdf_file_atomic(
+                    final_path,
+                    output_path,
+                    cancel_event,
+                ):
+                    return None
                 result["file"] = str(output_path)
-            # Cancel remaining threads immediately
-            pool.shutdown(wait=False)
-            for _, other_path in futures.values():
-                if other_path != output_path and other_path.exists():
-                    try:
-                        other_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
             log.info(f"   OK {label} (late)")
             return result
 
-        # Final scan: check if any source wrote a valid PDF file despite timeout
-        from ..pdf_utils import is_pdf_file, is_suspicious_pdf, suspicious_pdf
-        for label, src_output in futures.values():
+        # Only salvage files from workers whose source call and browser cleanup
+        # have both completed. A file can appear before a worker's finally block
+        # releases its browser, so scanning unfinished futures can return while
+        # Chromium is still live.
+        from ..pdf_utils import is_pdf_file, is_suspicious_pdf
+        for future, (label, src_output) in futures.items():
+            if not future.done() or future.cancelled():
+                continue
+            try:
+                future.result()
+            except Exception:
+                continue
             if src_output.exists() and is_pdf_file(src_output):
                 if is_suspicious_pdf(src_output):
                     log.info(f"   SUSPICIOUS {label} (file scan): skipping suspicious PDF")
                     continue
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                src_output.rename(output_path)
+                stop_remaining_sources()
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                if not publish_pdf_file_atomic(
+                    src_output,
+                    output_path,
+                    cancel_event,
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        return None
+                    continue
                 log.info(f"   OK {label} (file scan)")
                 return {"success": True, "identifier": doi, "doi": doi,
                         "file": str(output_path), "source": label}
 
         log.info(f"   All sources failed")
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-        # Cleanup temp files
-        for _, other_path in futures.values():
-            if other_path != output_path and other_path.exists():
-                try:
-                    other_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        if not pool_stopped:
+            stop_remaining_sources()
+        cleanup_when_finished()
 
     return None
+
+
+def _finalize_result(
+    result: dict[str, Any],
+    identifier: str,
+    doi: str,
+    target_dir: Path,
+    config: dict[str, Any],
+    *,
+    rename: bool = True,
+    bibtex: bool = False,
+) -> dict[str, Any]:
+    """Update indexes and optional metadata after a successful download."""
+    _update_doi_index(target_dir, doi, Path(result.get("file", "")))
+    if rename:
+        _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
+    cache_set(identifier, result, config)
+    if bibtex:
+        from ..bibtex import fetch_bibtex
+
+        result["bibtex"] = fetch_bibtex(doi, config)
+    return result
 
 
 def _update_doi_index(target_dir: Path, doi: str, file_path: Path) -> None:
@@ -572,7 +793,7 @@ def _auto_rename(result: dict[str, Any], identifier: str, config: dict[str, Any]
         log.info(f"   No metadata for rename, keeping: {file_path.name}")
 
 
-def download(
+def _download_impl(
     identifier: str,
     output_dir: str | Path | None = None,
     *,
@@ -586,7 +807,22 @@ def download(
     strategy: str | None = None,
     _config: dict[str, Any] | None = None,
     _progress_callback: Any = None,
+    _cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
+    def cancelled() -> bool:
+        return _cancel_event is not None and _cancel_event.is_set()
+
+    def cancelled_result() -> dict[str, Any]:
+        return {
+            "success": False,
+            "identifier": identifier,
+            "error": "Download cancelled",
+            "cancelled": True,
+        }
+
+    if cancelled():
+        return cancelled_result()
+
     config = _config if _config is not None else load_config()
     if use_tor is None:
         use_tor = config.get("use_tor_for_scihub", False)
@@ -658,6 +894,8 @@ def download(
 
     from ..citation import fetch_metadata
     metadata = fetch_metadata(doi, config)
+    if cancelled():
+        return cancelled_result()
     if metadata:
         expected_name = rename_pdf_generate_filename(metadata)
         if expected_name:
@@ -684,6 +922,8 @@ def download(
         if _progress_callback:
             _progress_callback("progress", phase="arxiv", message="Trying arXiv direct download")
         result = try_arxiv(identifier, output_path, config)
+        if cancelled():
+            return cancelled_result()
         if result:
             _update_doi_index(target_dir, identifier, Path(result.get("file", "")))
             if rename:
@@ -703,33 +943,55 @@ def download(
         if _progress_callback:
             _progress_callback("progress", phase="free_sources", message=f"Racing {len(free_sources)} free sources...")
         result = _run_tiers_parallel(
-            [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
+            [(free_sources, "Free", 15)],
+            doi,
+            target_dir,
+            output_path,
+            config,
+            use_tor,
+            15,
+            cancel_event=_cancel_event,
         )
         if result:
             if _progress_callback:
                 _progress_callback("progress", phase="completed", source=result.get("source", "unknown"), message="Download successful")
             return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
 
+    if cancelled():
+        return cancelled_result()
+
     # Phase 2: Institutional access — only when Phase 1 failed
     # Skip institutional fallback for grey_only/scihub_only strategy
     if _institutional and config.get("download_strategy") not in ("scihub_only", "grey_only"):
-        inst_sources = _build_institutional_sources(doi, config, use_vpnsci=use_vpnsci)
+        inst_sources = _build_institutional_sources(
+            doi,
+            config,
+            use_vpnsci=use_vpnsci,
+            use_instsci=use_instsci,
+        )
         if inst_sources:
             log.info("   Phase 1 failed, trying institutional access...")
             if _progress_callback:
                 _progress_callback("progress", phase="institutional", message=f"Trying {len(inst_sources)} institutional sources...")
             result = _run_tiers_parallel(
-                [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30
+                [(inst_sources, "Institutional", 30)],
+                doi,
+                target_dir,
+                output_path,
+                config,
+                use_tor,
+                30,
+                cancel_event=_cancel_event,
             )
             if result:
                 if _progress_callback:
                     _progress_callback("progress", phase="completed", source=result.get("source", "unknown"), message="Download successful via institutional access")
                 return _finalize_result(result, identifier, doi, target_dir, config, rename=rename, bibtex=bibtex)
 
-    # Late capture: wait briefly for browser downloads that complete after race timeout,
-    # then scan for any PDFs that were saved to disk by racing threads.
-    import time as _time
-    _time.sleep(2)  # grace period for browser threads to finish writing
+    if cancelled():
+        return cancelled_result()
+
+    # Last resort: check if an institutional source completed after its timeout.
     for p in target_dir.glob(f"{safe_filename(identifier)}*.pdf"):
         if p.stat().st_size > 5000:
             result = {
@@ -785,6 +1047,70 @@ def download(
         )
     result["source"] = "none"
     return result
+
+
+_download_locks: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+_download_locks_guard = threading.Lock()
+
+
+def _get_download_lock(identifier: str, output_dir: str | Path | None) -> threading.Lock:
+    key = f"{Path(output_dir).resolve() if output_dir else ''}\0{identifier.strip().lower()}"
+    with _download_locks_guard:
+        lock = _download_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _download_locks[key] = lock
+        return lock
+
+
+def download(
+    identifier: str,
+    output_dir: str | Path | None = None,
+    *,
+    scihub_enabled: bool | None = None,
+    use_tor: bool | None = None,
+    use_vpnsci: bool = False,
+    use_instsci: bool = False,
+    bibtex: bool = False,
+    rename: bool = True,
+    _institutional: bool = True,
+    strategy: str | None = None,
+    _config: dict[str, Any] | None = None,
+    _progress_callback: Any = None,
+    _cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    lock = _get_download_lock(identifier, output_dir)
+    while not lock.acquire(timeout=0.1):
+        if _cancel_event is not None and _cancel_event.is_set():
+            return {
+                "success": False,
+                "identifier": identifier,
+                "error": "Download cancelled",
+                "cancelled": True,
+            }
+    try:
+        return _download_impl(
+            identifier,
+            output_dir,
+            scihub_enabled=scihub_enabled,
+            use_tor=use_tor,
+            use_vpnsci=use_vpnsci,
+            use_instsci=use_instsci,
+            bibtex=bibtex,
+            rename=rename,
+            _institutional=_institutional,
+            strategy=strategy,
+            _config=_config,
+            _progress_callback=_progress_callback,
+            _cancel_event=_cancel_event,
+        )
+    finally:
+        try:
+            from .. import browser_engine
+
+            browser_engine.reclaim_idle_browser_memory()
+        finally:
+            lock.release()
 
 
 def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
@@ -941,15 +1267,18 @@ def _batch_institutional_phase(
     Modifies results_map in-place with successful results.
     """
     try:
-        from ..institutional.publisher_profiles import infer_publisher_profile
-        from ..institutional.publisher_batch import DownloadResult, PaperRecord, PublisherBatchDownloader
+        from ..publisher_profiles import infer_publisher_profile
+        from ..publisher_batch import DownloadResult, PaperRecord, PublisherBatchDownloader
     except ImportError:
         log.info("   [Batch] publisher_batch not available, skipping institutional phase")
         return
 
     try:
+        from ..cloakbrowser_compat import prepare_cloakbrowser_runtime
+
+        prepare_cloakbrowser_runtime()
         from cloakbrowser import launch_persistent_context  # noqa: F401
-    except ImportError:
+    except Exception:
         log.info("   [Batch] cloakbrowser not installed, skipping institutional phase")
         return
 
@@ -1177,7 +1506,16 @@ def batch_download(
             if elapsed < delay_between:
                 time.sleep(delay_between - elapsed)
             last_download_time[0] = time.time()
-        return download(ident, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, _institutional=False)
+        return download(
+            ident,
+            output_dir,
+            scihub_enabled=scihub_enabled,
+            use_tor=use_tor,
+            use_vpnsci=use_vpnsci,
+            use_instsci=use_instsci,
+            _institutional=False,
+            _config=config,
+        )
 
     results: list[dict[str, Any] | None] = [None] * total
     with ThreadPoolExecutor(max_workers=workers) as pool:
