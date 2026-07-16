@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
+import threading
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,31 +36,6 @@ def is_pdf_file(path: Path) -> bool:
         return False
 
 
-def is_suspicious_pdf(path: Path, min_size_kb: int = 50) -> bool:
-    """Check if a PDF is suspiciously small (likely a preview/cover page)."""
-    try:
-        size_kb = path.stat().st_size / 1024
-        return size_kb < min_size_kb
-    except OSError:
-        return False
-
-
-def suspicious_pdf(identifier: str, file_path: Path, source: str) -> dict[str, Any]:
-    """Return a failure result for a suspicious (too small) PDF."""
-    size_kb = round(file_path.stat().st_size / 1024, 1)
-    try:
-        file_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    return {
-        "success": False,
-        "identifier": identifier,
-        "doi": identifier,
-        "source": source,
-        "reason": f"Suspicious PDF ({size_kb} KB) — likely a preview or cover page, not full text",
-    }
-
-
 def is_plausible_pdf_url(url: str) -> bool:
     if not url or not url.startswith(("http://", "https://")):
         return False
@@ -76,6 +54,8 @@ def is_plausible_pdf_url(url: str) -> bool:
     if "/pdf" in path or "download/pdf" in path:
         return True
     if "format=pdf" in query or "type=pdf" in query:
+        return True
+    if "pdf=render" in query:
         return True
     if ("hal.science" in host or "archives-ouvertes" in host) and path.endswith("/document"):
         return True
@@ -108,7 +88,7 @@ def is_suspicious_pdf(path: Path) -> bool:
         # Count PDF page objects: look for "/Type /Page" not followed by "s"
         import re
         pages = len(re.findall(rb"/Type\s*/Page\b", content))
-        if pages <= 1:
+        if pages == 1:
             return True
         return False
     except OSError:
@@ -126,6 +106,147 @@ def suspicious_pdf(identifier: str, file_path: Path, source_label: str) -> dict[
         "error_type": "suspicious_pdf",
         "reason": "PDF appears to be a cover page or preview (too small / too few pages)",
     }
+def _unique_part_path(output_path: Path) -> Path:
+    """Return a collision-resistant temporary path beside ``output_path``."""
+    return output_path.with_name(
+        f".{output_path.name}.{uuid.uuid4().hex}.part"
+    )
+
+
+def _publish_temp_file_atomic(
+    tmp_path: Path,
+    output_path: Path,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Atomically publish ``tmp_path`` and safely retract our own cancelled write."""
+    if cancel_event is not None and cancel_event.is_set():
+        return False
+
+    try:
+        tmp_stat = tmp_path.stat()
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        tmp_path.replace(output_path)
+        if cancel_event is None or not cancel_event.is_set():
+            return True
+
+        try:
+            published_stat = output_path.stat()
+            identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+            if all(
+                getattr(published_stat, name, None)
+                == getattr(tmp_stat, name, None)
+                for name in identity
+            ):
+                output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except Exception:
+        return False
+    return False
+
+
+def publish_pdf_file_atomic(
+    source_path: Path,
+    output_path: Path,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Move a completed PDF into place using the cancellation-safe publisher."""
+    if source_path == output_path:
+        return cancel_event is None or not cancel_event.is_set()
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return _publish_temp_file_atomic(source_path, output_path, cancel_event)
+
+
+def write_pdf_bytes_atomic(
+    output_path: Path,
+    content: bytes,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Publish browser-captured PDF bytes only after a complete temp-file write."""
+    if cancel_event is not None and cancel_event.is_set():
+        return False
+
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    tmp_path = _unique_part_path(output_path)
+    try:
+        with tmp_path.open("wb") as fh:
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("PDF write cancelled")
+            fh.write(content)
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("PDF write cancelled")
+        return _publish_temp_file_atomic(tmp_path, output_path, cancel_event)
+    except Exception:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+
+
+def write_pdf_stream_atomic(
+    output_path: Path,
+    first_chunk: bytes,
+    chunks: Any,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Write a streamed PDF to a unique temporary file and publish atomically."""
+    if cancel_event is not None and cancel_event.is_set():
+        return False
+
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    tmp_path = _unique_part_path(output_path)
+    try:
+        with tmp_path.open("wb") as fh:
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("PDF write cancelled")
+            fh.write(first_chunk)
+            for chunk in chunks:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError("PDF write cancelled")
+                if chunk:
+                    fh.write(chunk)
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("PDF write cancelled")
+        return _publish_temp_file_atomic(tmp_path, output_path, cancel_event)
+    except Exception:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+
+
+def _bind_session_to_response(
+    response: requests.Response,
+    session: requests.Session,
+) -> requests.Response:
+    """Make closing an escaping response also close its private session."""
+    original_close = response.close
+    close_lock = threading.Lock()
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        with close_lock:
+            if closed:
+                return
+            closed = True
+        try:
+            original_close()
+        finally:
+            session.close()
+
+    response.close = close  # type: ignore[method-assign]
+    return response
 
 
 def success(identifier: str, file_path: Path, source: str) -> dict[str, Any]:
@@ -218,10 +339,15 @@ def download_pdf(
     require_pdf_like_url: bool = True,
     use_tor: bool = False,
     cookies: Any = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any] | None:
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     if require_pdf_like_url and not is_plausible_pdf_url(url):
         return None
 
+    session: requests.Session | None = None
+    resp: requests.Response | None = None
     try:
         if cookies is not None:
             from .network import request_timeout, proxy_dict, select_proxy_for_url, USER_AGENT
@@ -237,35 +363,42 @@ def download_pdf(
                 stream=True,
             )
         else:
-            resp = fetch(url, config, stream=True, use_tor=use_tor)
-        if resp.status_code >= 400:
+            resp = fetch(
+                url,
+                config,
+                stream=True,
+                use_tor=use_tor,
+                cancel_event=cancel_event,
+            )
+        if (
+            cancel_event is not None and cancel_event.is_set()
+        ) or resp.status_code >= 400:
             return None
 
-        iterator = resp.iter_content(chunk_size=8192)
+        iterator = resp.iter_content(chunk_size=65536)
         first_chunk = next(iterator, b"")
         if not _response_looks_pdf(resp, first_chunk):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        try:
-            with tmp_path.open("wb") as fh:
-                fh.write(first_chunk)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        if not write_pdf_stream_atomic(
+            output_path,
+            first_chunk,
+            iterator,
+            cancel_event,
+        ):
+            return None
 
         if is_pdf_file(output_path):
             return success(output_path.stem, output_path, source)
-        else:
-            try:
-                output_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     except Exception:
         return None
+    finally:
+        if resp is not None:
+            resp.close()
+        if session is not None:
+            session.close()
     return None
