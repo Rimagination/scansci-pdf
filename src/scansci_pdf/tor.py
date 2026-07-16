@@ -43,20 +43,28 @@ def check_tor_circuit(config: dict[str, Any] | None = None) -> bool:
         return False
 
 
-def ensure_tor(config: dict[str, Any]) -> str | None:
+def ensure_tor(config: dict[str, Any], cancel_event: Any = None) -> str | None:
     """Ensure Tor is available, starting embedded Tor if needed.
 
     Returns the SOCKS5 proxy URL or None if Tor is unavailable.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        return None
+
     # 1. Check if external Tor is already running
     if check_tor_circuit(config):
         return get_tor_proxy(config)
+
+    if cancel_event is not None and cancel_event.is_set():
+        return None
 
     # 2. Try starting embedded Tor (auto-install if needed)
     try:
         from .embedded_tor import get_embedded_tor
         log.info("Tor: starting embedded Tor...")
-        tor = get_embedded_tor(config)
+        tor = get_embedded_tor(config, cancel_event=cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if tor and tor.is_running():
             log.info(f"Tor: embedded Tor started at {tor.proxy_url}")
             return tor.proxy_url

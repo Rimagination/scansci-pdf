@@ -72,6 +72,10 @@ _tor_download_failed_time = 0.0
 _TOR_DOWNLOAD_COOLDOWN = 3600  # 1 hour cooldown after failed download
 
 
+def _cancelled(cancel_event: Any = None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
 def _tor_dir(config: dict[str, Any]) -> Path:
     from .config import DATA_DIR
     return Path(config.get("cache_dir", str(DATA_DIR / "cache"))).parent / "tor"
@@ -120,9 +124,15 @@ def _download_url() -> tuple[str, str]:
     return TOR_VERSION, filename
 
 
-def download_tor(config: dict[str, Any]) -> Path | None:
+def download_tor(
+    config: dict[str, Any],
+    cancel_event: Any = None,
+) -> Path | None:
     """Download and extract Tor Expert Bundle. Returns path to tor binary."""
     global _tor_download_failed, _tor_download_failed_time
+
+    if _cancelled(cancel_event):
+        return None
 
     # Skip download if recently failed (cooldown)
     if _tor_download_failed and (time.time() - _tor_download_failed_time) < _TOR_DOWNLOAD_COOLDOWN:
@@ -140,10 +150,15 @@ def download_tor(config: dict[str, Any]) -> Path | None:
         proxies = {"http": proxy, "https": proxy}
     # Expert Bundle archives are .tar.gz on every platform now.
     for mirror in TOR_DOWNLOAD_MIRRORS:
+        if _cancelled(cancel_event):
+            return None
         url = f"{mirror}/{version_path}/{filename}"
+        resp = None
         try:
             log.info(f"Downloading Tor from {url}")
-            resp = req.get(url, timeout=300, stream=True, proxies=proxies)
+            resp = req.get(url, timeout=(10, 15), stream=True, proxies=proxies)
+            if _cancelled(cancel_event):
+                return None
             if resp.status_code != 200:
                 continue
 
@@ -151,11 +166,17 @@ def download_tor(config: dict[str, Any]) -> Path | None:
             data = io.BytesIO()
             downloaded = 0
             for chunk in resp.iter_content(8192):
+                if _cancelled(cancel_event):
+                    return None
+                if not chunk:
+                    continue
                 data.write(chunk)
                 downloaded += len(chunk)
                 if total and downloaded % (1024 * 1024) < 8192:
                     log.info(f"  Downloaded {downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB")
 
+            if _cancelled(cancel_event):
+                return None
             data.seek(0)
             log.info(f"Extracting Tor to {tor_dir}")
 
@@ -173,6 +194,15 @@ def download_tor(config: dict[str, Any]) -> Path | None:
         except Exception as e:
             log.warning(f"Failed to download from {mirror}: {e}")
             continue
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+    if _cancelled(cancel_event):
+        return None
 
     log.error("Failed to download Tor from all mirrors")
     _tor_download_failed = True
@@ -223,16 +253,21 @@ class EmbeddedTor:
     def proxy_url(self) -> str:
         return f"socks5h://127.0.0.1:{self.socks_port}"
 
-    def start(self, timeout: int = 60) -> bool:
+    def start(self, timeout: int = 60, cancel_event: Any = None) -> bool:
         """Start Tor subprocess and wait for it to be ready."""
+        if _cancelled(cancel_event):
+            return False
         self._binary = _tor_binary(self.config)
 
         # Download if not found
         if not self._binary:
             log.info("Tor binary not found, downloading...")
-            self._binary = download_tor(self.config)
+            self._binary = download_tor(self.config, cancel_event=cancel_event)
             if not self._binary:
                 return False
+
+        if _cancelled(cancel_event):
+            return False
 
         tor_dir = self._binary.parent
         torrc = _write_torrc(tor_dir.parent, self.socks_port, self.use_bridges)
@@ -255,6 +290,9 @@ class EmbeddedTor:
         import socket
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if _cancelled(cancel_event):
+                self.stop()
+                return False
             try:
                 with socket.create_connection(("127.0.0.1", self.socks_port), timeout=2):
                     log.info(f"Tor ready on {self.proxy_url}")
@@ -267,7 +305,12 @@ class EmbeddedTor:
                     log.error(f"Tor stderr: {stderr}")
                     self._process = None
                     return False
-                time.sleep(1)
+                if cancel_event is not None:
+                    if cancel_event.wait(1):
+                        self.stop()
+                        return False
+                else:
+                    time.sleep(1)
 
         log.warning("Tor startup timed out")
         self.stop()
@@ -307,14 +350,18 @@ _tor_unavailable_since: float = 0.0  # timestamp when Tor last failed
 _TOR_UNAVAILABLE_TTL = 3600  # 1 hour before retrying Tor download
 
 
-def get_embedded_tor(config: dict[str, Any]) -> EmbeddedTor | None:
-    """Get or create a global embedded Tor instance.
-
-    If Tor download previously failed, skips retry for 1 hour to avoid
-    blocking on unreachable torproject.org mirrors.
-    """
+def get_embedded_tor(
+    config: dict[str, Any],
+    cancel_event: Any = None,
+) -> EmbeddedTor | None:
+    """Get or create a cancellable global embedded Tor instance."""
     global _embedded_tor, _tor_unavailable_since
-    with _tor_lock:
+    while not _tor_lock.acquire(timeout=0.1):
+        if _cancelled(cancel_event):
+            return None
+    try:
+        if _cancelled(cancel_event):
+            return None
         if _embedded_tor and _embedded_tor.is_running():
             return _embedded_tor
 
@@ -324,12 +371,14 @@ def get_embedded_tor(config: dict[str, Any]) -> EmbeddedTor | None:
 
         use_bridges = config.get("tor_use_bridges", False)
         tor = EmbeddedTor(config, use_bridges=use_bridges)
-        if tor.start():
+        if tor.start(cancel_event=cancel_event):
             _embedded_tor = tor
             _tor_unavailable_since = 0.0  # reset on success
             return tor
         _tor_unavailable_since = time.time()  # cache failure timestamp
         return None
+    finally:
+        _tor_lock.release()
 
 
 def stop_embedded_tor() -> None:
