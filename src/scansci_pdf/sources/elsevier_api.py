@@ -339,7 +339,7 @@ def fetch_fulltext(doi: str, api_key: str, inst_token: str = "") -> dict | None:
         "Accept": "application/xml",
     }
     if inst_token:
-        headers["X-ELS-Insttoken"] = inst_token
+        headers["X-ELS-InstToken"] = inst_token
 
     resp = _api_request(url, headers, params={"view": "FULL"})
     if not resp:
