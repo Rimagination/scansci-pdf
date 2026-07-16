@@ -38,7 +38,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyd", "_core/*.so"]
+scansci_pdf = ["data/*.json", "data/*.dat", "templates/*.html", "_core/*.pyd", "_core/*.so"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
