@@ -19,6 +19,7 @@ def try_arxiv(identifier: str, output_path: Path, config: dict[str, Any]) -> dic
 
 
 def download_arxiv_pdf(url: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+    resp = None
     try:
         resp = fetch(url, config, stream=True)
         if resp.status_code >= 400:
@@ -42,4 +43,7 @@ def download_arxiv_pdf(url: str, output_path: Path, config: dict[str, Any]) -> d
                 pass
     except Exception:
         return None
+    finally:
+        if resp is not None:
+            resp.close()
     return None

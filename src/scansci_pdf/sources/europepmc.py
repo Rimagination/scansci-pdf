@@ -33,7 +33,7 @@ def extract_europepmc_pdf_candidates(payload: dict[str, Any]) -> list[str]:
 
 def try_europepmc(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
     q = urllib.parse.quote(f"DOI:{doi}")
-    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={q}&format=json&pageSize=5"
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={q}&format=json&resultType=core&pageSize=5"
     payload = fetch_json(url, config)
     if not payload:
         return None
@@ -50,7 +50,7 @@ def try_europepmc(doi: str, output_path: Path, config: dict[str, Any]) -> dict[s
 
 
 def try_pmc(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
-    """Try PubMed Central for free full-text PDF."""
+    """Try PubMed Central for free full-text PDF via Europe PMC render URL."""
     search_url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={doi}&format=json"
     try:
         resp_data = fetch_json(search_url, config)
@@ -66,7 +66,8 @@ def try_pmc(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, An
             return None
     except Exception:
         return None
-    pdf_url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+    # Use Europe PMC render URL — NCBI's /pdf/ returns HTML with JS redirect
+    pdf_url = f"https://europepmc.org/articles/{pmcid}?pdf=render"
     result = download_pdf(pdf_url, output_path, config, f"PMC({pmcid})")
     if result:
         result["doi"] = doi

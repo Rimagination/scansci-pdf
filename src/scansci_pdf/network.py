@@ -41,24 +41,27 @@ def is_cloudflare_challenge(title: str) -> bool:
     return any(sig in lower for sig in CLOUDFLARE_CHALLENGE_SIGNALS)
 
 _session_pool: dict[str, requests.Session] = {}
+_session_pool_lock = threading.Lock()
 
 
 def _get_session(config: dict[str, Any]) -> requests.Session:
     proxy = os.environ.get("SCANSCI_PDF_PROXY") or config.get("network_proxy") or ""
     key = proxy or "__none__"
-    if key not in _session_pool:
-        s = requests.Session()
-        s.trust_env = False
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
-        s.mount("https://", adapter)
-        s.mount("http://", adapter)
-        s.headers.update({"User-Agent": USER_AGENT})
-        if proxy:
-            if proxy.startswith("socks") and not HAS_SOCKS:
-                log.warning("SOCKS proxy configured but PySocks not installed. Install: pip install requests[socks]")
-            s.proxies = {"http": proxy, "https": proxy}
-        _session_pool[key] = s
-    return _session_pool[key]
+    with _session_pool_lock:
+        session = _session_pool.get(key)
+        if session is None:
+            session = requests.Session()
+            session.trust_env = False
+            adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            session.headers.update({"User-Agent": USER_AGENT})
+            if proxy:
+                if proxy.startswith("socks") and not HAS_SOCKS:
+                    log.warning("SOCKS proxy configured but PySocks not installed. Install: pip install requests[socks]")
+                session.proxies = {"http": proxy, "https": proxy}
+            _session_pool[key] = session
+    return session
 
 
 def request_timeout(config: dict[str, Any]) -> tuple[int, int]:
@@ -96,10 +99,17 @@ def _is_scihub_libgen_url(url: str, config: dict[str, Any]) -> bool:
     return "sci-hub" in host
 
 
-def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False) -> str | None:
+def select_proxy_for_url(
+    url: str,
+    config: dict[str, Any],
+    use_tor: bool = False,
+    cancel_event: Any = None,
+) -> str | None:
     if use_tor:
         from .tor import ensure_tor
-        tor_proxy = ensure_tor(config)
+        tor_proxy = ensure_tor(config, cancel_event=cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if tor_proxy:
             return tor_proxy
         log.warning("Tor requested but unavailable — falling back to direct connection")
@@ -124,16 +134,38 @@ def fetch(
     stream: bool = False,
     method: str = "GET",
     use_tor: bool = False,
+    cancel_event: Any = None,
 ) -> requests.Response:
+    if cancel_event is not None and cancel_event.is_set():
+        raise requests.RequestException("request cancelled")
     domain_rate_limit(url)
     host_concurrency_acquire(url, config)
+    released = False
+    release_lock = threading.Lock()
+
+    def release_slot() -> None:
+        nonlocal released
+        with release_lock:
+            if not released:
+                released = True
+                host_concurrency_release(url, config)
+
     try:
         merged_headers = {"User-Agent": USER_AGENT}
         if headers:
             merged_headers.update(headers)
         session = _get_session(config)
-        proxies = proxy_dict(select_proxy_for_url(url, config, use_tor=use_tor))
-        return session.request(
+        proxies = proxy_dict(
+            select_proxy_for_url(
+                url,
+                config,
+                use_tor=use_tor,
+                cancel_event=cancel_event,
+            )
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise requests.RequestException("request cancelled")
+        response = session.request(
             method,
             url,
             headers=merged_headers,
@@ -142,8 +174,31 @@ def fetch(
             allow_redirects=True,
             stream=stream,
         )
-    finally:
-        host_concurrency_release(url, config)
+        if not stream:
+            release_slot()
+            return response
+
+        original_close = response.close
+        original_iter_content = response.iter_content
+
+        def close() -> None:
+            try:
+                original_close()
+            finally:
+                release_slot()
+
+        def iter_content(*args, **kwargs):
+            try:
+                yield from original_iter_content(*args, **kwargs)
+            finally:
+                release_slot()
+
+        response.close = close
+        response.iter_content = iter_content
+        return response
+    except Exception:
+        release_slot()
+        raise
 
 
 def fetch_json(
@@ -153,29 +208,31 @@ def fetch_json(
     headers: dict[str, str] | None = None,
     use_tor: bool = False,
 ) -> dict[str, Any] | None:
-    # In-memory probe cache: avoid hammering metadata endpoints during racing.
-    ttl = float(config.get("json_probe_cache_seconds", 0) or 0)
-    now = time.time()
-    if ttl > 0:
-        cached = _json_cache.get(url)
-        if cached is not None and _json_cache_expires.get(url, 0) > now:
-            return cached
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    resp = None
     try:
-        resp = fetch(url, config, headers={"Accept": "application/json", **(headers or {})}, use_tor=use_tor)
+        resp = fetch(
+            url,
+            config,
+            headers=request_headers,
+            use_tor=use_tor,
+        )
         if resp.status_code >= 400:
             return None
         data = resp.json()
     except Exception:
         return None
-    if ttl > 0:
-        _json_cache[url] = data
-        _json_cache_expires[url] = now + ttl
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                # Cleanup is best-effort here: a non-requests response used by
+                # an adapter or test double may not expose a working close().
+                # Never turn a successfully decoded JSON response into a
+                # failed probe solely because cleanup itself failed.
+                pass
     return data
-
-
-# Module-level JSON probe caches (see fetch_json). Mutable for test reset.
-_json_cache: dict[str, dict[str, Any]] = {}
-_json_cache_expires: dict[str, float] = {}
 
 
 def _is_cloudflare_block(resp: requests.Response) -> bool:
@@ -196,7 +253,7 @@ def _is_cloudflare_block(resp: requests.Response) -> bool:
 def polite_delay(config: dict[str, Any]) -> None:
     # Polite delay is opt-in: only sleep when fixed_request_delay_enabled is True.
     # Without it, racing/parallel sources would be needlessly slowed.
-    if not config.get("fixed_request_delay_enabled", False):
+    if config.get("fixed_request_delay_enabled") is not True:
         return
     lo = float(config.get("request_delay_min", 0))
     hi = float(config.get("request_delay_max", 0))
