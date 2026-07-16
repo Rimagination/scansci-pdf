@@ -561,14 +561,18 @@ def download(
     output_dir: str | Path | None = None,
     *,
     scihub_enabled: bool | None = None,
-    use_tor: bool = False,
+    use_tor: bool | None = None,
     use_vpnsci: bool = False,
+    use_instsci: bool = False,
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
     strategy: str | None = None,
+    _config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    config = load_config()
+    config = _config if _config is not None else load_config()
+    if use_tor is None:
+        use_tor = config.get("use_tor_for_scihub", False)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if scihub_enabled is not None:
@@ -1033,8 +1037,9 @@ def batch_download(
     output_dir: str | Path | None = None,
     *,
     scihub_enabled: bool | None = None,
-    use_tor: bool = False,
+    use_tor: bool | None = None,
     use_vpnsci: bool = False,
+    use_instsci: bool = False,
     progress_callback: Any = None,
     batch_id: str | None = None,
     resume: bool = True,

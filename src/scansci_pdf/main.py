@@ -123,12 +123,17 @@ def get_paper(
     strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
+    from .config import load_config
     from .sources import download
-    from .config import load_config, update_config
 
+    cfg = load_config()
     result = download(
-        identifier, output,
-        scihub_enabled=True, use_tor=True, use_vpnsci=True,
+        identifier,
+        output or None,
+        scihub_enabled=cfg.get("scihub_enabled", True),
+        use_tor=cfg.get("use_tor_for_scihub", False),
+        use_vpnsci=cfg.get("vpnsci_enabled", False),
+        use_instsci=cfg.get("instsci_enabled", False),
         bibtex=not no_bibtex,
         strategy=strategy if strategy else None,
     )
