@@ -10,14 +10,14 @@ from urllib.parse import urlparse
 import requests
 from Crypto.Cipher import AES
 
-from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+from .cloakbrowser_compat import launch_with_driver_cleanup, prepare_cloakbrowser_runtime
 from .session_store import CookieStore
 
 try:
     prepare_cloakbrowser_runtime()
     from cloakbrowser import launch
     _HAS_CLOAKBROWSER = True
-except ImportError:
+except Exception:
     launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False
 
@@ -65,6 +65,7 @@ class WebVPNAuth:
         self._browser = None
         self._context = None
         self._page = None
+        self._browser_lease = None
         base = config.get("instsci_base_url", "")
         self._webvpn_base = base.rstrip("/") if base else ""
 
@@ -158,6 +159,7 @@ class WebVPNAuth:
             test_url = TEST_URL
         else:
             test_url = self.convert_url(TEST_URL)
+        resp = None
         try:
             resp = self.session.get(test_url, timeout=15, allow_redirects=True)
             if "cas" in resp.url.lower() or "login" in resp.url.lower():
@@ -167,6 +169,12 @@ class WebVPNAuth:
                 return True
         except requests.RequestException as e:
             logger.warning("Session validation failed: %s", e)
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
         return False
 
     def _browser_login(self) -> bool:
@@ -174,24 +182,41 @@ class WebVPNAuth:
             logger.error("cloakbrowser not installed. Run: pip install cloakbrowser")
             return False
 
+        if not self._close_browser():
+            logger.error("Previous WebVPN browser could not be closed; refusing replacement")
+            return False
         try:
+            from . import browser_engine
+            self._browser_lease = browser_engine._retain_browser_slot(self.config)
             prepare_cloakbrowser_runtime()
             from cloakbrowser import launch_persistent_context
             profile_dir = _get_profile_dir(self.config)
             profile_dir.mkdir(parents=True, exist_ok=True)
-            self._context = launch_persistent_context(
+            raw_context = launch_with_driver_cleanup(
+                launch_persistent_context,
                 user_data_dir=str(profile_dir),
                 headless=False, humanize=True,
                 args=self._browser_launch_args(),
             )
+            self._context = browser_engine._LeasedPersistentContext(
+                raw_context,
+                self._browser_lease,
+            )
+            self._browser_lease = None
             self._browser = None
             self._page = self._context.new_page()
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
+            self._close_browser()
             return False
 
-        self._page.goto(self._webvpn_base, wait_until="networkidle", timeout=30000)
-        current_url = self._page.url
+        try:
+            self._page.goto(self._webvpn_base, wait_until="networkidle", timeout=30000)
+            current_url = self._page.url
+        except Exception as e:
+            logger.error("Failed to open campus gateway: %s", e)
+            self._close_browser()
+            return False
         logger.info("Session test: navigated to campus gateway, landed on %s", current_url[:80])
 
         parsed = urlparse(current_url)
@@ -208,10 +233,20 @@ class WebVPNAuth:
 
         if not on_login_page and not is_idp:
             logger.info("Persistent context has valid session! URL=%s", current_url[:60])
-            self._save_browser_cookies()
+            try:
+                self._save_browser_cookies()
+            except Exception as e:
+                logger.error("Failed to save browser cookies: %s", e)
+                self._close_browser()
+                return False
             return True
 
-        self._page.goto(self._webvpn_base, wait_until="domcontentloaded")
+        try:
+            self._page.goto(self._webvpn_base, wait_until="domcontentloaded")
+        except Exception as e:
+            logger.error("Failed to open campus login page: %s", e)
+            self._close_browser()
+            return False
 
         print("\n" + "=" * 60)
         print(f"  Please log in at {self._webvpn_base}")
@@ -231,9 +266,7 @@ class WebVPNAuth:
             try:
                 if not self._context.pages:
                     logger.info("Browser closed by user.")
-                    self._browser = None
-                    self._context = None
-                    self._page = None
+                    self._close_browser()
                     return False
 
                 current_url = self._page.url
@@ -280,9 +313,7 @@ class WebVPNAuth:
 
             except Exception:
                 logger.warning("Browser connection lost.")
-                self._browser = None
-                self._context = None
-                self._page = None
+                self._close_browser()
                 return False
 
         print("\n  Login timed out after 10 minutes.\n")
@@ -298,20 +329,46 @@ class WebVPNAuth:
         logger.info("Saved %d cookies to %s", len(cookies), store.path)
         store.apply_to_session(self.session, cookies)
 
-    def _close_browser(self):
-        if self._context:
-            try:
-                self._context.close()
-            except Exception:
-                pass
-        if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                pass
-        self._browser = None
-        self._context = None
-        self._page = None
+    def _close_browser(self) -> bool:
+        from . import browser_engine
+
+        context = self._context
+        browser = self._browser
+        lease = self._browser_lease
+        if lease is not None:
+            lease._assert_owner()
+
+        if context is None:
+            context_closed, context_errors = True, []
+        else:
+            context_closed, context_errors = browser_engine._close_resource_with_confirmation(
+                context
+            )
+        if browser is None:
+            browser_closed, browser_errors = True, []
+        else:
+            browser_closed, browser_errors = browser_engine._close_resource_with_confirmation(
+                browser,
+                is_browser=True,
+            )
+            if browser_closed:
+                context_closed = True
+
+        shutdown_complete = context_closed and browser_closed
+        if shutdown_complete:
+            self._browser = None
+            self._context = None
+            self._page = None
+            self._browser_lease = None
+            if lease is not None:
+                lease.close()
+        else:
+            errors = [str(error) for error in context_errors + browser_errors]
+            logger.warning(
+                "WebVPN browser close incomplete; retaining resources and global slot: %s",
+                "; ".join(errors),
+            )
+        return shutdown_complete
 
     def fetch(self, url: str, **kwargs) -> requests.Response:
         """Fetch a URL through the campus, EasyConnect, or connector session."""
@@ -331,9 +388,10 @@ class WebVPNAuth:
 
     def close(self):
         self._close_browser()
-        if self._session:
-            self._session.close()
-            self._session = None
+        session = self._session
+        self._session = None
+        if session is not None:
+            session.close()
 
 
 class EZProxyAuth:
@@ -350,10 +408,17 @@ class EZProxyAuth:
         self._browser = None
         self._context = None
         self._page = None
+        self._browser_lease = None
 
     @property
     def browser_context(self):
         return self._context
+
+    def _browser_launch_args(self) -> list[str]:
+        return [
+            "--no-proxy-server",
+            "--disable-features=CrossOriginOpenerPolicy",
+        ]
 
     @property
     def session(self) -> requests.Session:
@@ -382,6 +447,7 @@ class EZProxyAuth:
         return self._validate_session()
 
     def _validate_session(self) -> bool:
+        resp = None
         try:
             resp = self.session.get(self._proxy_base + TEST_URL, timeout=15, allow_redirects=True)
             if "login" in resp.url.lower() or "cas" in resp.url.lower():
@@ -389,24 +455,47 @@ class EZProxyAuth:
             return resp.status_code == 200
         except requests.RequestException:
             return False
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
     def _browser_login(self) -> bool:
         if not _HAS_CLOAKBROWSER:
             logger.error("cloakbrowser not installed. Run: pip install cloakbrowser")
             return False
 
+        if not self._close_browser():
+            logger.error("Previous EZproxy browser could not be closed; refusing replacement")
+            return False
         try:
-            self._browser = launch(
+            from . import browser_engine
+            self._browser_lease = browser_engine._retain_browser_slot(self.config)
+            raw_browser = launch_with_driver_cleanup(
+                launch,
                 headless=False, humanize=True,
                 args=self._browser_launch_args(),
             )
+            self._browser = browser_engine._LeasedBrowser(
+                raw_browser,
+                self._browser_lease,
+            )
+            self._browser_lease = None
             self._context = self._browser.new_context()
             self._page = self._context.new_page()
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
+            self._close_browser()
             return False
 
-        self._page.goto(self._proxy_base + TEST_URL, wait_until="domcontentloaded")
+        try:
+            self._page.goto(self._proxy_base + TEST_URL, wait_until="domcontentloaded")
+        except Exception as e:
+            logger.error("Failed to open EZproxy login page: %s", e)
+            self._close_browser()
+            return False
 
         print("\n" + "=" * 60)
         print(f"  Please log in at the EZproxy page.")
@@ -425,9 +514,7 @@ class EZProxyAuth:
             try:
                 if not self._context.pages:
                     logger.info("Browser closed by user.")
-                    self._browser = None
-                    self._context = None
-                    self._page = None
+                    self._close_browser()
                     return False
 
                 current_url = self._page.url
@@ -445,9 +532,7 @@ class EZProxyAuth:
 
             except Exception:
                 logger.warning("Browser connection lost.")
-                self._browser = None
-                self._context = None
-                self._page = None
+                self._close_browser()
                 return False
 
         print("\n  Login timed out after 10 minutes.\n")
@@ -463,15 +548,46 @@ class EZProxyAuth:
         logger.info("Saved %d cookies to %s", len(cookies), store.path)
         store.apply_to_session(self.session, cookies)
 
-    def _close_browser(self):
-        if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                pass
+    def _close_browser(self) -> bool:
+        from . import browser_engine
+
+        context = self._context
+        browser = self._browser
+        lease = self._browser_lease
+        if lease is not None:
+            lease._assert_owner()
+
+        if context is None:
+            context_closed, context_errors = True, []
+        else:
+            context_closed, context_errors = browser_engine._close_resource_with_confirmation(
+                context
+            )
+        if browser is None:
+            browser_closed, browser_errors = True, []
+        else:
+            browser_closed, browser_errors = browser_engine._close_resource_with_confirmation(
+                browser,
+                is_browser=True,
+            )
+            if browser_closed:
+                context_closed = True
+
+        shutdown_complete = context_closed and browser_closed
+        if shutdown_complete:
             self._browser = None
             self._context = None
             self._page = None
+            self._browser_lease = None
+            if lease is not None:
+                lease.close()
+        else:
+            errors = [str(error) for error in context_errors + browser_errors]
+            logger.warning(
+                "EZproxy browser close incomplete; retaining resources and global slot: %s",
+                "; ".join(errors),
+            )
+        return shutdown_complete
 
     def get_proxied_url(self, url: str) -> str:
         if self._proxy_base and self._proxy_base.rstrip("/").split("//")[-1].split("/")[0] in url:
@@ -486,6 +602,7 @@ class EZProxyAuth:
 
     def close(self):
         self._close_browser()
-        if self._session:
-            self._session.close()
-            self._session = None
+        session = self._session
+        self._session = None
+        if session is not None:
+            session.close()
