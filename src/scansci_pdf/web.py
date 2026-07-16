@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -25,16 +27,48 @@ log = get_logger()
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
-templates.env.cache = None
+templates.env.cache_size = 0
 
 app = FastAPI(title="ScanSci PDF", description="Academic paper downloader web UI")
 
 # Active download tasks for SSE tracking
 _active_downloads: dict[str, dict[str, Any]] = {}
+# Detached tasks must be strongly referenced until their worker thread exits.
+# asyncio's loop only keeps weak task references; the done callback consumes
+# exceptions and removes the task once cooperative cleanup has completed.
+_background_download_tasks: set[asyncio.Task[Any]] = set()
 
 # One-time download tokens: token -> {"path": str, "expires": float, "filename": str}
 _download_tokens: dict[str, dict[str, Any]] = {}
 _TOKEN_TTL = 300  # 5 minutes
+_MAX_DOWNLOAD_TOKENS = 256
+
+
+def _consume_background_download(task: asyncio.Task[Any]) -> None:
+    try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+    finally:
+        _background_download_tasks.discard(task)
+
+
+def _track_background_download(task: asyncio.Task[Any]) -> None:
+    """Keep an un-awaited download task alive and always consume its result."""
+    if task.done():
+        _consume_background_download(task)
+        return
+    _background_download_tasks.add(task)
+    task.add_done_callback(_consume_background_download)
+
+
+def _cleanup_download_tokens() -> None:
+    now = time.time()
+    expired = [token for token, info in _download_tokens.items() if now > info["expires"]]
+    for token in expired:
+        _download_tokens.pop(token, None)
+    while len(_download_tokens) >= _MAX_DOWNLOAD_TOKENS:
+        oldest = min(_download_tokens, key=lambda token: _download_tokens[token]["expires"])
+        _download_tokens.pop(oldest, None)
 
 
 # --- Request/Response models ---
@@ -68,6 +102,7 @@ def _is_doi_or_arxiv(text: str) -> bool:
 
 def _create_download_token(file_path: str, filename: str) -> str:
     """Create a one-time download token for a file. Returns the token string."""
+    _cleanup_download_tokens()
     token = uuid.uuid4().hex
     _download_tokens[token] = {
         "path": file_path,
@@ -130,7 +165,7 @@ async def index(request: Request):
 
 
 @app.post("/api/download")
-async def api_download(req: DownloadRequest):
+async def api_download(req: DownloadRequest, request: Request):
     """Download a paper by DOI or arXiv ID. Returns PDF file or error JSON."""
     import asyncio
 
@@ -146,7 +181,7 @@ async def api_download(req: DownloadRequest):
     if not _is_doi_or_arxiv(identifier):
         from .resolver import resolve_title_to_doi
         config = load_config()
-        doi = resolve_title_to_doi(identifier, config)
+        doi = await asyncio.to_thread(resolve_title_to_doi, identifier, config)
         if doi:
             identifier = doi
         else:
@@ -155,10 +190,42 @@ async def api_download(req: DownloadRequest):
                 status_code=404,
             )
 
-    # Run download in a worker thread to avoid blocking the event loop.
-    # asyncio.to_thread is the modern replacement for run_in_executor(None, fn)
-    # and avoids deprecation warnings around get_event_loop() in async context.
-    result = await asyncio.to_thread(download, identifier)
+    # Keep the worker observable and cooperatively cancel it if the client leaves.
+    cancel_event = threading.Event()
+    download_task = asyncio.create_task(
+        asyncio.to_thread(download, identifier, _cancel_event=cancel_event)
+    )
+    client_disconnected = False
+    result: dict[str, Any] | None = None
+    task_result_consumed = False
+    try:
+        while not download_task.done():
+            if await request.is_disconnected():
+                client_disconnected = True
+                cancel_event.set()
+                break
+            await asyncio.wait({download_task}, timeout=0.1)
+        if not client_disconnected:
+            try:
+                result = await download_task
+            finally:
+                task_result_consumed = True
+    finally:
+        cancel_event.set()
+        if not task_result_consumed:
+            _track_background_download(download_task)
+
+    if client_disconnected:
+        return JSONResponse(
+            {"success": False, "error": "Client disconnected", "cancelled": True},
+            status_code=499,
+        )
+
+    if result is None:
+        return JSONResponse(
+            {"success": False, "error": "Download worker returned no result"},
+            status_code=500,
+        )
 
     if result.get("success"):
         file_path = result.get("file", "")
@@ -179,7 +246,7 @@ async def api_download(req: DownloadRequest):
     # Enhance error response with actionable guidance
     error_response = dict(result)
     config = load_config()
-    sources = _check_sources(config)
+    sources = await asyncio.to_thread(_check_sources, config)
     error_response["sources"] = sources
 
     # Add specific guidance based on what's available
@@ -207,7 +274,7 @@ async def api_download_file(token: str):
 
 
 @app.post("/api/download/stream")
-async def api_download_stream(req: DownloadRequest):
+async def api_download_stream(req: DownloadRequest, request: Request):
     """Download a paper with real-time SSE status updates.
 
     Returns a stream of JSON events:
@@ -228,7 +295,7 @@ async def api_download_stream(req: DownloadRequest):
     if not _is_doi_or_arxiv(identifier):
         from .resolver import resolve_title_to_doi
         config = load_config()
-        doi = resolve_title_to_doi(identifier, config)
+        doi = await asyncio.to_thread(resolve_title_to_doi, identifier, config)
         if doi:
             identifier = doi
         else:
@@ -240,87 +307,86 @@ async def api_download_stream(req: DownloadRequest):
     task_id = str(uuid.uuid4())[:8]
 
     async def event_generator():
-        # Start event
-        yield f"data: {json.dumps({'type': 'start', 'identifier': identifier, 'task_id': task_id})}\n\n"
-
-        # Use asyncio.Queue for real-time event streaming
-        event_queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_event_loop()
+        event_queue: asyncio.Queue = asyncio.Queue(maxsize=128)
+        loop = asyncio.get_running_loop()
+        callback_open = threading.Event()
+        callback_open.set()
+        download_cancel_event = threading.Event()
+        download_task: asyncio.Task | None = None
+        task_result_consumed = False
 
         def progress_callback(event_type: str, **kwargs):
-            """Called from download thread to report progress."""
-            event = {'type': event_type, 'task_id': task_id, **kwargs}
-            # Thread-safe: schedule put on the event loop
-            loop.call_soon_threadsafe(event_queue.put_nowait, event)
+            if not callback_open.is_set() or event_type != "progress" or loop.is_closed():
+                return
+            event = {"type": "progress", "task_id": task_id, **kwargs}
 
-        # Store active download info
+            def enqueue() -> None:
+                if callback_open.is_set() and not event_queue.full():
+                    event_queue.put_nowait(event)
+
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(enqueue)
+
         _active_downloads[task_id] = {
             "identifier": identifier,
             "status": "running",
             "started_at": loop.time(),
         }
 
-        # Start download in background task
-        download_task = asyncio.create_task(
-            asyncio.to_thread(
-                download, identifier,
-                _progress_callback=progress_callback,
-            )
-        )
-
-        # Stream events as they arrive
-        result = None
         try:
-            while True:
+            yield f"data: {json.dumps({'type': 'start', 'identifier': identifier, 'task_id': task_id})}\n\n"
+            download_task = asyncio.create_task(
+                asyncio.to_thread(
+                    download,
+                    identifier,
+                    _progress_callback=progress_callback,
+                    _cancel_event=download_cancel_event,
+                )
+            )
+
+            while not download_task.done():
+                if await request.is_disconnected():
+                    download_cancel_event.set()
+                    _active_downloads[task_id]["status"] = "cancelling"
+                    return
                 try:
-                    # Wait for next event with timeout
-                    event = await asyncio.wait_for(event_queue.get(), timeout=2.0)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
                     yield f"data: {json.dumps(event)}\n\n"
-                    # Check if this is a terminal event
-                    if event.get('type') in ('success', 'error'):
-                        return
                 except asyncio.TimeoutError:
-                    # No event yet, check if download is done
-                    if download_task.done():
-                        break
-                    # Send keepalive comment to prevent connection timeout
                     yield ": keepalive\n\n"
 
-            # Download completed, get result
-            result = download_task.result()
-        except Exception as e:
-            result = {"success": False, "error": str(e)}
-
-        # Drain any remaining events from queue
-        while not event_queue.empty():
             try:
+                result = await download_task
+            finally:
+                task_result_consumed = True
+            while not event_queue.empty():
                 event = event_queue.get_nowait()
                 yield f"data: {json.dumps(event)}\n\n"
-            except asyncio.QueueEmpty:
-                break
 
-        # Send final result - use one-time token for file download
-        if result and result.get("success"):
-            file_path = result.get("file", "")
-            source = result.get("source", "unknown")
-            _active_downloads[task_id]["status"] = "completed"
-            _active_downloads[task_id]["file"] = file_path
-
-            try:
+            if result and result.get("success"):
+                file_path = result.get("file", "")
+                source = result.get("source", "unknown")
                 fp = Path(file_path)
                 if fp.exists():
                     token = _create_download_token(file_path, fp.name)
                     log.info(f"SSE [{task_id}] success: {fp.name} ({fp.stat().st_size} bytes), token issued")
-                    yield f"data: {json.dumps({'type': 'success', 'file': file_path, 'filename': fp.name, 'source': source, 'task_id': task_id, 'download_token': token})}\n\n"
+                    yield f"data: {json.dumps({'type': 'success', 'filename': fp.name, 'source': source, 'task_id': task_id, 'download_token': token})}\n\n"
                 else:
-                    log.warning(f"SSE [{task_id}] file not found: {file_path}")
                     yield f"data: {json.dumps({'type': 'error', 'error': 'File not found after download', 'task_id': task_id})}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'error': f'Failed to prepare download: {e}', 'task_id': task_id})}\n\n"
-        else:
-            error = (result or {}).get("error", "Download failed")
-            _active_downloads[task_id]["status"] = "failed"
-            yield f"data: {json.dumps({'type': 'error', 'error': error, 'task_id': task_id})}\n\n"
+            else:
+                error = (result or {}).get("error") or (result or {}).get("reason") or "Download failed"
+                yield f"data: {json.dumps({'type': 'error', 'error': error, 'task_id': task_id})}\n\n"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not await request.is_disconnected():
+                yield f"data: {json.dumps({'type': 'error', 'error': str(exc), 'task_id': task_id})}\n\n"
+        finally:
+            callback_open.clear()
+            download_cancel_event.set()
+            _active_downloads.pop(task_id, None)
+            if download_task is not None and not task_result_consumed:
+                _track_background_download(download_task)
 
     return StreamingResponse(
         event_generator(),
@@ -348,7 +414,7 @@ async def api_search(req: SearchRequest):
     if _is_doi_or_arxiv(query):
         return JSONResponse([{"doi": normalize_doi(query) if not is_arxiv_identifier(query) else query, "title": "", "is_direct": True}])
 
-    results = search_papers(query, limit=req.limit)
+    results = await asyncio.to_thread(search_papers, query, limit=req.limit)
     return JSONResponse(results)
 
 
@@ -356,7 +422,7 @@ async def api_search(req: SearchRequest):
 async def api_status():
     """Health check with source availability."""
     config = load_config()
-    sources = _check_sources(config)
+    sources = await asyncio.to_thread(_check_sources, config)
 
     return JSONResponse({
         "status": "ok",
@@ -364,8 +430,6 @@ async def api_status():
         "sources": sources,
         "active_downloads": len(_active_downloads),
     })
-
-
 @app.get("/api/downloads/active")
 async def api_active_downloads():
     """List currently active downloads."""
@@ -380,5 +444,3 @@ async def api_active_downloads():
             for tid, info in _active_downloads.items()
         ]
     })
-
-

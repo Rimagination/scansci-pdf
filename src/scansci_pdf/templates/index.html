@@ -70,7 +70,7 @@
                                   focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none
                                   placeholder:text-gray-400 transition">
                     <button type="submit"
-                            :disabled="loading || !query.trim()"
+                            :disabled="loading || downloading || !query.trim()"
                             class="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg
                                    bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-300
                                    disabled:cursor-not-allowed transition">
@@ -86,14 +86,14 @@
             <div class="flex items-center gap-3">
                 <button type="button"
                         @click="mode = 'search'; doAction()"
-                        :disabled="loading || !query.trim()"
+                        :disabled="loading || downloading || !query.trim()"
                         class="px-4 py-2 text-sm rounded-lg border transition"
                         :class="mode === 'search' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'">
                     Search Papers
                 </button>
                 <button type="button"
                         @click="mode = 'download'; doAction()"
-                        :disabled="loading || !query.trim()"
+                        :disabled="loading || downloading || !query.trim()"
                         class="px-4 py-2 text-sm rounded-lg border transition"
                         :class="mode === 'download' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'">
                     Direct Download
@@ -229,6 +229,7 @@ function app() {
         errorGuidance: [],
         status: 'checking',
         sources: {},
+        downloadController: null,
 
         async init() {
             try {
@@ -251,7 +252,7 @@ function app() {
         },
 
         doAction() {
-            if (!this.query.trim()) return;
+            if (!this.query.trim() || this.downloading) return;
             if (this.mode === 'download') {
                 this.downloadPaper(this.query.trim());
             } else {
@@ -289,7 +290,8 @@ function app() {
         },
 
         async downloadPaper(identifier) {
-            if (!identifier) return;
+            if (!identifier || this.downloading) return;
+            this.downloadController = new AbortController();
             this.downloading = true;
             this.downloadMsg = identifier;
             this.downloadElapsed = 0;
@@ -307,6 +309,7 @@ function app() {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({identifier}),
+                    signal: this.downloadController.signal,
                 });
 
                 if (!resp.ok) {
@@ -369,11 +372,14 @@ function app() {
                     this.error = finalResult.error;
                 } else if (finalResult && !finalResult.download_token) {
                     this.error = 'Download completed but file transfer failed. Please try again.';
+                } else if (!this.error) {
+                    this.error = 'Download stream ended before a final result was received.';
                 }
             } catch (e) {
-                this.error = 'Network error: ' + e.message;
+                if (e.name !== 'AbortError') this.error = 'Network error: ' + e.message;
             } finally {
                 clearInterval(timer);
+                this.downloadController = null;
                 this.downloading = false;
                 this.downloadMsg = '';
                 this.downloadElapsed = 0;
