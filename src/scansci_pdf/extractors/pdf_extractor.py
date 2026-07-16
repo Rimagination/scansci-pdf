@@ -4,7 +4,10 @@ import logging
 import re
 from pathlib import Path
 
-import pymupdf
+try:
+    import pymupdf
+except ImportError:  # Allow reduced runtime images to import the package.
+    pymupdf = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +32,27 @@ def extract_text(pdf_path: str | Path) -> str:
         logger.error("PDF file not found: %s", pdf_path)
         return ""
 
-    try:
-        doc = pymupdf.open(str(pdf_path))
-    except Exception as e:
-        logger.error("Failed to open PDF %s: %s", pdf_path, e)
+    if pymupdf is None:
+        logger.error("PyMuPDF is required for PDF text extraction")
         return ""
 
-    text_parts = []
-    for page in doc:
-        text = page.get_text("text")
-        if text:
-            text_parts.append(text)
-
-    doc.close()
+    doc = None
+    try:
+        doc = pymupdf.open(str(pdf_path))
+        text_parts = []
+        for page in doc:
+            text = page.get_text("text")
+            if text:
+                text_parts.append(text)
+    except Exception as e:
+        logger.error("Failed to extract text from PDF %s: %s", pdf_path, e)
+        return ""
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
     full_text = "\n\n".join(text_parts)
 
     # Clean up common PDF artifacts
@@ -101,19 +112,27 @@ def extract_from_bytes(pdf_bytes: bytes) -> str:
     Returns:
         Extracted text content.
     """
-    try:
-        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    except Exception as e:
-        logger.error("Failed to open PDF from bytes: %s", e)
+    if pymupdf is None:
+        logger.error("PyMuPDF is required for PDF text extraction")
         return ""
 
-    text_parts = []
-    for page in doc:
-        text = page.get_text("text")
-        if text:
-            text_parts.append(text)
-
-    doc.close()
+    doc = None
+    try:
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        text_parts = []
+        for page in doc:
+            text = page.get_text("text")
+            if text:
+                text_parts.append(text)
+    except Exception as e:
+        logger.error("Failed to extract text from PDF bytes: %s", e)
+        return ""
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
     return _clean_text("\n\n".join(text_parts))
 
 
