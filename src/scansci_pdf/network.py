@@ -162,35 +162,6 @@ def _is_cloudflare_block(resp: requests.Response) -> bool:
     return False
 
 
-def fetch_with_browser(
-    url: str,
-    config: dict[str, Any],
-    *,
-    stream: bool = False,
-) -> requests.Response | None:
-    """Fetch URL using CloakBrowser to bypass Cloudflare challenges."""
-    from .browser_engine import solve_url, is_available
-    if not is_available(config):
-        return None
-    result = solve_url(url, config)
-    if not result:
-        return None
-    solution = result.get("solution", {})
-    status = solution.get("status", 0)
-    if status >= 400:
-        return None
-    resp = requests.Response()
-    resp.status_code = status
-    resp._content = solution.get("response", "").encode("utf-8")
-    resp.url = solution.get("url", url)
-    cookies = solution.get("cookies", [])
-    if isinstance(cookies, list):
-        for c in cookies:
-            if "name" in c and "value" in c:
-                resp.cookies.set(c["name"], c["value"])
-    return resp
-
-
 def polite_delay(config: dict[str, Any]) -> None:
     # Polite delay is opt-in: only sleep when fixed_request_delay_enabled is True.
     # Without it, racing/parallel sources would be needlessly slowed.
