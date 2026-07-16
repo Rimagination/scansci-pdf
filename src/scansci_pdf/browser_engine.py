@@ -180,6 +180,54 @@ def get_browser_page(config: dict[str, Any] | None = None):
         return None
 
 
+def get_persistent_context(
+    profile_dir: str | Path,
+    config: dict[str, Any] | None = None,
+):
+    """Get or create a persistent browser context for fingerprint consistency.
+
+    Unlike launch() + cookie restore, persistent context preserves:
+    - Browser fingerprint (canvas, WebGL, audio, fonts)
+    - Cookies and localStorage across restarts
+    - Login sessions without re-authentication
+
+    This is the recommended approach for publisher sessions that need
+    stable identity across multiple download runs.
+    """
+    if not _check_cloakbrowser():
+        raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
+
+    try:
+        from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+        prepare_cloakbrowser_runtime()
+    except Exception:
+        pass
+
+    from cloakbrowser import launch_persistent_context
+
+    import os
+    _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    headless = not _has_display
+    humanize = True
+    if config:
+        if _has_display:
+            headless = config.get("browser_headless", False)
+        humanize = config.get("browser_humanize", True)
+
+    args = _build_browser_args(config)
+    profile_path = Path(profile_dir)
+    profile_path.mkdir(parents=True, exist_ok=True)
+
+    ctx = launch_persistent_context(
+        str(profile_path),
+        headless=headless,
+        humanize=humanize,
+        args=args,
+    )
+    logger.info(f"browser_engine: persistent context ready at {profile_path}")
+    return ctx
+
+
 def shutdown_shared_browser():
     """Shut down the current thread's browser. Call on thread exit or process exit."""
     browser = getattr(_tls, "browser", None)
