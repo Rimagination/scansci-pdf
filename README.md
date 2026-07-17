@@ -232,6 +232,7 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
 | `network_proxy` | 空 | HTTP/SOCKS 代理地址 |
 | `proxy_pool` | 空 | 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP |
+| `proxy_only_scihub` | `false` | 仅对 Sci-Hub/LibGen 使用代理，其他来源直连 |
 | `batch_workers` | `10` | 批量下载并发数（被封 IP 时建议调低到 2） |
 | `request_delay_min` | `2.0` | 请求间随机延迟下限（秒） |
 | `request_delay_max` | `5.0` | 请求间随机延迟上限（秒） |
@@ -282,6 +283,12 @@ docker compose up -d
 ### Tor
 
 如果你的网络无法访问某些来源，可以配置代理或使用 Tor。Docker 模式会提供 Tor 服务；本地模式可按诊断提示启用。
+
+如果你希望代理仅用于 Sci-Hub/LibGen（避免影响机构来源的 IP 授权），启用：
+
+```bash
+scansci-pdf config-cmd proxy_only_scihub true
+```
 
 ### CloakBrowser
 

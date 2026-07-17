@@ -9,6 +9,7 @@ dependencies = [
     "requests>=2.31",
     "requests[socks]>=2.31",
     "beautifulsoup4>=4.12",
+    "PyMuPDF>=1.24",
     "mcp[cli]>=1.12",
     "typer>=0.15",
     "uvicorn>=0.34",

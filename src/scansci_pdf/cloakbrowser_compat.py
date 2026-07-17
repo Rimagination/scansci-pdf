@@ -4,12 +4,74 @@ from __future__ import annotations
 
 import os
 import platform
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 _CLOAKBROWSER_CACHE_ENV = "CLOAKBROWSER_CACHE_DIR"
 _SCANSCI_CACHE_ENV = "SCANSCI_PDF_CLOAKBROWSER_CACHE_DIR"
 _BUILTIN_CACHE_DIR = Path(__file__).resolve().parent / "_browsers" / "cloakbrowser"
+_launch_cleanup_lock = threading.RLock()
+_LaunchResult = TypeVar("_LaunchResult")
+
+
+class _TrackedPlaywrightContextManager:
+    """Record Playwright instances started while CloakBrowser is launching."""
+
+    def __init__(self, manager: Any, started: list[Any]) -> None:
+        self._manager = manager
+        self._started = started
+
+    def start(self) -> Any:
+        playwright = self._manager.start()
+        self._started.append(playwright)
+        return playwright
+
+    def __enter__(self) -> Any:
+        playwright = self._manager.__enter__()
+        self._started.append(playwright)
+        return playwright
+
+    def __exit__(self, *args: Any) -> Any:
+        return self._manager.__exit__(*args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager, name)
+
+
+def launch_with_driver_cleanup(
+    launch_callable: Callable[..., _LaunchResult],
+    *args: Any,
+    **kwargs: Any,
+) -> _LaunchResult:
+    """Stop Playwright when CloakBrowser fails after starting its driver.
+
+    CloakBrowser owns the driver after a successful launch and stops it from the
+    returned browser/context ``close()`` method. CloakBrowser 0.4.10 does not
+    stop the driver when Chromium launch or post-launch patching raises.
+    """
+    import playwright.sync_api as playwright_sync_api
+
+    with _launch_cleanup_lock:
+        original_sync_playwright = playwright_sync_api.sync_playwright
+        started: list[Any] = []
+
+        def tracked_sync_playwright(*factory_args: Any, **factory_kwargs: Any) -> Any:
+            manager = original_sync_playwright(*factory_args, **factory_kwargs)
+            return _TrackedPlaywrightContextManager(manager, started)
+
+        playwright_sync_api.sync_playwright = tracked_sync_playwright
+        try:
+            return launch_callable(*args, **kwargs)
+        except BaseException:
+            for playwright in reversed(started):
+                try:
+                    playwright.stop()
+                except BaseException:
+                    pass
+            raise
+        finally:
+            playwright_sync_api.sync_playwright = original_sync_playwright
 
 
 def configure_builtin_cloakbrowser(

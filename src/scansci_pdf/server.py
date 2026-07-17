@@ -411,23 +411,65 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
             import requests
             from .network import USER_AGENT
             try:
-                s = requests.Session()
-                s.trust_env = False
                 proxy = config.get("network_proxy", "")
+                route_options: list[
+                    tuple[str, dict[str, str] | None]
+                ] = [("direct", None)]
                 if proxy:
-                    s.proxies = {"http": proxy, "https": proxy}
-                resp = s.get(
-                    "https://api.elsevier.com/content/serial/title",
-                    headers={"Accept": "application/json", "X-ELS-APIKey": api_key, "User-Agent": USER_AGENT},
-                    params={"count": 1},
-                    timeout=15,
-                )
-                if resp.status_code == 200:
+                    route_options.append(("configured_proxy", {"http": proxy, "https": proxy}))
+
+                response_status = None
+                route_used = ""
+                last_error = ""
+                for route_name, proxies in route_options:
+                    session = None
+                    candidate = None
+                    try:
+                        session = requests.Session()
+                        session.trust_env = False
+                        if proxies:
+                            session.proxies = proxies
+                        candidate = session.get(
+                            "https://api.elsevier.com/content/serial/title",
+                            headers={
+                                "Accept": "application/json",
+                                "X-ELS-APIKey": api_key,
+                                "User-Agent": USER_AGENT,
+                            },
+                            params={"count": 1},
+                            timeout=15,
+                        )
+                        response_status = candidate.status_code
+                        route_used = route_name
+                        if candidate.status_code == 200:
+                            break
+                    except Exception as route_exc:
+                        last_error = str(route_exc)
+                    finally:
+                        if candidate is not None:
+                            try:
+                                candidate.close()
+                            except Exception:
+                                pass
+                        if session is not None:
+                            try:
+                                session.close()
+                            except Exception:
+                                pass
+
+                if response_status is None:
+                    raise RuntimeError(last_error or "no Elsevier API response")
+
+                result["route"] = route_used
+                if response_status == 200:
                     result["test"] = "passed"
-                    result["message"] += " API Key 验证有效！ScienceDirect 论文可直接 API 下载。"
+                    result["message"] += (
+                        " API Key 验证有效。闭源全文还需要机构订阅/IP entitlement；"
+                        "下载时会优先走 direct route，再回退配置代理。"
+                    )
                 else:
                     result["test"] = "failed"
-                    result["message"] += f" API Key 验证失败（HTTP {resp.status_code}），请检查 key 是否正确。"
+                    result["message"] += f" API Key 验证失败（HTTP {response_status}），请检查 key 是否正确。"
             except Exception as e:
                 result["test"] = "error"
                 result["message"] += f" 验证请求失败: {e}"
@@ -746,14 +788,17 @@ def scansci_pdf_carsi_login(publisher: str | None = None) -> str:
 
     target_publisher = publisher or "sciencedirect"
     client = CARSIClient(config)
-    if target_publisher not in client._publisher_configs:
-        available = list(client._publisher_configs.keys())
-        return json.dumps({"success": False, "error": f"Unknown publisher: {target_publisher}", "available": available})
+    try:
+        if target_publisher not in client._publisher_configs:
+            available = list(client._publisher_configs.keys())
+            return json.dumps({"success": False, "error": f"Unknown publisher: {target_publisher}", "available": available})
 
-    ok = client.login(target_publisher)
-    if ok:
-        return json.dumps({"success": True, "message": f"CARSI login successful for {target_publisher}.", "idp": idp_name})
-    return json.dumps({"success": False, "error": "Login failed or timed out. Make sure Chrome is installed."})
+        ok = client.login(target_publisher)
+        if ok:
+            return json.dumps({"success": True, "message": f"CARSI login successful for {target_publisher}.", "idp": idp_name})
+        return json.dumps({"success": False, "error": "Login failed or timed out. Make sure Chrome is installed."})
+    finally:
+        client.close()
 
 
 @mcp_app.tool()
@@ -769,21 +814,24 @@ def scansci_pdf_carsi_status() -> str:
         return json.dumps({"carsi_enabled": False, "message": "CARSI not enabled."})
 
     client = CARSIClient(config)
-    publishers = {}
-    for pub_key in client._publisher_configs:
-        cookie_file = client._cookie_path(pub_key)
-        has_cookies = cookie_file.exists()
-        publishers[pub_key] = {
-            "has_cookies": has_cookies,
-            "cookie_file": str(cookie_file),
-        }
+    try:
+        publishers = {}
+        for pub_key in client._publisher_configs:
+            cookie_file = client._cookie_path(pub_key)
+            has_cookies = cookie_file.exists()
+            publishers[pub_key] = {
+                "has_cookies": has_cookies,
+                "cookie_file": str(cookie_file),
+            }
 
-    return json.dumps({
-        "carsi_enabled": True,
-        "carsi_idp_name": idp_name,
-        "hint": f"当前学校: {idp_name}。如需更换，运行 scansci_pdf_config_set key=carsi_idp_name value=新学校名称" if idp_name else "未设置学校。运行 scansci_pdf_config_set key=carsi_idp_name value=你的学校名称",
-        "publishers": publishers,
-    }, ensure_ascii=False)
+        return json.dumps({
+            "carsi_enabled": True,
+            "carsi_idp_name": idp_name,
+            "hint": f"当前学校: {idp_name}。如需更换，运行 scansci_pdf_config_set key=carsi_idp_name value=新学校名称" if idp_name else "未设置学校。运行 scansci_pdf_config_set key=carsi_idp_name value=你的学校名称",
+            "publishers": publishers,
+        }, ensure_ascii=False)
+    finally:
+        client.close()
 
 
 @mcp_app.tool()

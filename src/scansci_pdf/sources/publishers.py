@@ -6,12 +6,16 @@ Other publishers fall through to Crossref/Unpaywall/OpenAlex.
 
 from __future__ import annotations
 
+import random
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from ..pdf_utils import write_pdf_stream_atomic
 from .crossref import try_crossref
 
 
@@ -149,21 +153,37 @@ from ..log import get_logger
 log = get_logger()
 
 
-def _write_pdf_atomic(output_path: Path, first: bytes, iterator: Any) -> bool:
-    """Write PDF to .part file then atomically rename. Cleans up on failure."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-    try:
-        with tmp_path.open("wb") as fh:
-            fh.write(first)
-            for chunk in iterator:
-                if chunk:
-                    fh.write(chunk)
-        tmp_path.replace(output_path)
+def _cancelled(cancel_event: threading.Event | None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _polite_delay_or_cancel(
+    config: dict[str, Any],
+    cancel_event: threading.Event | None,
+) -> bool:
+    if _cancelled(cancel_event):
         return True
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
+    if config.get("fixed_request_delay_enabled") is not True:
         return False
+    lo = float(config.get("request_delay_min", 0))
+    hi = float(config.get("request_delay_max", 0))
+    if hi <= 0:
+        return False
+    delay = random.uniform(lo, max(lo, hi))
+    if cancel_event is None:
+        time.sleep(delay)
+        return False
+    return cancel_event.wait(delay)
+
+
+def _write_pdf_atomic(
+    output_path: Path,
+    first: bytes,
+    iterator: Any,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Write PDF to .part file then atomically rename. Cleans up on failure."""
+    return write_pdf_stream_atomic(output_path, first, iterator, cancel_event)
 
 
 # ============================================================
@@ -194,14 +214,28 @@ def _format_pdf_url(template: str, doi: str, url: str) -> str | None:
 # DOI resolution
 # ============================================================
 
-def resolve_doi(doi: str, config: dict[str, Any]) -> str | None:
+def resolve_doi(
+    doi: str,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> str | None:
     """Resolve DOI to publisher URL via doi.org redirect."""
     from ..network import USER_AGENT
+    session = None
+    resp = None
     try:
-        s = requests.Session()
-        s.trust_env = False
-        resp = s.head(f"https://doi.org/{doi}", allow_redirects=True,
-                      timeout=10, headers={"User-Agent": USER_AGENT})
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.head(
+            f"https://doi.org/{doi}",
+            allow_redirects=True,
+            timeout=10,
+            headers={"User-Agent": USER_AGENT},
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         resolved = resp.url.lower()
         known_patterns = []
         for pub in PUBLISHERS:
@@ -210,6 +244,17 @@ def resolve_doi(doi: str, config: dict[str, Any]) -> str | None:
             return resp.url
     except Exception:
         pass
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
     return None
 
 
@@ -217,13 +262,22 @@ def resolve_doi(doi: str, config: dict[str, Any]) -> str | None:
 # Publisher direct download (with GDPR cookie bypass)
 # ============================================================
 
-def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_publisher_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try publisher direct download with HTTP first, then browser fallback."""
     from ..network import USER_AGENT, polite_delay
     from ..pdf_utils import is_pdf_file, success, _response_looks_pdf
 
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     log.info(f"   [PublisherDirect] Starting for {doi}")
-    resolved_url = resolve_doi(doi, config)
+    resolved_url = resolve_doi(doi, config, cancel_event=cancel_event)
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     log.info(f"   [PublisherDirect] Resolved URL: {resolved_url}")
 
     # Phase 1: HTTP-based direct download (fast path)
@@ -239,15 +293,25 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
 
         log.info(f"   [Publisher] {name}: {pdf_url[:80]}...")
         polite_delay(config)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
 
+        session = None
+        resp = None
         try:
-            s = requests.Session()
-            s.trust_env = False
-            s.headers.update({"User-Agent": USER_AGENT})
-            _load_publisher_cookies(s, config)
-            resp = s.get(pdf_url, timeout=15, stream=True,
-                         headers={"Accept": "application/pdf,*/*"},
-                         allow_redirects=True)
+            session = requests.Session()
+            session.trust_env = False
+            session.headers.update({"User-Agent": USER_AGENT})
+            _load_publisher_cookies(session, config)
+            resp = session.get(
+                pdf_url,
+                timeout=15,
+                stream=True,
+                headers={"Accept": "application/pdf,*/*"},
+                allow_redirects=True,
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                return None
 
             if resp.status_code >= 400:
                 log.info(f"   [Publisher] {name}: HTTP {resp.status_code}")
@@ -258,13 +322,30 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
             if not _response_looks_pdf(resp, first):
                 continue
 
-            if not _write_pdf_atomic(output_path, first, iterator):
+            if not _write_pdf_atomic(
+                output_path,
+                first,
+                iterator,
+                cancel_event=cancel_event,
+            ):
                 continue
             if is_pdf_file(output_path):
                 return success(doi, output_path, f"Publisher({name})")
 
         except Exception as e:
-            log.info(f"   [Publisher] {name}: {e}")
+            if cancel_event is None or not cancel_event.is_set():
+                log.info(f"   [Publisher] {name}: {e}")
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     # Phase 2: Browser-based download via browser (handles anti-bot)
     publisher = get_publisher(doi)
@@ -275,7 +356,14 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
             fn = _FN_MAP.get(f"{publisher}Browser") or _FN_MAP.get("GenericBrowser")
             if fn:
                 try:
-                    result = fn(doi, output_path, config)
+                    if cancel_event is not None and cancel_event.is_set():
+                        return None
+                    result = fn(
+                        doi,
+                        output_path,
+                        config,
+                        cancel_event=cancel_event,
+                    )
                     if result:
                         return result
                 except Exception as e:
@@ -288,9 +376,14 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
 # MDPI direct download
 # ============================================================
 
-def try_mdpi_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_mdpi_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download MDPI open access papers directly."""
-    if not doi.startswith("10.3390/"):
+    if _cancelled(cancel_event) or not doi.startswith("10.3390/"):
         return None
 
     from ..pdf_utils import is_pdf_file, success, _response_looks_pdf
@@ -302,15 +395,22 @@ def try_mdpi_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
         f"https://www.mdpi.com/{article_id}/pdf",
     ]
 
+    session = None
     try:
         session = requests.Session()
         session.trust_env = False
         session.headers.update({"User-Agent": USER_AGENT})
-        polite_delay(config)
+        if _polite_delay_or_cancel(config, cancel_event):
+            return None
 
         # First try landing page to get real PDF URL
+        resp = None
         try:
+            if _cancelled(cancel_event):
+                return None
             resp = session.get(f"https://www.mdpi.com/{article_id}", timeout=10, allow_redirects=True)
+            if _cancelled(cancel_event):
+                return None
             if resp.status_code == 200:
                 pdf_match = re.search(r'citation_pdf_url["\s]+content="([^"]+)"', resp.text[:5000], re.I)
                 if not pdf_match:
@@ -322,27 +422,55 @@ def try_mdpi_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
                     urls.insert(0, pdf_url)
         except Exception:
             pass
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
         for pdf_url in urls:
+            resp2 = None
             try:
+                if _cancelled(cancel_event):
+                    return None
                 resp2 = session.get(pdf_url, timeout=15, stream=True,
                                     headers={"Accept": "application/pdf,*/*"})
-                if resp2.status_code >= 400:
+                if _cancelled(cancel_event) or resp2.status_code >= 400:
                     continue
 
                 iterator = resp2.iter_content(chunk_size=8192)
                 first = next(iterator, b"")
+                if _cancelled(cancel_event):
+                    return None
                 if not _response_looks_pdf(resp2, first):
                     continue
 
-                if not _write_pdf_atomic(output_path, first, iterator):
+                if not _write_pdf_atomic(
+                    output_path,
+                    first,
+                    iterator,
+                    cancel_event=cancel_event,
+                ):
                     continue
-                if is_pdf_file(output_path):
+                if not _cancelled(cancel_event) and is_pdf_file(output_path):
                     return success(doi, output_path, "MDPIDirect")
             except Exception:
                 continue
+            finally:
+                if resp2 is not None:
+                    try:
+                        resp2.close()
+                    except Exception:
+                        pass
     except Exception:
         pass
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
     return None
 
 
@@ -350,9 +478,17 @@ def try_mdpi_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
 # Science/AAAS direct download (Science Advances, Science, etc.)
 # ============================================================
 
-def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_science_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download Science/AAAS papers directly. Science Advances is OA."""
-    if not doi.startswith("10.1126/"):
+    if (
+        (cancel_event is not None and cancel_event.is_set())
+        or not doi.startswith("10.1126/")
+    ):
         return None
 
     from ..network import polite_delay
@@ -360,9 +496,13 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
 
     def _fetch_pdf_browser(pdf_url: str) -> "requests.Response | None":  # type: ignore[name-defined]
         from ..browser_engine import is_available as _browser_avail, solve_url as _browser_solve
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if not _browser_avail(config):
             return None
         result = _browser_solve(pdf_url, config)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if not result:
             return None
         solution = result.get("solution", {})
@@ -390,9 +530,16 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
         pdf_urls.append(f"https://www.science.org/doi/pdf/{doi}")
 
     for pdf_url in pdf_urls:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        resp = None
         try:
             polite_delay(config)
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             resp = _fetch_pdf_browser(pdf_url)
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             if resp is None:
                 continue
 
@@ -401,12 +548,23 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
             if not _response_looks_pdf(resp, first):
                 continue
 
-            if not _write_pdf_atomic(output_path, first, iterator):
+            if not _write_pdf_atomic(
+                output_path,
+                first,
+                iterator,
+                cancel_event=cancel_event,
+            ):
                 continue
             if is_pdf_file(output_path):
                 return success(doi, output_path, "ScienceDirect")
         except Exception:
             continue
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
     return None
 
 
@@ -414,9 +572,14 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
 # PNAS direct download
 # ============================================================
 
-def try_pnas_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_pnas_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download PNAS papers directly. PNAS is OA after 6 months."""
-    if not doi.startswith("10.1073/"):
+    if _cancelled(cancel_event) or not doi.startswith("10.1073/"):
         return None
 
     from ..network import USER_AGENT, polite_delay
@@ -425,8 +588,11 @@ def try_pnas_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
     doi_suffix = doi.split("10.1073/")[-1]
     pdf_url = f"https://www.pnas.org/doi/epdf/{doi}"
 
+    s = None
+    resp = None
     try:
-        polite_delay(config)
+        if _polite_delay_or_cancel(config, cancel_event):
+            return None
         s = requests.Session()
         s.trust_env = False
         s.headers.update({"User-Agent": USER_AGENT})
@@ -434,20 +600,33 @@ def try_pnas_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
                      headers={"Accept": "application/pdf,*/*"},
                      allow_redirects=True)
 
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first):
             return None
 
-        if not _write_pdf_atomic(output_path, first, iterator):
+        if not _write_pdf_atomic(output_path, first, iterator, cancel_event):
             return None
-        if is_pdf_file(output_path):
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             return success(doi, output_path, "PNASDirect")
     except Exception:
         pass
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
     return None
 
 
@@ -455,9 +634,14 @@ def try_pnas_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
 # PLOS direct download
 # ============================================================
 
-def try_plos_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_plos_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download PLOS papers directly. All PLOS journals are OA."""
-    if not doi.startswith("10.1371/"):
+    if _cancelled(cancel_event) or not doi.startswith("10.1371/"):
         return None
 
     from ..network import USER_AGENT, polite_delay
@@ -485,8 +669,11 @@ def try_plos_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
             break
     pdf_url = f"https://journals.plos.org/{journal}/article/file?id={doi}&type=printable"
 
+    s = None
+    resp = None
     try:
-        polite_delay(config)
+        if _polite_delay_or_cancel(config, cancel_event):
+            return None
         s = requests.Session()
         s.trust_env = False
         s.headers.update({"User-Agent": USER_AGENT})
@@ -494,20 +681,33 @@ def try_plos_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
                      headers={"Accept": "application/pdf,*/*"},
                      allow_redirects=True)
 
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first):
             return None
 
-        if not _write_pdf_atomic(output_path, first, iterator):
+        if not _write_pdf_atomic(output_path, first, iterator, cancel_event):
             return None
-        if is_pdf_file(output_path):
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             return success(doi, output_path, "PLOSDirect")
     except Exception:
         pass
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
     return None
 
 
@@ -515,9 +715,14 @@ def try_plos_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict
 # Frontiers direct download
 # ============================================================
 
-def try_frontiers_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_frontiers_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download Frontiers papers directly. All Frontiers journals are OA."""
-    if not doi.startswith("10.3389/"):
+    if _cancelled(cancel_event) or not doi.startswith("10.3389/"):
         return None
 
     from ..network import USER_AGENT, polite_delay
@@ -526,8 +731,11 @@ def try_frontiers_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
     # Frontiers PDF URL: https://www.frontiersin.org/articles/{doi}/pdf
     pdf_url = f"https://www.frontiersin.org/articles/{doi}/pdf"
 
+    s = None
+    resp = None
     try:
-        polite_delay(config)
+        if _polite_delay_or_cancel(config, cancel_event):
+            return None
         s = requests.Session()
         s.trust_env = False
         s.headers.update({"User-Agent": USER_AGENT})
@@ -535,20 +743,33 @@ def try_frontiers_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
                      headers={"Accept": "application/pdf,*/*"},
                      allow_redirects=True)
 
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first):
             return None
 
-        if not _write_pdf_atomic(output_path, first, iterator):
+        if not _write_pdf_atomic(output_path, first, iterator, cancel_event):
             return None
-        if is_pdf_file(output_path):
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             return success(doi, output_path, "FrontiersDirect")
     except Exception:
         pass
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
     return None
 
 
@@ -556,9 +777,14 @@ def try_frontiers_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
 # BMC/SpringerOpen direct download
 # ============================================================
 
-def try_bmc_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_bmc_direct(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download BMC/SpringerOpen papers directly. All BMC journals are OA."""
-    if not doi.startswith("10.1186/"):
+    if _cancelled(cancel_event) or not doi.startswith("10.1186/"):
         return None
 
     from ..network import USER_AGENT, polite_delay
@@ -571,8 +797,13 @@ def try_bmc_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[
     ]
 
     for pdf_url in pdf_urls:
+        if _cancelled(cancel_event):
+            return None
+        s = None
+        resp = None
         try:
-            polite_delay(config)
+            if _polite_delay_or_cancel(config, cancel_event):
+                return None
             s = requests.Session()
             s.trust_env = False
             s.headers.update({"User-Agent": USER_AGENT})
@@ -580,20 +811,33 @@ def try_bmc_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[
                          headers={"Accept": "application/pdf,*/*"},
                          allow_redirects=True)
 
-            if resp.status_code >= 400:
+            if _cancelled(cancel_event) or resp.status_code >= 400:
                 continue
 
             iterator = resp.iter_content(chunk_size=8192)
             first = next(iterator, b"")
+            if _cancelled(cancel_event):
+                return None
             if not _response_looks_pdf(resp, first):
                 continue
 
-            if not _write_pdf_atomic(output_path, first, iterator):
+            if not _write_pdf_atomic(output_path, first, iterator, cancel_event):
                 continue
-            if is_pdf_file(output_path):
+            if not _cancelled(cancel_event) and is_pdf_file(output_path):
                 return success(doi, output_path, "BMCDirect")
         except Exception:
             continue
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
     return None
 
 

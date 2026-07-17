@@ -13,6 +13,7 @@ log = get_logger()
 CORE_DEPS = {
     "requests": "HTTP client",
     "bs4": "HTML parsing (beautifulsoup4)",
+    "pymupdf": "PDF text extraction (PyMuPDF)",
     "mcp": "MCP protocol",
     "typer": "CLI framework",
     "uvicorn": "ASGI server",

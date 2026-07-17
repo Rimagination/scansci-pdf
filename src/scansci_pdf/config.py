@@ -35,6 +35,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "network_proxy": "",
     "proxy_pool": "",  # 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP
     "download_strategy": "fastest",  # fastest / grey_only(all 3 grey) / scihub_only(Sci-Hub only) / scihub_first / oa_first / legal_only
+    "proxy_only_scihub": False,
     "scihub_enabled": True,
     "scihub_domains": DEFAULT_SCIHUB_DOMAINS,
     "vpnsci_enabled": False,

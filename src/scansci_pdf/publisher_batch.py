@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import inspect
 import json
+import queue
 import re
 import shutil
 import threading
@@ -18,7 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
-from .config import load_config, parse_proxy_pool
+from .config import DATA_DIR, load_config, parse_proxy_pool
 from .extractors import pdf_extractor
 from .publisher_pdf_router import (
     build_pdf_candidates,
@@ -106,6 +107,14 @@ class DownloadResult:
         return self.status == "success"
 
 
+class _BrowserContextInvalidated(RuntimeError):
+    """Signals that an owned page could not be closed and its context was retired."""
+
+    def __init__(self, result: DownloadResult, detail: str):
+        super().__init__(detail)
+        self.result = result
+
+
 def safe_name(doi: str) -> str:
     return re.sub(r"[^\w\-.]", "_", doi)
 
@@ -162,91 +171,6 @@ def fetch_est_records(
     return records[:limit]
 
 
-class _PagePool:
-    """Thread-safe page pool sharing a single browser context.
-
-    All pages share the same context, which means they share:
-    - Cookies (session tokens, auth cookies)
-    - localStorage (publisher auth tokens)
-    - sessionStorage (temporary session data)
-    - HTTP connection pool (keep-alive authenticated connections)
-    - TLS session tickets (established encrypted sessions)
-
-    This is essential: login state is the ENTIRE browser context, not just cookies.
-    Creating a new context is like switching devices — publishers may reject it.
-    """
-
-    def __init__(self, context: Any, max_size: int = 2):
-        self._context = context
-        self._max_size = max_size
-        self._available: list[Any] = []
-        self._in_use: set[int] = set()
-        self._lock = threading.Lock()
-        self._not_empty = threading.Condition(self._lock)
-
-    def acquire(self) -> Any:
-        """Acquire a page from the pool. Creates new if pool is empty and under limit."""
-        with self._not_empty:
-            # Try to reuse an available page
-            while self._available:
-                page = self._available.pop()
-                try:
-                    _ = page.url  # Test if page is still alive
-                    self._in_use.add(id(page))
-                    return page
-                except Exception:
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-
-            # Create new page if under limit
-            if len(self._in_use) < self._max_size:
-                page = self._context.new_page()
-                self._in_use.add(id(page))
-                return page
-
-            # Wait for a page to be returned
-            while not self._available:
-                self._not_empty.wait(timeout=30)
-                if self._available:
-                    page = self._available.pop()
-                    try:
-                        _ = page.url
-                        self._in_use.add(id(page))
-                        return page
-                    except Exception:
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
-            # Should not reach here, but just in case
-            page = self._context.new_page()
-            self._in_use.add(id(page))
-            return page
-
-    def release(self, page: Any) -> None:
-        """Return a page to the pool for reuse."""
-        with self._not_empty:
-            self._in_use.discard(id(page))
-            try:
-                self._available.append(page)
-            except Exception:
-                pass
-            self._not_empty.notify()
-
-    def close_all(self) -> None:
-        """Close all pages."""
-        with self._lock:
-            for page in self._available:
-                try:
-                    page.close()
-                except Exception:
-                    pass
-            self._available.clear()
-            self._in_use.clear()
-
-
 class PublisherBatchDownloader:
     """Deterministic publisher workflow with diagnostic packets for surprises."""
 
@@ -293,7 +217,15 @@ class PublisherBatchDownloader:
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
         target = target_verified if target_verified and target_verified > 0 else None
-        worker_count = min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
+        try:
+            browser_limit = max(1, int(self.config.get("max_browser_workers", 1)))
+        except (TypeError, ValueError):
+            browser_limit = 1
+        worker_count = min(
+            max(1, int(concurrency or 1)),
+            MAX_BROWSER_CONCURRENCY,
+            browser_limit,
+        )
         if target:
             worker_count = 1
         attempt_cache_path = Path(attempt_cache) if attempt_cache else run_path / "attempts.jsonl"
@@ -339,7 +271,7 @@ class PublisherBatchDownloader:
 
         failed_records = [
             record
-            for record, result in zip(records, results)
+            for record, result in zip(records_to_run, results)
             if result.status == "failed" and result.reason in RETRYABLE_REASONS
         ]
 
@@ -376,7 +308,7 @@ class PublisherBatchDownloader:
         summary["cached_skipped"] = cached_skipped
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
-        summary["browser_profile_dir"] = str(Path(self.config.get("chrome_profile_dir", "")))
+        summary["browser_profile_dir"] = str(self._default_profile_dir())
         # Surface auto-stop so callers (CLI/MCP) can tell a halt from a clean
         # finish. ip_block_count is how many records came back ip_blocked in the
         # primary pass (the trip trigger).
@@ -404,6 +336,9 @@ class PublisherBatchDownloader:
         concurrency: int = 1,
     ) -> list[DownloadResult]:
         run_dir.mkdir(parents=True, exist_ok=True)
+        if not records:
+            self._write_results(run_dir / "summary.json", [])
+            return []
         worker_count = min(max(1, int(concurrency or 1)), len(records) or 1)
         if worker_count > 1 and not target_verified:
             return self._run_once_parallel(
@@ -418,10 +353,16 @@ class PublisherBatchDownloader:
         verified_count = 0
         consecutive_ip_blocks = 0
 
-        context = self._launch_context()
+        context: Any | None = self._launch_context()
         try:
-            for record in records:
-                result = self.fetch_one(context, record, run_dir)
+            for record_index, record in enumerate(records):
+                context_invalidated = False
+                try:
+                    result = self.fetch_one(context, record, run_dir)
+                except _BrowserContextInvalidated as exc:
+                    result = exc.result
+                    context_invalidated = True
+                    context = None
                 results.append(result)
                 if result.ok and result.verified_match:
                     verified_count += 1
@@ -438,11 +379,12 @@ class PublisherBatchDownloader:
                     consecutive_ip_blocks = 0
                 if target_verified and verified_count >= target_verified:
                     break
+                if context_invalidated:
+                    if record_index + 1 < len(records):
+                        context = self._launch_context()
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            if context is not None:
+                self._close_resource_with_retry(context)
 
         self._write_results(run_dir / "summary.json", results)
         return results
@@ -456,18 +398,10 @@ class PublisherBatchDownloader:
         attempt_cache_path: Path | None = None,
         phase: str = "primary",
     ) -> list[DownloadResult]:
-        """Run downloads in parallel using a shared browser context + page pool.
+        """Run downloads with one persistent context owned by each worker thread.
 
-        Architecture:
-        - ONE persistent context (preserves cookies, localStorage, sessionStorage,
-          HTTP connections, TLS sessions — the complete login state)
-        - N worker threads, each borrows a page from the pool, downloads, returns it
-        - All pages share the same context = same identity, no re-login needed
-
-        This is the correct model: login state is NOT just cookies. It includes
-        localStorage tokens, sessionStorage, connection pools, and TLS sessions.
-        Exporting cookies to a new context is like "switching devices" — some
-        publishers reject that. Sharing the context keeps the same device identity.
+        Playwright's sync API is thread-bound. Each worker therefore launches and
+        closes its own context from a copy of the authenticated profile.
         """
         # ── proxy-pool rotation branch ──
         proxies = parse_proxy_pool(self.config.get("proxy_pool", ""))
@@ -480,8 +414,7 @@ class PublisherBatchDownloader:
 
         run_dir.mkdir(parents=True, exist_ok=True)
         profile_root = run_dir / "worker-profiles"
-        source_profile = Path(self.config.get("chrome_profile_dir", ""))
-        profile_dir = self._prepare_worker_profile(source_profile, profile_root / f"{phase}-shared")
+        source_profile = self._default_profile_dir()
 
         results_by_index: dict[int, DownloadResult] = {}
         results_lock = threading.Lock()
@@ -515,33 +448,49 @@ class PublisherBatchDownloader:
                 with count_lock:
                     ip_block_count["n"] = 0
 
-        # Single shared context — login state fully preserved
-        context = self._launch_context(profile_dir=profile_dir)
-        page_pool = _PagePool(context, max_size=worker_count)
-
-        def run_worker(items: list[tuple[int, PaperRecord]]) -> None:
-            for item_index, record in items:
-                if stop_event.is_set():
-                    break  # IP block tripped — skip the rest of this chunk
-                page = page_pool.acquire()
-                try:
-                    record_result(item_index, self.fetch_one(page, record, run_dir))
-                finally:
-                    page_pool.release(page)
-
         indexed_records = list(enumerate(records))
         chunks = [indexed_records[i::worker_count] for i in range(worker_count)]
+        worker_inputs = []
+        for worker_index, chunk in enumerate(chunks):
+            if not chunk:
+                continue
+            profile_dir = self._prepare_worker_profile(
+                source_profile,
+                profile_root / f"{phase}-worker-{worker_index}",
+            )
+            worker_inputs.append((chunk, profile_dir))
+
+        def run_worker(
+            items: list[tuple[int, PaperRecord]],
+            profile_dir: Path,
+        ) -> None:
+            context: Any | None = self._launch_context(profile_dir=profile_dir)
+            try:
+                for item_offset, (item_index, record) in enumerate(items):
+                    if stop_event.is_set():
+                        break
+                    context_invalidated = False
+                    try:
+                        result = self.fetch_one(context, record, run_dir)
+                    except _BrowserContextInvalidated as exc:
+                        result = exc.result
+                        context_invalidated = True
+                    record_result(item_index, result)
+                    if context_invalidated:
+                        context = None
+                        if item_offset + 1 < len(items):
+                            context = self._launch_context(profile_dir=profile_dir)
+            finally:
+                if context is not None:
+                    self._close_resource_with_retry(context)
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(run_worker, chunk) for chunk in chunks if chunk]
+            futures = [
+                executor.submit(run_worker, chunk, profile_dir)
+                for chunk, profile_dir in worker_inputs
+            ]
             for future in as_completed(futures):
                 future.result()
-
-        page_pool.close_all()
-        try:
-            context.close()
-        except Exception:
-            pass
 
         results = [results_by_index[i] for i in range(len(records)) if i in results_by_index]
         self._write_results(run_dir / "summary.json", results)
@@ -557,119 +506,147 @@ class PublisherBatchDownloader:
         attempt_cache_path: Path | None = None,
         phase: str = "primary",
     ) -> list[DownloadResult]:
-        """Run downloads across multiple per-proxy contexts (IP rotation).
-
-        - Logs in once, exports cookies, injects into each proxy context.
-        - Round-robin assigns records to proxies.
-        - Per-proxy IP-block tracking: when a proxy hits the block threshold,
-          it's excluded; when all proxies are excluded the run auto-stops.
-        """
+        """Rotate proxies without sharing Playwright contexts across threads."""
         run_dir.mkdir(parents=True, exist_ok=True)
         profile_root = run_dir / "worker-profiles"
-        source_profile = Path(self.config.get("chrome_profile_dir", ""))
+        source_profile = self._default_profile_dir()
 
-        # ── 1. shared cookies (login once, reuse across proxies) ──
         login_profile = profile_root / f"{phase}-login"
         cookies = self._login_and_export_cookies(run_dir, login_profile)
 
-        # ── 2. per-proxy context + page-pool ──
         class _ProxySlot:
-            __slots__ = ("proxy", "context", "pool", "blocked", "ip_blocks")
-            def __init__(self, proxy: str, context, pool):
+            __slots__ = ("index", "proxy", "blocked", "ip_blocks")
+
+            def __init__(self, index: int, proxy: str):
+                self.index = index
                 self.proxy = proxy
-                self.context = context
-                self.pool = pool
                 self.blocked = False
                 self.ip_blocks = 0
 
-        slots: list[_ProxySlot] = []
-        self._proxy_blocked = []  # populated as proxies are excluded
-        for i, proxy in enumerate(proxies):
-            p_dir = self._prepare_worker_profile(source_profile, profile_root / f"{phase}-p{i}")
-            ctx = self._launch_context(profile_dir=p_dir, proxy=proxy)
-            if cookies:
-                self._inject_cookies(ctx, cookies)
-            pool = _PagePool(ctx, max_size=max(1, max(1, worker_count) // len(proxies) + 1))
-            slots.append(_ProxySlot(proxy, ctx, pool))
+        slots = [_ProxySlot(index, proxy) for index, proxy in enumerate(proxies)]
+        active_workers = min(max(1, worker_count), len(slots))
+        slot_groups = [slots[index::active_workers] for index in range(active_workers)]
+        worker_inputs: list[list[tuple[_ProxySlot, Path]]] = []
+        for worker_index, worker_slots in enumerate(slot_groups):
+            worker_inputs.append(
+                [
+                    (
+                        slot,
+                        self._prepare_worker_profile(
+                            source_profile,
+                            profile_root / f"{phase}-worker-{worker_index}-p{slot.index}",
+                        ),
+                    )
+                    for slot in worker_slots
+                ]
+            )
 
-        # ── 3. shared orchestrator state ──
+        seed_count = min(len(slots), len(records))
+        work_queue: queue.Queue[tuple[int, PaperRecord]] = queue.Queue()
+        for indexed_record in enumerate(records[seed_count:], start=seed_count):
+            work_queue.put(indexed_record)
+
         results_by_index: dict[int, DownloadResult] = {}
         results_lock = threading.Lock()
         attempt_lock = threading.Lock()
-        rr_lock = threading.Lock()
-        rr_index = 0
-        # No global consecutive-block counter here: in rotation mode each proxy
-        # is tracked independently (slot.ip_blocks). The whole run only stops
-        # when ALL proxies are excluded — that's the point of having a pool.
+        state_lock = threading.Lock()
         stop_event = threading.Event()
+        self._proxy_blocked = []
 
-        def _pick_slot() -> _ProxySlot | None:
-            nonlocal rr_index
-            with rr_lock:
-                active = [s for s in slots if not s.blocked]
-                if not active:
-                    return None
-                slot = active[rr_index % len(active)]
-                rr_index += 1
-                return slot
-
-        def _record(index: int, result: DownloadResult, slot: _ProxySlot | None) -> None:
+        def record_result(index: int, result: DownloadResult, slot: _ProxySlot) -> None:
             with results_lock:
                 results_by_index[index] = result
-                part = [results_by_index[ii] for ii in sorted(results_by_index)]
-                self._write_results(run_dir / "summary_partial.json", part)
+                partial = [results_by_index[item] for item in sorted(results_by_index)]
+                self._write_results(run_dir / "summary_partial.json", partial)
             with attempt_lock:
                 self._append_attempt(attempt_cache_path, result, phase)
 
-            if result.reason == "ip_blocked":
-                if slot is not None:
+            with state_lock:
+                if result.reason == "ip_blocked":
                     slot.ip_blocks += 1
                     if slot.ip_blocks >= IP_BLOCK_STOP_THRESHOLD and not slot.blocked:
                         slot.blocked = True
                         self._proxy_blocked.append(slot.proxy)
-                        # If every proxy is now blocked, stop the whole run.
-                        if all(s.blocked for s in slots) and not stop_event.is_set():
+                        if all(item.blocked for item in slots):
                             stop_event.set()
                             self._ip_block_stopped = True
-            elif result.ok or result.reason:
-                # A success (or non-block failure) resets this proxy's streak.
-                if slot is not None:
+                elif result.ok or result.reason:
                     slot.ip_blocks = 0
 
-        def _worker(chunk: list[tuple[int, PaperRecord]]) -> None:
-            for item_index, record in chunk:
-                if stop_event.is_set():
-                    break
-                slot = _pick_slot()
-                if slot is None:          # all proxies excluded
-                    break
-                page = slot.pool.acquire()
-                try:
-                    _record(item_index, self.fetch_one(page, record, run_dir), slot)
-                finally:
-                    slot.pool.release(page)
+        def run_worker(owned_slots: list[tuple[_ProxySlot, Path]]) -> None:
+            contexts: dict[_ProxySlot, Any | None] = {
+                slot: None for slot, _profile_dir in owned_slots
+            }
+            profile_dirs = {slot: profile_dir for slot, profile_dir in owned_slots}
+            cursor = 0
 
-        # ── 4. execution ──
-        indexed = list(enumerate(records))
-        chunks = [indexed[i::worker_count] for i in range(worker_count)]
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_worker, c) for c in chunks if c]
+            def process_record(
+                slot: _ProxySlot,
+                item_index: int,
+                record: PaperRecord,
+            ) -> None:
+                context = contexts[slot]
+                if context is None:
+                    context = self._launch_context(
+                        profile_dir=profile_dirs[slot],
+                        proxy=slot.proxy,
+                    )
+                    contexts[slot] = context
+                    if cookies:
+                        self._inject_cookies(context, cookies)
+
+                try:
+                    result = self.fetch_one(context, record, run_dir)
+                except _BrowserContextInvalidated as exc:
+                    result = exc.result
+                    contexts[slot] = None
+                record_result(item_index, result, slot)
+
+            try:
+                # Seed each configured proxy before workers compete for the shared
+                # queue. Without this, a fast worker can drain short batches before
+                # another owner thread gets scheduled, defeating proxy rotation.
+                for slot, _profile_dir in owned_slots:
+                    if slot.index >= seed_count:
+                        continue
+                    process_record(slot, slot.index, records[slot.index])
+
+                while not stop_event.is_set():
+                    with state_lock:
+                        available = [slot for slot, _profile_dir in owned_slots if not slot.blocked]
+                    if not available:
+                        break
+                    try:
+                        item_index, record = work_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    slot = available[cursor % len(available)]
+                    cursor += 1
+                    process_record(slot, item_index, record)
+                    work_queue.task_done()
+            finally:
+                for context in contexts.values():
+                    if context is not None:
+                        self._close_resource_with_retry(context)
+
+        with ThreadPoolExecutor(max_workers=active_workers) as executor:
+            futures = [executor.submit(run_worker, worker_slots) for worker_slots in worker_inputs]
             for future in as_completed(futures):
                 future.result()
 
-        # ── 5. cleanup ──
-        for slot in slots:
-            slot.pool.close_all()
-            try:
-                slot.context.close()
-            except Exception:
-                pass
-
-        results = [results_by_index[i] for i in range(len(records)) if i in results_by_index]
+        results = [results_by_index[index] for index in range(len(records)) if index in results_by_index]
         self._write_results(run_dir / "summary.json", results)
         return results
 
     def _prepare_worker_profile(self, source: Path, target: Path) -> Path:
+        source = source.resolve()
+        target = target.resolve()
+        if target == source or source in target.parents or target in source.parents:
+            raise ValueError(
+                "worker profile source and target must not contain each other: "
+                f"source={source}, target={target}"
+            )
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -760,15 +737,9 @@ class PublisherBatchDownloader:
                     print(f"  ✅ Login successful! Exported {len(cookies)} cookies for {len(cookies)} workers")
                 return cookies
             finally:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+                self._close_resource_with_retry(page)
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            self._close_resource_with_retry(context)
 
     def _inject_cookies(self, context: Any, cookies: list[dict]) -> None:
         """Inject previously exported cookies into a context (Playwright add_cookies).
@@ -824,7 +795,7 @@ class PublisherBatchDownloader:
     def _launch_context(self, profile_dir: str | Path | None = None, *, proxy: str | None = None):
         from .browser_engine import get_persistent_context
 
-        profile_path = Path(profile_dir) if profile_dir else Path(self.config.get("chrome_profile_dir", ""))
+        profile_path = Path(profile_dir) if profile_dir else self._default_profile_dir()
         profile_path.mkdir(parents=True, exist_ok=True)
         # Overlay a per-launch proxy without mutating the shared config object.
         config = dict(self.config)
@@ -837,22 +808,48 @@ class PublisherBatchDownloader:
             self._context_proxy[id(ctx)] = proxy
         return ctx
 
+    def _default_profile_dir(self) -> Path:
+        configured = self.config.get("chrome_profile_dir")
+        if isinstance(configured, str):
+            configured = configured.strip()
+            if configured:
+                return Path(configured)
+        elif configured is not None:
+            try:
+                return Path(configured)
+            except (TypeError, ValueError):
+                pass
+        return DATA_DIR / "browser_profiles" / safe_name(self.profile.name.lower())
+
     def fetch_one(self, context_or_page: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
-        # Support both context (creates new page) and pre-created page (from page pool)
-        if hasattr(context_or_page, "new_page") and hasattr(context_or_page, "cookies"):
-            # It's a context — create a new page
-            page = context_or_page.new_page()
-            _owns_page = True
-        else:
-            # It's already a page (from page pool)
-            page = context_or_page
-            _owns_page = False
         result = DownloadResult(
             doi=record.doi,
             status="failed",
             state="started",
             article_url=self.profile.article_url(record.doi),
         )
+        page = context_or_page
+        _owns_page = False
+
+        # Support both context (creates new page) and pre-created page (from page pool)
+        if hasattr(context_or_page, "new_page") and hasattr(context_or_page, "cookies"):
+            # It's a context — create a new page
+            _owns_page = True
+            try:
+                page = context_or_page.new_page()
+            except Exception as exc:
+                result.reason = f"{type(exc).__name__}: {exc}"
+                result.state = "unexpected_error"
+                detail = f"page creation failed: {exc}"
+                context_close_error = self._close_resource_with_retry(context_or_page)
+                if context_close_error is not None:
+                    detail += (
+                        "; context close failed after retry: "
+                        f"{context_close_error}"
+                    )
+                self._event(result, "browser_context_invalidated", detail)
+                raise _BrowserContextInvalidated(result, detail) from exc
+
         try:
             self._event(result, "article_open", result.article_url)
             if not self._ensure_login(page, result):
@@ -985,12 +982,34 @@ class PublisherBatchDownloader:
             self._write_diagnostic(page, result, run_dir)
             return result
         finally:
-            self._hold_after_run(page, result)
-            if _owns_page:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            try:
+                self._hold_after_run(page, result)
+            finally:
+                if _owns_page:
+                    page_close_error = self._close_resource_with_retry(page)
+                    if page_close_error is not None:
+                        context_close_error = self._close_resource_with_retry(
+                            context_or_page
+                        )
+                        detail = f"page close failed after retry: {page_close_error}"
+                        if context_close_error is not None:
+                            detail += (
+                                "; context close failed after retry: "
+                                f"{context_close_error}"
+                            )
+                        self._event(result, "browser_context_invalidated", detail)
+                        raise _BrowserContextInvalidated(result, detail) from page_close_error
+
+    @staticmethod
+    def _close_resource_with_retry(resource: Any) -> Exception | None:
+        last_error = None
+        for _attempt in range(2):
+            try:
+                resource.close()
+                return None
+            except Exception as exc:
+                last_error = exc
+        return last_error
 
     def _hold_after_login(self, page: Any, result: DownloadResult) -> None:
         if not self.post_login_hold_sec:
@@ -2764,7 +2783,7 @@ class PublisherBatchDownloader:
         packet = {
             **asdict(result),
             "publisher": self.profile.name,
-            "browser_profile_dir": str(Path(self.config.get("chrome_profile_dir", ""))),
+            "browser_profile_dir": str(self._default_profile_dir()),
             "body_excerpt": self._body_text(page, 2_000),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
