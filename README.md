@@ -231,6 +231,7 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `auto_rename` | `true` | 自动按作者/标题重命名 |
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
 | `network_proxy` | 空 | HTTP/SOCKS 代理地址 |
+| `proxy_pool` | 空 | 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP |
 | `batch_workers` | `10` | 批量下载并发数（被封 IP 时建议调低到 2） |
 | `request_delay_min` | `2.0` | 请求间随机延迟下限（秒） |
 | `request_delay_max` | `5.0` | 请求间随机延迟上限（秒） |
@@ -377,6 +378,16 @@ scansci-pdf config-cmd request_delay_max 12     # 拉大随机延迟上限（默
 ```
 ⚠ 已自动停止：连续检测到 IP 被出版商封禁（N 篇返回 ip_blocked），剩余任务已取消。
 ```
+
+**代理池轮换（进阶）**：如果有多个代理可用，可以配置代理池让批量下载轮换出口 IP，从源头降低单 IP 被盯上的概率：
+
+```bash
+scansci-pdf config --proxy-pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080,socks5://3.3.3.3:1080"
+```
+
+启用后，每个代理启动一个独立浏览器上下文，记录按 round-robin 分配到各代理。某个代理连续被封（3 次）会被自动剔除，剩余记录转到其他代理；所有代理都被封才会整体停止。登录只需完成一次，cookies 会复用到各代理上下文。
+
+> ⚠ **权衡**：同一登录态从多个 IP 并发访问，少数出版商可能视为异常（账号共享/被盗）。这比被整体封 IP 更可接受，但如果你的机构对这种检测敏感，保持 `proxy_pool` 为空即可回到单上下文模式。
 
 ### 下载速度慢
 

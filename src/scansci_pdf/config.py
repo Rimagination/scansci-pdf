@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_dir": str(DATA_DIR / "papers"),
     "cache_dir": str(DATA_DIR / "cache"),
     "network_proxy": "",
+    "proxy_pool": "",  # 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP
     "download_strategy": "fastest",  # fastest / grey_only(all 3 grey) / scihub_only(Sci-Hub only) / scihub_first / oa_first / legal_only
     "scihub_enabled": True,
     "scihub_domains": DEFAULT_SCIHUB_DOMAINS,
@@ -190,3 +191,22 @@ def get_config_safe() -> dict[str, Any]:
         if config.get(key):
             config[key] = "***"
     return config
+
+
+def parse_proxy_pool(value: str | None) -> list[str]:
+    """Parse a comma-separated proxy list into a deduplicated list.
+
+    Accepts forms like ``"socks5://1.1.1.1:1080, http://2.2.2.2:8080"`` and
+    returns ``["socks5://1.1.1.1:1080", "http://2.2.2.2:8080"]``. Empty/blank
+    entries are dropped. Order is preserved; duplicates removed.
+    """
+    if not value:
+        return []
+    seen: set[str] = set()
+    proxies: list[str] = []
+    for token in str(value).split(","):
+        proxy = token.strip()
+        if proxy and proxy not in seen:
+            seen.add(proxy)
+            proxies.append(proxy)
+    return proxies
