@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ DEFAULT_SCIHUB_DOMAINS = [
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "email": "scansci-pdf@example.invalid",
+    "mcp_server_name": os.environ.get("MCP_SERVER_NAME", "scansci-pdf"),
     "output_dir": str(DATA_DIR / "papers"),
     "cache_dir": str(DATA_DIR / "cache"),
     "network_proxy": "",
@@ -57,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "json_probe_cache_seconds": 3600,
     "cache_ttl_hours": 168,
     "parallel_sources": True,
+    "source_workers": 4,
     "parallel_probes": True,
     "batch_workers": 10,
     "batch_stagger_seconds": 0.3,
@@ -68,7 +71,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tor_use_bridges": False,
     "use_tor_for_scihub": True,
     "google_scholar_limit": 5,
-    "max_browser_workers": 1,
+    "max_browser_workers": 2,
     "scihub_browser_workers": 3,  # Number of Sci-Hub domains to race in parallel via browser
     "host_concurrency": {},
     "auto_rename": True,
@@ -82,6 +85,52 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+_VALIDATION_RULES: dict[str, tuple[type, Any, Any]] = {
+    # key: (type, min_value, max_value)
+    "connect_timeout": (int, 1, 60),
+    "read_timeout": (int, 1, 120),
+    "request_delay_min": (float, 0, 30),
+    "request_delay_max": (float, 0, 60),
+    "json_probe_cache_seconds": (float, 0, 86400),
+    "cache_ttl_hours": (float, 0, 8760),
+    "batch_workers": (int, 1, 50),
+    "source_workers": (int, 1, 16),
+    "max_browser_workers": (int, 1, 4),
+    "batch_stagger_seconds": (float, 0, 60),
+    "min_pdf_size_bytes": (int, 100, 10_000_000),
+    "google_scholar_limit": (int, 1, 100),
+}
+
+
+def _validate_config_value(key: str, value: Any) -> Any:
+    rule = _VALIDATION_RULES.get(key)
+    if rule is None:
+        return value
+
+    expected_type, min_val, max_val = rule
+    if isinstance(value, bool):
+        return DEFAULT_CONFIG[key]
+
+    if expected_type is int:
+        if type(value) is not int:
+            return DEFAULT_CONFIG[key]
+        normalized = value
+    elif expected_type is float:
+        if type(value) not in (int, float):
+            return DEFAULT_CONFIG[key]
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            return DEFAULT_CONFIG[key]
+    else:
+        if not isinstance(value, expected_type):
+            return DEFAULT_CONFIG[key]
+        normalized = value
+
+    if normalized < min_val or normalized > max_val:
+        return DEFAULT_CONFIG[key]
+    return normalized
+
+
 def load_config() -> dict[str, Any]:
     config = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
@@ -89,7 +138,10 @@ def load_config() -> dict[str, Any]:
             with CONFIG_FILE.open("r", encoding="utf-8") as fh:
                 existing = json.load(fh)
             if isinstance(existing, dict):
-                config.update(existing)
+                config.update(
+                    (key, _validate_config_value(key, value))
+                    for key, value in existing.items()
+                )
         except Exception:
             pass
     for key, value in DEFAULT_CONFIG.items():
@@ -101,21 +153,6 @@ def save_config(config: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with CONFIG_FILE.open("w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2, ensure_ascii=False)
-
-
-_VALIDATION_RULES: dict[str, tuple[type, Any, Any]] = {
-    # key: (type, min_value, max_value)
-    "connect_timeout": (int, 1, 60),
-    "read_timeout": (int, 1, 120),
-    "request_delay_min": (float, 0.0, 30.0),
-    "request_delay_max": (float, 0.0, 60.0),
-    "json_probe_cache_seconds": (int, 0, 86400),
-    "cache_ttl_hours": (int, 1, 8760),
-    "batch_workers": (int, 1, 50),
-    "batch_stagger_seconds": (float, 0.0, 10.0),
-    "min_pdf_size_bytes": (int, 100, 1000000),
-    "google_scholar_limit": (int, 1, 50),
-}
 
 _VALID_STRATEGIES = frozenset({"fastest", "scihub_first", "scihub_only", "grey_only", "oa_first", "legal_only"})
 
@@ -175,10 +212,7 @@ def update_config(key: str, value: str) -> dict[str, Any]:
     else:
         config[key] = value
 
-    if key in _VALIDATION_RULES:
-        _, min_val, max_val = _VALIDATION_RULES[key]
-        if config[key] < min_val or config[key] > max_val:
-            config[key] = DEFAULT_CONFIG[key]
+    config[key] = _validate_config_value(key, config[key])
 
     save_config(config)
     return config
