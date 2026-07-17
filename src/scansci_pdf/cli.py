@@ -1164,6 +1164,7 @@ def config_cmd(
     set_elsevier_token: str = typer.Option("", "--elsevier-inst-token", help="Set Elsevier institutional token."),
     set_flaresolverr: str = typer.Option("", "--flaresolverr-url", help="Set FlareSolverr URL."),
     set_static_proxy: str = typer.Option("", "--static-proxy", help="Set browser static proxy (e.g. socks5://1.2.3.4:1080)."),
+    set_proxy_pool: str = typer.Option("", "--proxy-pool", help="Comma-separated proxy list for IP rotation (e.g. socks5://a:1080,http://b:8080)."),
     set_remote_port: int = typer.Option(-1, "--remote-assist-port", help="Set remote assist HTTP port (0=disabled)."),
     set_max_workers: int = typer.Option(-1, "--max-browser-workers", help="Set max parallel browser workers."),
     set_federated_enable: bool = typer.Option(False, "--federated-enable", help="Enable federated institutional auth."),
@@ -1252,6 +1253,13 @@ def config_cmd(
         changed = True
         console.print(f"[green]Browser static proxy set to: {set_static_proxy}[/green]")
 
+    if set_proxy_pool:
+        cfg["proxy_pool"] = set_proxy_pool
+        changed = True
+        from scansci_pdf.config import parse_proxy_pool
+        parsed = parse_proxy_pool(set_proxy_pool)
+        console.print(f"[green]Proxy rotation pool: {len(parsed)} proxies ({', '.join(parsed)})[/green]")
+
     if set_remote_port >= 0:
         cfg["remote_assist_port"] = set_remote_port
         changed = True
@@ -1271,7 +1279,8 @@ def config_cmd(
                        set_elsevier_key, set_elsevier_token, set_flaresolverr,
                        set_federated_enable, set_federated_disable, set_federated_school,
                        set_carsi_enable, set_carsi_disable, set_carsi_school,
-                       set_static_proxy, set_remote_port >= 0, set_max_workers >= 1])
+                       set_static_proxy, set_proxy_pool,
+                       set_remote_port >= 0, set_max_workers >= 1])
     if show and not has_setter:
         # Determine school type
         try:
