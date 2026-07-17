@@ -6,6 +6,7 @@ publishers like Elsevier, Springer Nature, Wiley, ACS, etc.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import requests
 
 from ..config import DATA_DIR
 from ..log import get_logger
+from ..pdf_utils import write_pdf_bytes_atomic
 from ..publisher_strategies import (
     _IDP_MAP,
     _AUTH_KEYWORDS,
@@ -30,6 +32,37 @@ from ..publisher_strategies import (
 )
 
 log = get_logger()
+
+
+def _cancelled(cancel_event: threading.Event | None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _wait_or_cancel(
+    cancel_event: threading.Event | None,
+    timeout: float,
+) -> bool:
+    if cancel_event is None:
+        time.sleep(max(0.0, timeout))
+        return False
+    return cancel_event.wait(max(0.0, timeout))
+
+
+@contextlib.contextmanager
+def _cancelable_lock(
+    lock: threading.Lock,
+    cancel_event: threading.Event | None,
+):
+    acquired = False
+    while not acquired:
+        if _cancelled(cancel_event):
+            yield False
+            return
+        acquired = lock.acquire(timeout=0.1)
+    try:
+        yield True
+    finally:
+        lock.release()
 
 _PUBLISHER_CONFIGS_FILE = DATA_DIR / "publisher_carsi.json"
 _PKG_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -126,12 +159,31 @@ class CARSIClient:
             log.warning(f"   [CARSI] Fetch failed: {e}")
             return None
 
-    def download_via_browser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
+    def download_via_browser(
+        self,
+        doi: str,
+        article_url: str,
+        output_path: Path,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any] | None:
         """Download PDF via CloakBrowser with CARSI auth."""
-        return self._download_via_cloakbrowser(doi, article_url, output_path)
+        return self._download_via_cloakbrowser(
+            doi,
+            article_url,
+            output_path,
+            cancel_event=cancel_event,
+        )
 
-    def _download_via_cloakbrowser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
+    def _download_via_cloakbrowser(
+        self,
+        doi: str,
+        article_url: str,
+        output_path: Path,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any] | None:
         """Download PDF via CloakBrowser with CARSI auth. Single session: login + download."""
+        if _cancelled(cancel_event):
+            return None
         publisher = detect_publisher(article_url)
         if not publisher:
             return None
@@ -140,8 +192,11 @@ class CARSIClient:
             return None
 
         try:
+            from ..cloakbrowser_compat import prepare_cloakbrowser_runtime
+
+            prepare_cloakbrowser_runtime()
             from cloakbrowser import launch  # noqa: F401
-        except ImportError:
+        except Exception:
             log.info("   [CARSI-Browser] cloakbrowser not installed")
             return None
 
@@ -155,18 +210,34 @@ class CARSIClient:
         from ..pdf_utils import is_pdf_file, success as _success
 
         # Serialize browser opens across threads — only one browser at a time
-        with self._login_lock:
+        with _cancelable_lock(self._login_lock, cancel_event) as lock_acquired:
+            if not lock_acquired:
+                return None
             log.info(f"   [CARSI-Browser] Opening browser for {publisher}...")
+            page = None
+            captured_pdf: list[bytes] = []
+            capture_lock = threading.Lock()
+            capture_in_progress = False
+            on_response = None
             try:
                 from ..publisher_strategies import _visible_browser, _save_all_cookie_formats
 
-                with _visible_browser(self.config, publisher, viewport=None) as (context, page):
+                with _visible_browser(
+                    self.config,
+                    publisher,
+                    viewport=None,
+                    cancel_event=cancel_event,
+                ) as (context, page):
                     def _try_save_captured() -> dict[str, Any] | None:
                         """If a PDF was captured, save and validate it."""
+                        if _cancelled(cancel_event):
+                            return None
                         if captured_pdf:
-                            output_path.parent.mkdir(parents=True, exist_ok=True)
-                            output_path.write_bytes(captured_pdf[-1])
-                            if is_pdf_file(output_path):
+                            if write_pdf_bytes_atomic(
+                                output_path,
+                                captured_pdf[-1],
+                                cancel_event,
+                            ) and is_pdf_file(output_path):
                                 return _success(doi, output_path, "CARSI-Browser")
                         return None
 
@@ -187,8 +258,10 @@ class CARSIClient:
                             pass
 
                     # Capture PDF from network
-                    captured_pdf = []
                     def on_response(response):
+                        nonlocal capture_in_progress
+                        if _cancelled(cancel_event):
+                            return
                         try:
                             ct = response.headers.get("content-type", "")
                             url = response.url
@@ -198,21 +271,34 @@ class CARSIClient:
                                 return
                             if response.status >= 400:
                                 return
-                            body = response.body()
-                            if len(body) > 5000 and body[:4] == b"%PDF-":
-                                captured_pdf.append(body)
-                                log.info(f"   [CARSI-Browser] PDF captured: {len(body)} bytes")
+                            with capture_lock:
+                                if _cancelled(cancel_event) or capture_in_progress or captured_pdf:
+                                    return
+                                capture_in_progress = True
+                            try:
+                                body = response.body()
+                                if _cancelled(cancel_event) or captured_pdf:
+                                    return
+                                if len(body) > 5000 and body.startswith(b"%PDF-"):
+                                    captured_pdf.append(body)
+                                    log.info(f"   [CARSI-Browser] PDF captured: {len(body)} bytes")
+                            finally:
+                                with capture_lock:
+                                    capture_in_progress = False
                         except Exception:
                             pass
                     page.on("response", on_response)
 
                     # Step 1: Navigate to article page first (gets Cloudflare clearance)
                     log.info(f"   [CARSI-Browser] Loading article: {article_url[:60]}")
+                    if _cancelled(cancel_event):
+                        return None
                     try:
                         page.goto(article_url, wait_until="domcontentloaded", timeout=60000)
-                        time.sleep(5)
                     except Exception:
                         pass
+                    if _wait_or_cancel(cancel_event, 5):
+                        return None
 
                     title = page.title()
                     url = page.url
@@ -221,9 +307,12 @@ class CARSIClient:
                     # Wait for Cloudflare challenge to resolve (visible stealth browser can pass it)
                     from ..network import is_cloudflare_challenge
                     for _cf_wait in range(12):
+                        if _cancelled(cancel_event):
+                            return None
                         if is_cloudflare_challenge(page.title() or ""):
                             log.info(f"   [CARSI-Browser] Cloudflare challenge detected, waiting... ({_cf_wait+1}/12)")
-                            time.sleep(5)
+                            if _wait_or_cancel(cancel_event, 5):
+                                return None
                         else:
                             break
                     else:
@@ -281,21 +370,28 @@ class CARSIClient:
 
                     if not cookies_valid:
                         # Step 2: Navigate to "Institutional login" link on article page
+                        if _cancelled(cancel_event):
+                            return None
                         sso_href = page.evaluate(_SSO_LINK_FINDER_JS)
                         if sso_href:
                             log.info(f"   [CARSI-Browser] Navigating to SSO: {sso_href[:80]}")
+                            if _cancelled(cancel_event):
+                                return None
                             try:
                                 page.goto(sso_href, wait_until="domcontentloaded", timeout=30000)
                             except Exception:
                                 pass
                         else:
                             log.info("   [CARSI-Browser] No SSO link found, trying direct login URL...")
+                            if _cancelled(cancel_event):
+                                return None
                             try:
                                 page.goto(cfg.login_url, wait_until="domcontentloaded", timeout=30000)
                             except Exception:
                                 pass
 
-                        time.sleep(8)
+                        if _wait_or_cancel(cancel_event, 8):
+                            return None
 
                         # Step 3: Search for institution in the WAYF page
                         search_input = page.query_selector('#searchInstitution')
@@ -307,17 +403,20 @@ class CARSIClient:
 
                         if search_input:
                             search_input.fill(idp_en)
-                            time.sleep(3)
+                            if _wait_or_cancel(cancel_event, 3):
+                                return None
                             log.info(f"   [CARSI-Browser] Searched for '{idp_en}'")
 
                             # Click matching institution
                             clicked = page.evaluate(_INSTITUTION_CLICK_JS, idp_en)
                             if clicked:
                                 log.info(f"   [CARSI-Browser] Selected: {clicked}")
-                                time.sleep(5)
+                                if _wait_or_cancel(cancel_event, 5):
+                                    return None
                             else:
                                 search_input.press("Enter")
-                                time.sleep(3)
+                                if _wait_or_cancel(cancel_event, 3):
+                                    return None
                         else:
                             log.info("   [CARSI-Browser] No institution search box found")
 
@@ -330,7 +429,8 @@ class CARSIClient:
                         if any(x in url.lower() for x in _ak) or any(x in title for x in _at):
                             log.info("   [CARSI-Browser] CAS login required. Please log in...")
                             for i in range(100):
-                                time.sleep(3)
+                                if _wait_or_cancel(cancel_event, 3):
+                                    return None
                                 try:
                                     title = page.title()
                                     url = page.url
@@ -353,13 +453,17 @@ class CARSIClient:
                             log.info("   [CARSI-Browser] Already authenticated")
 
                     # Step 5: Navigate to article (with CARSI auth now)
-                    time.sleep(2)
+                    if _wait_or_cancel(cancel_event, 2):
+                        return None
                     log.info(f"   [CARSI-Browser] Navigating to article: {article_url[:60]}")
+                    if _cancelled(cancel_event):
+                        return None
                     try:
                         page.goto(article_url, wait_until="domcontentloaded", timeout=30000)
-                        time.sleep(5)
                     except Exception:
                         pass
+                    if _wait_or_cancel(cancel_event, 5):
+                        return None
 
                     # Check for PDF via network capture
                     saved = _try_save_captured()
@@ -378,32 +482,44 @@ class CARSIClient:
                     if pdf_url and "{pii}" not in pdf_url:
                         log.info(f"   [CARSI-Browser] Trying PDF: {pdf_url[:80]}")
                         captured_pdf.clear()
+                        if _cancelled(cancel_event):
+                            return None
                         try:
                             page.goto(pdf_url, wait_until="commit", timeout=30000)
-                            time.sleep(5)
                         except Exception:
                             pass
+                        if _wait_or_cancel(cancel_event, 5):
+                            return None
                         saved = _try_save_captured()
                         if saved:
                             return saved
 
                     # Step 7: Find PDF link in HTML
                     from ..pdf_utils import extract_pdf_url_from_html
+                    if _cancelled(cancel_event):
+                        return None
                     html = page.content()
+                    if _cancelled(cancel_event):
+                        return None
                     found_pdf = extract_pdf_url_from_html(html, page.url)
                     if found_pdf:
                         log.info(f"   [CARSI-Browser] Found PDF link: {found_pdf[:80]}")
                         captured_pdf.clear()
+                        if _cancelled(cancel_event):
+                            return None
                         try:
                             page.goto(found_pdf, wait_until="commit", timeout=30000)
-                            time.sleep(5)
                         except Exception:
                             pass
+                        if _wait_or_cancel(cancel_event, 5):
+                            return None
                         saved = _try_save_captured()
                         if saved:
                             return saved
 
                     # Step 8: Click PDF button
+                    if _cancelled(cancel_event):
+                        return None
                     click_result = page.evaluate("""
                         () => {
                             const links = document.querySelectorAll('a');
@@ -422,17 +538,29 @@ class CARSIClient:
                     """)
                     if click_result:
                         log.info(f"   [CARSI-Browser] Clicked: {str(click_result)[:80]}")
-                        time.sleep(8)
+                        if _wait_or_cancel(cancel_event, 8):
+                            return None
                         saved = _try_save_captured()
                         if saved:
                             return saved
 
+                    if _cancelled(cancel_event):
+                        return None
                     log.info(f"   [CARSI-Browser] No PDF found. Title: {page.title()[:40]} URL: {page.url[:60]}")
                     return None
 
             except Exception as e:
-                log.info(f"   [CARSI-Browser] Error: {e}")
+                if not _cancelled(cancel_event):
+                    log.info(f"   [CARSI-Browser] Error: {e}")
                 return None
+            finally:
+                if page is not None and on_response is not None:
+                    try:
+                        page.remove_listener("response", on_response)
+                    except Exception:
+                        pass
+                with capture_lock:
+                    captured_pdf.clear()
 
     def _find_downloaded_pdf(self, download_dir: str, doi: str) -> Path | None:
         """Check download directory for recently downloaded PDF files."""
@@ -486,6 +614,7 @@ class CARSIClient:
 
         # Validate by hitting a publisher page that requires auth
         # Use the main domain, not login_url (which always contains "login")
+        resp = None
         try:
             test_url = f"https://{cfg.domains[0]}/"
             resp = sess.get(test_url, timeout=15, allow_redirects=True)
@@ -497,6 +626,12 @@ class CARSIClient:
             return resp.status_code == 200
         except requests.RequestException:
             return False
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
     def _browser_login(self, publisher: str) -> bool:
         """Login via CARSI using CloakBrowser."""
@@ -561,6 +696,9 @@ class CARSIClient:
                 log.warning(f"   [CARSI] Chrome cookie extraction failed: {e}")
 
     def close(self):
-        for sess in self._sessions.values():
-            sess.close()
-        self._sessions.clear()
+        try:
+            for sess in self._sessions.values():
+                with contextlib.suppress(Exception):
+                    sess.close()
+        finally:
+            self._sessions.clear()

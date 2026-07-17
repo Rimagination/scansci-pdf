@@ -9,6 +9,7 @@ dependencies = [
     "requests>=2.31",
     "requests[socks]>=2.31",
     "beautifulsoup4>=4.12",
+    "PyMuPDF>=1.24",
     "mcp[cli]>=1.12",
     "typer>=0.15",
     "uvicorn>=0.34",
@@ -37,7 +38,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyd", "_core/*.so"]
+scansci_pdf = ["data/*.json", "data/*.dat", "templates/*.html", "_core/*.pyd", "_core/*.so"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

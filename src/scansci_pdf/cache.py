@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ def cache_set(identifier: str, result: dict[str, Any], config: dict[str, Any]) -
     cache_dir = Path(config["cache_dir"])
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_path(identifier, config)
-    tmp = target.with_suffix(".tmp")
+    tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2, ensure_ascii=False)

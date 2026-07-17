@@ -109,8 +109,14 @@ def extract_via_browser(
         Result dict with success, cookies_count, domains, etc.
     """
     try:
+        from .cloakbrowser_compat import (
+            launch_with_driver_cleanup,
+            prepare_cloakbrowser_runtime,
+        )
+
+        prepare_cloakbrowser_runtime()
         from cloakbrowser import launch
-    except ImportError:
+    except Exception:
         return {
             "success": False,
             "error": "cloakbrowser not installed",
@@ -127,8 +133,20 @@ def extract_via_browser(
     print(f"  打开页面: {url}")
     print(f"  登录完成后关闭浏览器窗口即可\n")
 
+    browser = None
+    context = None
+    page = None
+    slot_lease = None
     try:
-        browser = launch(headless=False, humanize=True)
+        from . import browser_engine
+        slot_lease = browser_engine._retain_browser_slot(config)
+        raw_browser = launch_with_driver_cleanup(
+            launch,
+            headless=False,
+            humanize=True,
+        )
+        browser = browser_engine._LeasedBrowser(raw_browser, slot_lease)
+        slot_lease = None
         context = browser.new_context(viewport={"width": 1440, "height": 900})
         page = context.new_page()
 
@@ -163,7 +181,6 @@ def extract_via_browser(
         all_cookies = context.cookies()
 
         if not all_cookies:
-            browser.close()
             return {
                 "success": False,
                 "message": "未捕获到 cookies。请确保已登录机构账号。",
@@ -186,8 +203,6 @@ def extract_via_browser(
         except Exception:
             pass
 
-        browser.close()
-
         domains_found = list({c.get("domain", "").lstrip(".") for c in save_cookies})[:10]
         return {
             "success": True,
@@ -204,6 +219,31 @@ def extract_via_browser(
     except Exception as exc:
         log.info(f"   [cookies] Error: {exc}")
         return {"success": False, "error": str(exc)}
+    finally:
+        from . import browser_engine
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
+        context_closed = context is None
+        if context is not None:
+            context_closed, _ = browser_engine._close_resource_with_confirmation(context)
+        browser_closed = browser is None
+        if browser is not None:
+            browser_closed, close_errors = browser_engine._close_resource_with_confirmation(
+                browser,
+                is_browser=True,
+            )
+            if browser_closed:
+                context_closed = True
+            elif close_errors:
+                log.info(
+                    "   [cookies] Browser close failed; retaining global slot: "
+                    + "; ".join(str(error) for error in close_errors)
+                )
+        if slot_lease is not None and context_closed and browser_closed:
+            slot_lease.close()
 
 
 def load_saved_cookies(config: dict[str, Any]) -> list[dict[str, Any]]:

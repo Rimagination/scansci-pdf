@@ -70,7 +70,7 @@
                                   focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none
                                   placeholder:text-gray-400 transition">
                     <button type="submit"
-                            :disabled="loading || !query.trim()"
+                            :disabled="loading || downloading || !query.trim()"
                             class="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg
                                    bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-300
                                    disabled:cursor-not-allowed transition">
@@ -86,14 +86,14 @@
             <div class="flex items-center gap-3">
                 <button type="button"
                         @click="mode = 'search'; doAction()"
-                        :disabled="loading || !query.trim()"
+                        :disabled="loading || downloading || !query.trim()"
                         class="px-4 py-2 text-sm rounded-lg border transition"
                         :class="mode === 'search' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'">
                     Search Papers
                 </button>
                 <button type="button"
                         @click="mode = 'download'; doAction()"
-                        :disabled="loading || !query.trim()"
+                        :disabled="loading || downloading || !query.trim()"
                         class="px-4 py-2 text-sm rounded-lg border transition"
                         :class="mode === 'download' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'">
                     Direct Download
@@ -130,6 +130,7 @@
             <div class="flex-1">
                 <p class="text-sm text-blue-800 font-medium">Downloading PDF...</p>
                 <p class="text-xs text-blue-600" x-text="downloadMsg"></p>
+                <p class="text-xs text-blue-400 mt-1" x-show="downloadPhase" x-text="'Phase: ' + downloadPhase"></p>
                 <p class="text-xs text-blue-400 mt-1" x-show="downloadElapsed > 0"
                    x-text="'Elapsed: ' + downloadElapsed + 's — racing 13+ sources in parallel'"></p>
             </div>
@@ -221,12 +222,14 @@ function app() {
         loading: false,
         downloading: false,
         downloadMsg: '',
+        downloadPhase: '',
         downloadElapsed: 0,
         error: '',
         errorHint: '',
         errorGuidance: [],
         status: 'checking',
         sources: {},
+        downloadController: null,
 
         async init() {
             try {
@@ -249,7 +252,7 @@ function app() {
         },
 
         doAction() {
-            if (!this.query.trim()) return;
+            if (!this.query.trim() || this.downloading) return;
             if (this.mode === 'download') {
                 this.downloadPaper(this.query.trim());
             } else {
@@ -287,56 +290,100 @@ function app() {
         },
 
         async downloadPaper(identifier) {
-            if (!identifier) return;
+            if (!identifier || this.downloading) return;
+            this.downloadController = new AbortController();
             this.downloading = true;
             this.downloadMsg = identifier;
             this.downloadElapsed = 0;
             this.error = '';
             this.errorHint = '';
             this.errorGuidance = [];
+            this.downloadPhase = '';
 
             // Elapsed timer
             const timer = setInterval(() => { this.downloadElapsed++; }, 1000);
 
             try {
-                const resp = await fetch('/api/download', {
+                // Use SSE stream for real-time updates
+                const resp = await fetch('/api/download/stream', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({identifier}),
+                    signal: this.downloadController.signal,
                 });
 
-                if (resp.ok && resp.headers.get('content-type')?.includes('application/pdf')) {
-                    // Trigger browser download
-                    const blob = await resp.blob();
-                    const cd = resp.headers.get('content-disposition') || '';
-                    let filename = 'paper.pdf';
-                    const m = cd.match(/filename[*]?=(?:UTF-8''|"?)([^";]+)/i);
-                    if (m) filename = decodeURIComponent(m[1].replace(/"/g, ''));
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url; a.download = filename;
-                    document.body.appendChild(a); a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-
-                    const realSource = resp.headers.get('x-scansci-source') || 'unknown';
-                    this.history.unshift({title: filename.replace('.pdf',''), identifier, source: realSource});
-                    if (this.history.length > 20) this.history.pop();
-                } else {
+                if (!resp.ok) {
                     const d = await resp.json();
-                    this.error = d.error || d.reason || 'Download failed';
+                    this.error = d.error || 'Download failed';
                     this.errorHint = d.hint?.message || '';
                     this.errorGuidance = d.guidance || [];
-                    // Update source status if returned
                     if (d.sources) this.sources = d.sources;
+                    return;
+                }
+
+                // Read SSE stream
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let finalResult = null;
+
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, {stream: true});
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const event = JSON.parse(line.slice(6));
+                                if (event.type === 'progress') {
+                                    this.downloadMsg = event.message || identifier;
+                                    this.downloadPhase = event.phase || '';
+                                } else if (event.type === 'success') {
+                                    finalResult = event;
+                                } else if (event.type === 'error') {
+                                    this.error = event.error || 'Download failed';
+                                }
+                            } catch (e) {
+                                // Ignore parse errors
+                            }
+                        }
+                    }
+                }
+
+                if (finalResult && finalResult.download_token) {
+                    // Download file via one-time token
+                    const url = '/api/download/file/' + finalResult.download_token;
+                    const a = document.createElement('a');
+                    a.href = url; a.download = finalResult.filename || 'paper.pdf';
+                    document.body.appendChild(a); a.click();
+                    document.body.removeChild(a);
+
+                    this.history.unshift({
+                        title: (finalResult.filename || 'paper').replace('.pdf',''),
+                        identifier,
+                        source: finalResult.source || 'unknown'
+                    });
+                    if (this.history.length > 20) this.history.pop();
+                } else if (finalResult && finalResult.error) {
+                    this.error = finalResult.error;
+                } else if (finalResult && !finalResult.download_token) {
+                    this.error = 'Download completed but file transfer failed. Please try again.';
+                } else if (!this.error) {
+                    this.error = 'Download stream ended before a final result was received.';
                 }
             } catch (e) {
-                this.error = 'Network error: ' + e.message;
+                if (e.name !== 'AbortError') this.error = 'Network error: ' + e.message;
             } finally {
                 clearInterval(timer);
+                this.downloadController = null;
                 this.downloading = false;
                 this.downloadMsg = '';
                 this.downloadElapsed = 0;
+                this.downloadPhase = '';
             }
         }
     };

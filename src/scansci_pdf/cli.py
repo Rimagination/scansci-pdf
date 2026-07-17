@@ -367,13 +367,15 @@ def login(
     _setup_logging(verbose)
     config = load_config()
     fetcher = PaperFetcher(config)
-
-    console.print("[bold]Checking institutional access session...[/bold]")
-    if fetcher.auth.login(force=force):
-        console.print("[green]Institutional access session is active.[/green]")
-    else:
-        console.print("[red]Failed to authenticate institutional access.[/red]")
-        raise typer.Exit(1)
+    try:
+        console.print("[bold]Checking institutional access session...[/bold]")
+        if fetcher.auth.login(force=force):
+            console.print("[green]Institutional access session is active.[/green]")
+        else:
+            console.print("[red]Failed to authenticate institutional access.[/red]")
+            raise typer.Exit(1)
+    finally:
+        fetcher.close()
 
 
 @app.command()
@@ -771,6 +773,25 @@ def session_broker_stop(
     console.print(f"[green]Stop requested for broker:[/green] {publisher}")
 
 
+def _fetch_broker_record(downloader, context, record, run_dir):
+    from .publisher_batch import DownloadResult, _BrowserContextInvalidated
+
+    if context is None:
+        context = downloader._launch_context()
+    try:
+        return downloader.fetch_one(context, record, run_dir), context
+    except _BrowserContextInvalidated as exc:
+        return exc.result, None
+    except Exception as exc:
+        downloader._close_resource_with_retry(context)
+        return DownloadResult(
+            doi=record.doi,
+            status="failed",
+            reason=f"{type(exc).__name__}: {exc}",
+            state="unexpected_error",
+        ), None
+
+
 @app.command("session-broker-run", hidden=True)
 def session_broker_run(
     publisher: str = typer.Option(..., "--publisher", "-p"),
@@ -835,7 +856,13 @@ def session_broker_run(
                     records = [PaperRecord(**record) for record in job.get("records", [])]
                     results = []
                     for record in records:
-                        results.append(job_downloader.fetch_one(context, record, primary_dir))
+                        result, context = _fetch_broker_record(
+                            job_downloader,
+                            context,
+                            record,
+                            primary_dir,
+                        )
+                        results.append(result)
                         job_downloader._write_results(primary_dir / "summary_partial.json", results)
                     job_downloader._write_results(primary_dir / "summary.json", results)
                     summary = job_downloader._write_complete_artifacts(records, results, run_dir)
@@ -858,10 +885,8 @@ def session_broker_run(
                     job_path.unlink(missing_ok=True)
             time.sleep(2)
     finally:
-        try:
-            context.close()
-        except Exception:
-            pass
+        if context is not None:
+            downloader._close_resource_with_retry(context)
 
 
 @app.command("session-doctor")

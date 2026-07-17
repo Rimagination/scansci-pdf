@@ -19,7 +19,7 @@ class ServerMode(str, Enum):
 @app.command("run")
 def run_server(
     mode: ServerMode = typer.Option(ServerMode.STDIO, help="Transport mode"),
-    host: str = typer.Option("0.0.0.0", help="HTTP host"),
+    host: str = typer.Option("0.0.0.0", help="HTTP bind host"),
     port: int = typer.Option(8000, help="HTTP port"),
 ) -> None:
     """Start the ScanSci PDF server."""
@@ -123,12 +123,17 @@ def get_paper(
     strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
+    from .config import load_config
     from .sources import download
-    from .config import load_config, update_config
 
+    cfg = load_config()
     result = download(
-        identifier, output,
-        scihub_enabled=True, use_tor=True, use_vpnsci=True,
+        identifier,
+        output or None,
+        scihub_enabled=cfg.get("scihub_enabled", True),
+        use_tor=cfg.get("use_tor_for_scihub", False),
+        use_vpnsci=cfg.get("vpnsci_enabled", False),
+        use_instsci=cfg.get("instsci_enabled", False),
         bibtex=not no_bibtex,
         strategy=strategy if strategy else None,
     )
@@ -350,23 +355,25 @@ def fetch_paper_cmd(
     
     Cascade: cache → OA → Elsevier API → DOI resolve → CARSI → publisher → browser → gateway.
     """
-    from .institutional.config_adapter import ConfigAdapter
-    from .institutional.fetcher import PaperFetcher
+    from .config import load_config
+    from .fetcher import PaperFetcher
 
-    config = ConfigAdapter.load()
-    config._config["output_dir"] = output
+    config = load_config()
+    if output:
+        config["output_dir"] = output
 
     fetcher = PaperFetcher(config)
-    result = fetcher.fetch_with_result(identifier, use_cache=not no_cache)
+    try:
+        result = fetcher.fetch_with_result(identifier, use_cache=not no_cache)
 
-    if format == "json":
-        print(result.to_json())
-    elif format == "text":
-        print(result.to_text())
-    else:
-        print(result.to_markdown(include_pdf_path=True))
-
-    fetcher.close()
+        if format == "json":
+            print(result.to_json())
+        elif format == "text":
+            print(result.to_text())
+        else:
+            print(result.to_markdown(include_pdf_path=True))
+    finally:
+        fetcher.close()
 
 
 @app.command("batch")
@@ -378,7 +385,13 @@ def batch_fetch_cmd(
 ) -> None:
     """Batch fetch papers. Default: institutional cascade. Use --scihub for grey-source racing."""
     import json as _json
-    from .config import load_config as _load_config
+    from .config import load_config
+    from .fetcher import PaperFetcher
+
+    # Typer injects a bool at the CLI boundary. Direct Python callers see the
+    # OptionInfo default object, which must not be treated as truthy opt-in.
+    if not isinstance(scihub, bool):
+        scihub = False
 
     dois = [
         line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
@@ -389,7 +402,7 @@ def batch_fetch_cmd(
         return
 
     # Auto-detect: if download_strategy is grey/scihub-oriented, switch to racing engine
-    _cfg = _load_config()
+    _cfg = load_config()
     _strategy = _cfg.get("download_strategy", "fastest")
     _auto_scihub = scihub or _strategy in ("scihub_only", "grey_only", "scihub_first")
     if not scihub and _auto_scihub:
@@ -408,35 +421,36 @@ def batch_fetch_cmd(
         return
 
     # Default: institutional cascade (PaperFetcher)
-    from .institutional.config_adapter import ConfigAdapter
-    from .institutional.fetcher import PaperFetcher
-
-    config = ConfigAdapter.load()
-    config._config["output_dir"] = output
+    config = load_config()
+    if output:
+        config["output_dir"] = output
 
     fetcher = PaperFetcher(config)
     results = []
 
-    for i, doi in enumerate(dois, 1):
-        print(f"  [{i}/{len(dois)}] {doi}")
-        try:
-            result = fetcher.fetch_with_result(doi)
-            result_dict = result.to_dict()
-            # Verify file actually exists on disk for success status
-            if result_dict.get("status") == "success" or result_dict.get("success"):
-                pdf_path = result_dict.get("file") or result_dict.get("pdf_path", "")
-                if pdf_path and not Path(pdf_path).exists():
-                    result_dict["status"] = "error"
-                    result_dict["error"] = "PDF file not found on disk (may have been saved elsewhere)"
-            results.append(result_dict)
-            status = result.status
-            quality = result.quality
-            print(f"         → {status} ({quality})")
-        except Exception as e:
-            results.append({"doi": doi, "error": str(e)})
-            print(f"         → error: {e}")
-
-    fetcher.close()
+    try:
+        for i, doi in enumerate(dois, 1):
+            print(f"  [{i}/{len(dois)}] {doi}")
+            try:
+                result = fetcher.fetch_with_result(doi)
+                result_dict = result.to_dict()
+                if result_dict.get("status") == "success" or result_dict.get("success"):
+                    pdf_path = result_dict.get("file") or result_dict.get("pdf_path", "")
+                    if pdf_path and not Path(pdf_path).exists():
+                        result_dict["status"] = "error"
+                        result_dict["success"] = False
+                        result_dict["error"] = (
+                            "PDF file not found on disk (may have been saved elsewhere)"
+                        )
+                results.append(result_dict)
+                status = result.status
+                quality = result.quality
+                print(f"         → {status} ({quality})")
+            except Exception as e:
+                results.append({"doi": doi, "error": str(e)})
+                print(f"         → error: {e}")
+    finally:
+        fetcher.close()
 
     if format == "json":
         out_path = Path(output) / "batch_results.json"
@@ -497,11 +511,11 @@ def elsevier_setup(
 @app.command("session-doctor")
 def session_doctor() -> None:
     """Diagnose browser profile sessions and cookie health."""
-    from .institutional.config_adapter import ConfigAdapter
-    from .institutional.profile_health import candidate_profile_dirs, inspect_browser_profile
+    from .config import load_config
+    from .profile_health import candidate_profile_dirs, inspect_browser_profile
 
-    config = ConfigAdapter.load()
-    profiles = candidate_profile_dirs(config.chrome_profile_dir)
+    config = load_config()
+    profiles = candidate_profile_dirs(config)
 
     domains = [
         "sciencedirect.com", "springer.com", "nature.com", "wiley.com",
@@ -538,14 +552,15 @@ def federated_login(
 
     config = load_config()
     client = CARSIClient(config)
-
-    success = client.login(publisher, force=force)
-    if success:
-        print(f"  Login successful for {publisher}.")
-    else:
-        print(f"  Login failed for {publisher}.")
-        raise typer.Exit(1)
-    client.close()
+    try:
+        success = client.login(publisher, force=force)
+        if success:
+            print(f"  Login successful for {publisher}.")
+        else:
+            print(f"  Login failed for {publisher}.")
+            raise typer.Exit(1)
+    finally:
+        client.close()
 
 
 @app.command("publisher-batch")
@@ -557,6 +572,8 @@ def publisher_batch_cmd(
 ) -> None:
     """Batch download papers via publisher-specific workflows."""
     from .config import load_config
+    from .publisher_batch import PaperRecord, PublisherBatchDownloader
+    from .publisher_profiles import get_publisher_profile, infer_publisher_profile
 
     dois = [
         line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
@@ -569,16 +586,49 @@ def publisher_batch_cmd(
     config = load_config()
     config["output_dir"] = output
 
+    records = [PaperRecord(doi=doi) for doi in dois]
+    if publisher:
+        try:
+            profile = get_publisher_profile(publisher)
+        except ValueError as exc:
+            print(f"  Error: {exc}")
+            raise typer.Exit(1) from exc
+    else:
+        inferred = [infer_publisher_profile(record.doi) for record in records]
+        profile_names = {
+            candidate.name for candidate in inferred if candidate is not None
+        }
+        if any(candidate is None for candidate in inferred) or len(profile_names) != 1:
+            print("  Error: could not infer one publisher for all DOIs; use --publisher.")
+            raise typer.Exit(1)
+        profile = inferred[0]
+
+    try:
+        concurrency = max(1, int(max_workers))
+    except (TypeError, ValueError) as exc:
+        print(f"  Error: invalid --max-workers value: {max_workers}")
+        raise typer.Exit(1) from exc
+
     print(f"  Batch: {len(dois)} DOIs")
-    print(f"  Publisher: {publisher or 'auto-detect'}")
+    print(f"  Publisher: {profile.name}")
     print()
 
-    # Use the existing publisher batch infrastructure
-    from .institutional.publisher_batch import PublisherBatchDownloader
-    downloader = PublisherBatchDownloader(config)
-    results = downloader.run(dois, publisher=publisher)
+    run_dir = Path(output or config.get("output_dir", "."))
+    institution_query = str(
+        config.get("carsi_idp_name") or config.get("instsci_school") or ""
+    )
+    downloader = PublisherBatchDownloader(
+        config,
+        profile=profile,
+        institution_query=institution_query,
+    )
+    summary = downloader.run_records(
+        records,
+        run_dir,
+        concurrency=concurrency,
+    )
 
-    success = sum(1 for r in results if r.get("success"))
+    success = int(summary.get("success", 0))
     print(f"\n  Results: {success}/{len(dois)} downloaded")
 
 
