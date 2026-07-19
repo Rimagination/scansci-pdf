@@ -1508,18 +1508,31 @@ def _extract_pdf_from_page(
         except Exception:
             continue
 
-    # Generic fallback: look for any link containing "pdf" (exclude supplements)
+    # Generic fallback: only accept same-site PDF links. Article reference lists
+    # commonly contain cross-publisher PDF URLs, which are not the article PDF.
+    from urllib.parse import urljoin, urlparse
+
+    article_host = (urlparse(article_url).hostname or "").lower()
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
+        href_path = urlparse(href).path
         # Skip supplement/attachment links
         if any(skip in href for skip in ["/attachment/", "/cms/", "/mmc", "supplement", "supporting"]):
             continue
-        if "/pdf/" in href or href.endswith(".pdf") or "pdfdirect" in href:
-            if a["href"].startswith("http"):
-                return a["href"]
-            elif a["href"].startswith("/"):
-                from urllib.parse import urljoin
-                return urljoin(article_url, a["href"])
+        if (
+            "/pdf/" in href
+            or href.endswith(".pdf")
+            or href_path.endswith("/pdf")
+            or "pdfdirect" in href
+        ):
+            candidate = urljoin(article_url, a["href"])
+            candidate_host = (urlparse(candidate).hostname or "").lower()
+            if candidate_host and (
+                candidate_host == article_host
+                or candidate_host.endswith(f".{article_host}")
+                or article_host.endswith(f".{candidate_host}")
+            ):
+                return candidate
 
     return None
 
