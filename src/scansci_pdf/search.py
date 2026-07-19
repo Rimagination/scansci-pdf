@@ -1,10 +1,8 @@
-"""Paper search via OpenAlex, Semantic Scholar, Crossref, and PubMed."""
+"""Paper search with advanced multi-database routing and legacy helpers."""
 
 from __future__ import annotations
 
-import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
@@ -205,15 +203,35 @@ def search_papers(
     *,
     author: str | None = None,
     author_id: str | None = None,
+    sources: list[str] | str | None = None,
+    query_mode: str = "auto",
+    exact: bool = False,
+    offset: int = 0,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    publication_types: list[str] | str | None = None,
+    fields_of_study: list[str] | str | None = None,
+    venue: str | None = None,
+    category: str | None = None,
+    open_access_only: bool = False,
+    has_abstract: bool | None = None,
+    min_citations: int | None = None,
+    language: str | None = None,
+    recent_days: int | None = None,
+    enrich_open_access: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search papers from OpenAlex, Semantic Scholar, Crossref, and PubMed.
+    """Search up to ten literature databases with a common query contract.
 
-    When `author` or `author_id` is provided, searches by author instead of keyword.
-    - `author`: resolves author name -> OpenAlex author ID -> works
-    - `author_id`: directly searches works by OpenAlex author ID
+    Legacy author-only calls keep OpenAlex author-resolution metadata.
+    Keyword and advanced calls use the auditable multi-source search internally.
     """
-    # --- Author-based search (fast path) ---
-    if author_id or author:
+    advanced_requested = any((
+        sources, query_mode != "auto", exact, offset, date_from, date_to,
+        publication_types, fields_of_study, venue, category, open_access_only,
+        has_abstract is not None, min_citations is not None, language,
+        recent_days, enrich_open_access,
+    ))
+    if (author_id or author) and not advanced_requested:
         matched_name = None
         matched_works = 0
         matched_cited = 0
@@ -238,56 +256,20 @@ def search_papers(
                 }
             return results
 
-    # --- Keyword-based search (existing parallel path) ---
-    if not query:
+    if not query and not author and not author_id:
         return []
+    from .advanced_search import search_papers_advanced
 
-    all_results: list[dict[str, Any]] = []
-    per_source = max(10, limit)
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {
-            pool.submit(_search_openalex, query, per_source, year_from, year_to, sort): "openalex",
-            pool.submit(_search_semantic_scholar, query, per_source, year_from, year_to): "semantic_scholar",
-            pool.submit(_search_crossref, query, per_source, year_from, year_to): "crossref",
-            pool.submit(_search_pubmed, query, per_source, year_from, year_to): "pubmed",
-        }
-        for future in as_completed(futures, timeout=30):
-            try:
-                all_results.extend(future.result())
-            except Exception:
-                pass
-
-    # Deduplicate by DOI (prefer entry with more info)
-    seen: dict[str, dict[str, Any]] = {}
-    for r in all_results:
-        doi = r.get("doi", "").lower()
-        if not doi:
-            continue
-        if doi not in seen:
-            seen[doi] = r
-        else:
-            existing = seen[doi]
-            # Merge: keep fields from whichever entry has more data
-            if not existing.get("abstract") and r.get("abstract"):
-                existing["abstract"] = r["abstract"]
-            if not existing.get("is_oa") and r.get("is_oa"):
-                existing["is_oa"] = True
-                existing["oa_url"] = r.get("oa_url", "")
-            if r.get("cited_by_count", 0) > existing.get("cited_by_count", 0):
-                existing["cited_by_count"] = r["cited_by_count"]
-            if not existing.get("pmid") and r.get("pmid"):
-                existing["pmid"] = r["pmid"]
-            existing["source"] = existing.get("source", "") + "+" + r.get("source", "")
-
-    # Sort by relevance or citations
-    merged = list(seen.values())
-    if sort == "cited_by_count":
-        merged.sort(key=lambda x: x.get("cited_by_count", 0), reverse=True)
-    elif sort == "publication_date":
-        merged.sort(key=lambda x: x.get("year", 0), reverse=True)
-
-    return merged[:limit]
+    return search_papers_advanced(
+        query, limit=limit, year_from=year_from, year_to=year_to, sort=sort,
+        author=author, author_id=author_id, sources=sources,
+        query_mode=query_mode, exact=exact, offset=offset,
+        date_from=date_from, date_to=date_to, publication_types=publication_types,
+        fields_of_study=fields_of_study, venue=venue, category=category,
+        open_access_only=open_access_only, has_abstract=has_abstract,
+        min_citations=min_citations, language=language, recent_days=recent_days,
+        enrich_open_access=enrich_open_access,
+    )
 
 
 def _search_semantic_scholar(

@@ -52,6 +52,7 @@ __all__ = [
     "download",
     "batch_download",
     "search_papers",
+    "search_papers_detailed",
     "load_config",
     "update_config",
     "get_config_safe",
@@ -59,4 +60,5 @@ __all__ = [
 
 from .sources import download, batch_download
 from .search import search_papers
+from .advanced_search import search_papers_detailed
 from .config import load_config, update_config, get_config_safe
