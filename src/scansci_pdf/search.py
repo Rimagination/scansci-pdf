@@ -1,8 +1,8 @@
-"""Paper search via OpenAlex, Semantic Scholar, and Crossref."""
+"""Paper search with advanced multi-database routing and legacy helpers."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from typing import Any
 
 import requests
@@ -196,22 +196,42 @@ def _search_openalex_by_author(
 
 def search_papers(
     query: str = "",
-    limit: int = 10,
+    limit: int = 50,
     year_from: int | None = None,
     year_to: int | None = None,
     sort: str | None = None,
     *,
     author: str | None = None,
     author_id: str | None = None,
+    sources: list[str] | str | None = None,
+    query_mode: str = "auto",
+    exact: bool = False,
+    offset: int = 0,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    publication_types: list[str] | str | None = None,
+    fields_of_study: list[str] | str | None = None,
+    venue: str | None = None,
+    category: str | None = None,
+    open_access_only: bool = False,
+    has_abstract: bool | None = None,
+    min_citations: int | None = None,
+    language: str | None = None,
+    recent_days: int | None = None,
+    enrich_open_access: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search papers from OpenAlex + Semantic Scholar + Crossref in parallel.
+    """Search up to ten literature databases with a common query contract.
 
-    When `author` or `author_id` is provided, searches by author instead of keyword.
-    - `author`: resolves author name → OpenAlex author ID → works
-    - `author_id`: directly searches works by OpenAlex author ID
+    Legacy author-only calls keep OpenAlex author-resolution metadata.
+    Keyword and advanced calls use the auditable multi-source search internally.
     """
-    # --- Author-based search (fast path) ---
-    if author_id or author:
+    advanced_requested = any((
+        sources, query_mode != "auto", exact, offset, date_from, date_to,
+        publication_types, fields_of_study, venue, category, open_access_only,
+        has_abstract is not None, min_citations is not None, language,
+        recent_days, enrich_open_access,
+    ))
+    if (author_id or author) and not advanced_requested:
         matched_name = None
         matched_works = 0
         matched_cited = 0
@@ -236,53 +256,20 @@ def search_papers(
                 }
             return results
 
-    # --- Keyword-based search (existing parallel path) ---
-    if not query:
+    if not query and not author and not author_id:
         return []
+    from .advanced_search import search_papers_advanced
 
-    all_results: list[dict[str, Any]] = []
-    per_source = max(5, limit)
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {
-            pool.submit(_search_openalex, query, per_source, year_from, year_to, sort): "openalex",
-            pool.submit(_search_semantic_scholar, query, per_source, year_from, year_to): "semantic_scholar",
-            pool.submit(_search_crossref, query, per_source, year_from, year_to): "crossref",
-        }
-        for future in as_completed(futures, timeout=30):
-            try:
-                all_results.extend(future.result())
-            except Exception:
-                pass
-
-    # Deduplicate by DOI (prefer entry with more info)
-    seen: dict[str, dict[str, Any]] = {}
-    for r in all_results:
-        doi = r.get("doi", "").lower()
-        if not doi:
-            continue
-        if doi not in seen:
-            seen[doi] = r
-        else:
-            existing = seen[doi]
-            # Merge: keep fields from whichever entry has more data
-            if not existing.get("abstract") and r.get("abstract"):
-                existing["abstract"] = r["abstract"]
-            if not existing.get("is_oa") and r.get("is_oa"):
-                existing["is_oa"] = True
-                existing["oa_url"] = r.get("oa_url", "")
-            if r.get("cited_by_count", 0) > existing.get("cited_by_count", 0):
-                existing["cited_by_count"] = r["cited_by_count"]
-            existing["source"] = existing.get("source", "") + "+" + r.get("source", "")
-
-    # Sort by relevance or citations
-    merged = list(seen.values())
-    if sort == "cited_by_count":
-        merged.sort(key=lambda x: x.get("cited_by_count", 0), reverse=True)
-    elif sort == "publication_date":
-        merged.sort(key=lambda x: x.get("year", 0), reverse=True)
-
-    return merged[:limit]
+    return search_papers_advanced(
+        query, limit=limit, year_from=year_from, year_to=year_to, sort=sort,
+        author=author, author_id=author_id, sources=sources,
+        query_mode=query_mode, exact=exact, offset=offset,
+        date_from=date_from, date_to=date_to, publication_types=publication_types,
+        fields_of_study=fields_of_study, venue=venue, category=category,
+        open_access_only=open_access_only, has_abstract=has_abstract,
+        min_citations=min_citations, language=language, recent_days=recent_days,
+        enrich_open_access=enrich_open_access,
+    )
 
 
 def _search_semantic_scholar(
@@ -413,6 +400,105 @@ def _search_crossref(
             "is_oa": bool(oa_url),
             "oa_url": oa_url,
         })
+    return results
+
+
+def _search_pubmed(
+    query: str, limit: int = 10,
+    year_from: int | None = None, year_to: int | None = None,
+) -> list[dict[str, Any]]:
+    """Search PubMed via NCBI E-utilities API."""
+    from .network import _get_session, request_timeout
+    config = load_config()
+
+    try:
+        session = _get_session(config)
+
+        # Step 1: Search for PMIDs
+        params: dict[str, Any] = {
+            "db": "pubmed",
+            "term": query,
+            "retmax": min(limit, 200),
+            "retmode": "json",
+            "sort": "relevance",
+        }
+        if year_from or year_to:
+            y_from = year_from or "1900"
+            y_to = year_to or "2026"
+            params["mindate"] = str(y_from)
+            params["maxdate"] = str(y_to)
+            params["datetype"] = "pdat"
+
+        resp = session.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params=params,
+            timeout=request_timeout(config),
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        pmids = data.get("esearchresult", {}).get("idlist", [])
+        if not pmids:
+            return []
+
+        # Step 2: Fetch summaries for PMIDs
+        time.sleep(0.3)  # respect NCBI rate limit
+        summary_resp = session.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+            params={"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
+            timeout=request_timeout(config),
+        )
+        if summary_resp.status_code != 200:
+            return []
+        summary_data = summary_resp.json()
+    except Exception:
+        return []
+
+    results = []
+    for pmid in pmids:
+        info = summary_data.get("result", {}).get(pmid, {})
+        if not info or isinstance(info, str):
+            continue
+
+        # Extract DOI from articleids
+        doi = ""
+        for aid in info.get("articleids", []):
+            if aid.get("idtype") == "doi":
+                doi = aid.get("value", "")
+                break
+
+        if not doi:
+            continue
+
+        authors = []
+        for a in info.get("authors", [])[:5]:
+            name = a.get("name", "")
+            if name:
+                authors.append(name)
+
+        # Year from pubdate
+        pubdate = info.get("pubdate", "")
+        year = pubdate[:4] if pubdate and pubdate[:4].isdigit() else ""
+
+        title = info.get("title", "")
+        # Clean up title (remove trailing period)
+        if title.endswith("."):
+            title = title[:-1]
+
+        results.append({
+            "title": title,
+            "doi": doi,
+            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+            "authors": authors,
+            "year": year,
+            "cited_by_count": 0,  # PubMed doesn't provide citation count
+            "abstract": "",  # Summary doesn't include abstract
+            "is_oa": False,
+            "oa_url": "",
+            "pmid": pmid,
+            "source": "pubmed",
+        })
+
     return results
 
 
