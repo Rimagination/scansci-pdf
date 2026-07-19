@@ -1880,10 +1880,11 @@ def _browser_download(
 
     log.info(f"   [{publisher}] browser download: {article_url[:80]}")
 
-    # Create tab to a lightweight page first, inject cookies, then navigate to target
+    # Start from a local blank document so cookie injection does not depend on an
+    # unrelated public site being reachable from the deployment network.
     if _cancelled(cancel_event):
         return False
-    tab_id = create_tab("https://www.google.com/", config, timeout=15.0)
+    tab_id = create_tab("about:blank", config, timeout=15.0)
     if not tab_id:
         return False
 
@@ -3087,7 +3088,7 @@ def _cell_press_showpdf_download(
 
     if _cancelled(cancel_event):
         return None
-    tab_id = create_tab("https://example.com", config, timeout=15.0)
+    tab_id = create_tab("about:blank", config, timeout=15.0)
     if not tab_id:
         return None
 
