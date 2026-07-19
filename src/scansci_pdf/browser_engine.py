@@ -13,6 +13,7 @@ login sessions, and Cloudflare bypass state are shared across all tabs.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import time
@@ -1435,7 +1436,61 @@ def download_pdf_via_browser(
         except Exception:
             pass
 
-        page.goto(pdf_url, wait_until="domcontentloaded", timeout=int(timeout * 1000))
+        page_loaded = False
+        if _is_pdf_url(pdf_url):
+            from .pdf_utils import is_pdf_file, publish_pdf_file_atomic
+
+            download_path = output_path.with_name(
+                f".{output_path.name}.{uuid.uuid4().hex}.download"
+            )
+            download_observed = False
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with page.expect_download(
+                    timeout=int(min(timeout, 30.0) * 1000)
+                ) as download_info:
+                    try:
+                        page.goto(
+                            pdf_url,
+                            wait_until="commit",
+                            timeout=int(timeout * 1000),
+                        )
+                        page_loaded = True
+                    except Exception as exc:
+                        if "Download is starting" not in str(exc):
+                            raise
+                download = download_info.value
+                download_observed = True
+                if _cancelled(cancel_event):
+                    with contextlib.suppress(Exception):
+                        download.cancel()
+                    return False
+                download.save_as(str(download_path))
+                if (
+                    is_pdf_file(download_path)
+                    and publish_pdf_file_atomic(
+                        download_path,
+                        output_path,
+                        cancel_event,
+                    )
+                ):
+                    logger.info(
+                        "browser_engine: downloaded PDF via browser download event"
+                    )
+                    return True
+            except Exception as exc:
+                logger.info(
+                    "browser_engine: direct download event unavailable: %s",
+                    exc,
+                )
+            finally:
+                with contextlib.suppress(OSError):
+                    download_path.unlink(missing_ok=True)
+            if download_observed:
+                return False
+
+        if not page_loaded:
+            page.goto(pdf_url, wait_until="domcontentloaded", timeout=int(timeout * 1000))
         if _wait_or_cancel(cancel_event, 3):
             return False
 
@@ -1675,6 +1730,7 @@ def _is_pdf_url(url: str) -> bool:
     lower = url.lower()
     return (
         lower.endswith(".pdf")
+        or urlparse(lower).path.endswith("/pdf")
         or "/pdf/" in lower
         or "content/pdf" in lower
         or "pdfdirect" in lower
