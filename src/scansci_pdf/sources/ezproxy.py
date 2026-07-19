@@ -7,6 +7,7 @@ institutional access to subscribed journals.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,36 @@ from ..pdf_utils import (
     is_pdf_file,
     is_plausible_pdf_url,
     success,
+    write_pdf_bytes_atomic,
 )
 
 log = get_logger()
+
+
+def _cancelled(cancel_event: threading.Event | None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _wait_or_cancel(
+    cancel_event: threading.Event | None,
+    timeout: float,
+) -> bool:
+    if cancel_event is None:
+        time.sleep(max(0.0, timeout))
+        return False
+    return cancel_event.wait(max(0.0, timeout))
+
+
+def _close_browser_resource(resource: Any) -> None:
+    """Best-effort close on the resource's owner thread, with one retry."""
+    if resource is None:
+        return
+    for _attempt in range(2):
+        try:
+            resource.close()
+            return
+        except Exception:
+            pass
 
 
 def _get_ezproxy_base(config: dict[str, Any]) -> str:
@@ -51,16 +79,23 @@ def _validate_ezproxy_session(config: dict[str, Any]) -> bool:
     if not cookies:
         return False
 
-    sess = requests.Session()
-    sess.trust_env = False
-    for c in cookies:
-        sess.cookies.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
-
-    # Test with a known URL
-    test_url = _make_ezproxy_url("https://www.sciencedirect.com", config)
-    if not test_url:
-        return False
+    sess = None
+    resp = None
     try:
+        sess = requests.Session()
+        sess.trust_env = False
+        for c in cookies:
+            sess.cookies.set(
+                c["name"],
+                c["value"],
+                domain=c.get("domain", ""),
+                path=c.get("path", "/"),
+            )
+
+        # Test with a known URL
+        test_url = _make_ezproxy_url("https://www.sciencedirect.com", config)
+        if not test_url:
+            return False
         resp = sess.get(test_url, timeout=15, allow_redirects=True)
         # If redirected to login, session is invalid
         if "login" in resp.url.lower() or "libproxy" in resp.url.lower():
@@ -68,6 +103,17 @@ def _validate_ezproxy_session(config: dict[str, Any]) -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
 
 def _ezproxy_cookie_path(config: dict[str, Any]) -> Path:
@@ -91,13 +137,18 @@ def ezproxy_login(config: dict[str, Any]) -> bool:
     return False
 
 
-def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_ezproxy(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try downloading paper through EZProxy institutional proxy.
 
     Uses Selenium browser to access the paper through the library proxy,
     which handles authentication and cookie management automatically.
     """
-    if not config.get("ezproxy_enabled", False):
+    if _cancelled(cancel_event) or not config.get("ezproxy_enabled", False):
         return None
 
     base = _get_ezproxy_base(config)
@@ -105,11 +156,22 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
         return None
 
     # Resolve DOI to get publisher URL
+    resp = None
     try:
+        if _cancelled(cancel_event):
+            return None
         resp = requests.head(f"https://doi.org/{doi}", allow_redirects=True, timeout=10)
         resolved_url = resp.url
     except Exception:
         resolved_url = f"https://doi.org/{doi}"
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+    if _cancelled(cancel_event):
+        return None
 
     # Construct EZProxy URL
     ezproxy_url = _make_ezproxy_url(resolved_url, config)
@@ -119,33 +181,73 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     log.info(f"   [EZProxy] Trying {doi} via library proxy...")
 
     try:
+        from ..cloakbrowser_compat import (
+            launch_with_driver_cleanup,
+            prepare_cloakbrowser_runtime,
+        )
+
+        prepare_cloakbrowser_runtime()
         from cloakbrowser import launch
         from ..browser_engine import _build_browser_args
-    except ImportError:
+    except Exception:
         log.info("   [EZProxy] cloakbrowser not installed")
         return None
 
     download_dir = str(output_path.parent)
     args = _build_browser_args(config)
     captured_pdf: list[bytes] = []
+    capture_lock = threading.Lock()
+    capture_in_progress = False
 
     def _on_response(response):
+        nonlocal capture_in_progress
+        if _cancelled(cancel_event):
+            return
         try:
             ct = response.headers.get("content-type", "")
             if "pdf" in ct:
                 try:
-                    body = response.body()
-                    if body and len(body) > 5000:
-                        captured_pdf.append(body)
+                    with capture_lock:
+                        if _cancelled(cancel_event) or capture_in_progress or captured_pdf:
+                            return
+                        capture_in_progress = True
+                    try:
+                        body = response.body()
+                        if not _cancelled(cancel_event) and not captured_pdf and body and len(body) > 5000:
+                            captured_pdf.append(body)
+                    finally:
+                        with capture_lock:
+                            capture_in_progress = False
                 except Exception:
                     pass
         except Exception:
             pass
 
-    browser = launch(headless=False, humanize=True, args=args)
+    browser = None
+    context = None
+    page = None
+    slot_lease = None
     try:
+        if _cancelled(cancel_event):
+            return None
+        from .. import browser_engine
+        slot_lease = browser_engine._retain_browser_slot(config, cancel_event)
+        raw_browser = launch_with_driver_cleanup(
+            launch,
+            headless=False,
+            humanize=True,
+            args=args,
+        )
+        browser = browser_engine._LeasedBrowser(raw_browser, slot_lease)
+        slot_lease = None
+        if _cancelled(cancel_event):
+            return None
         context = browser.new_context()
+        if _cancelled(cancel_event):
+            return None
         page = context.new_page()
+        if _cancelled(cancel_event):
+            return None
         page.on("response", _on_response)
 
         # Load saved cookies if available
@@ -157,8 +259,11 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
                 context.add_cookies(cookies)
 
         # Navigate to EZProxy URL
+        if _cancelled(cancel_event):
+            return None
         page.goto(ezproxy_url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(8)
+        if _wait_or_cancel(cancel_event, 8):
+            return None
 
         # Check if redirected to login
         url = page.url
@@ -167,7 +272,8 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
             max_wait = 180
             elapsed = 0
             while elapsed < max_wait:
-                time.sleep(3)
+                if _wait_or_cancel(cancel_event, 3):
+                    return None
                 elapsed += 3
                 try:
                     url = page.url
@@ -180,14 +286,15 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
                 return None
 
         # Check for captured PDF
-        if captured_pdf:
+        if not _cancelled(cancel_event) and captured_pdf:
             pdf_bytes = captured_pdf[-1]
             if pdf_bytes[:5] == b"%PDF-":
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(pdf_bytes)
-                return success(doi, output_path, "EZProxy")
+                if write_pdf_bytes_atomic(output_path, pdf_bytes, cancel_event):
+                    return success(doi, output_path, "EZProxy")
 
         # Look for PDF link in page
+        if _cancelled(cancel_event):
+            return None
         pdf_link = page.evaluate("""() => {
             const links = document.querySelectorAll('a');
             for (const link of links) {
@@ -199,25 +306,37 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
             }
             return '';
         }""")
+        if _cancelled(cancel_event):
+            return None
         if pdf_link:
             log.info(f"   [EZProxy] Found PDF link: {pdf_link[:80]}")
             captured_pdf.clear()
+            if _cancelled(cancel_event):
+                return None
             page.goto(pdf_link, wait_until="commit", timeout=30000)
-            time.sleep(5)
-            if captured_pdf:
+            if _wait_or_cancel(cancel_event, 5):
+                return None
+            if not _cancelled(cancel_event) and captured_pdf:
                 pdf_bytes = captured_pdf[-1]
                 if pdf_bytes[:5] == b"%PDF-":
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    output_path.write_bytes(pdf_bytes)
-                    return success(doi, output_path, "EZProxy")
+                    if write_pdf_bytes_atomic(output_path, pdf_bytes, cancel_event):
+                        return success(doi, output_path, "EZProxy")
 
     except Exception as e:
-        log.info(f"   [EZProxy] Error: {e}")
+        if not _cancelled(cancel_event):
+            log.info(f"   [EZProxy] Error: {e}")
     finally:
-        try:
-            browser.close()
-        except Exception:
-            pass
+        if page is not None:
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:
+                pass
+        with capture_lock:
+            captured_pdf.clear()
+        for resource in (page, context, browser):
+            _close_browser_resource(resource)
+        if browser is None and slot_lease is not None:
+            slot_lease.close()
 
     return None
 

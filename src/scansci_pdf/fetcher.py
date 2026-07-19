@@ -8,6 +8,7 @@ import random
 import re
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -24,7 +25,7 @@ try:
     prepare_cloakbrowser_runtime()
     import cloakbrowser  # noqa: F401
     _HAS_CLOAKBROWSER = True
-except ImportError:
+except Exception:
     _HAS_CLOAKBROWSER = False
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,16 @@ def _apply_pdf_bytes(paper: Paper, pdf_bytes: bytes, doi: str, source: str,
         pdf_path = save_fn(doi, pdf_bytes)
         paper.pdf_path = str(pdf_path) if pdf_path else ""
     paper.source = source
+
+
+def _close_response(response) -> None:
+    """Release a consumed HTTP response without masking the fetch outcome."""
+    if response is None:
+        return
+    try:
+        response.close()
+    except Exception:
+        pass
 
 
 def _wait_for_challenge(page, max_tries: int = 6) -> None:
@@ -384,6 +395,7 @@ class PaperFetcher:
             return None
 
         self._rate_limit()
+        resp = None
         try:
             resp = self.auth.fetch(pdf_url)
             resp.raise_for_status()
@@ -399,6 +411,8 @@ class PaperFetcher:
                             ct, len(resp.content))
         except requests.RequestException as e:
             logger.warning("Failed to fetch publisher PDF: %s", e)
+        finally:
+            _close_response(resp)
 
         return None
 
@@ -430,15 +444,35 @@ class PaperFetcher:
 
     def _browser_pdf_download(self, context, article_url: str, doi: str, paper: Paper) -> Paper | None:
         page = context.new_page()
+        cleanup_callbacks = []
         try:
-            return self._browser_pdf_do(page, article_url, doi, paper)
+            return self._browser_pdf_do(
+                page,
+                article_url,
+                doi,
+                paper,
+                cleanup_callbacks=cleanup_callbacks,
+            )
         finally:
+            for cleanup in reversed(cleanup_callbacks):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
             try:
                 page.close()
             except Exception:
                 pass
 
-    def _browser_pdf_do(self, page, article_url: str, doi: str, paper: Paper) -> Paper | None:
+    def _browser_pdf_do(
+        self,
+        page,
+        article_url: str,
+        doi: str,
+        paper: Paper,
+        *,
+        cleanup_callbacks: list[Any] | None = None,
+    ) -> Paper | None:
         try:
             proxied_article = self.auth.convert_url(article_url)
         except Exception:
@@ -527,6 +561,21 @@ class PaperFetcher:
                 pass
 
         page.on("response", _on_response)
+        capture_active = True
+
+        def _cleanup_response_capture():
+            nonlocal capture_active
+            if capture_active:
+                try:
+                    page.remove_listener("response", _on_response)
+                except Exception:
+                    pass
+                finally:
+                    capture_active = False
+            captured_pdf["bytes"] = None
+
+        if cleanup_callbacks is not None:
+            cleanup_callbacks.append(_cleanup_response_capture)
 
         pdf_paths = self._build_browser_pdf_paths(doi, current_url)
         all_urls = [pdf_link]
@@ -583,9 +632,8 @@ class PaperFetcher:
                     logger.warning("Anti-bot detected on PDF page, trying next URL")
                     continue
 
-        page.remove_listener("response", _on_response)
-
         pdf_bytes = captured_pdf["bytes"]
+        _cleanup_response_capture()
         if pdf_bytes and pdf_bytes[:5] == b"%PDF-" and len(pdf_bytes) > 5000:
             _apply_pdf_bytes(paper, pdf_bytes, doi, "browser", self._save_pdf)
             logger.info("Browser PDF downloaded via response capture (%d bytes)", len(pdf_bytes))
@@ -623,6 +671,8 @@ class PaperFetcher:
 
         logger.info("Trying CARSI publisher PDF: %s", pdf_url)
         self._rate_limit()
+        carsi = None
+        resp = None
         try:
             carsi = CARSIClient(self.config)
             resp = carsi.fetch(pdf_url)
@@ -635,6 +685,13 @@ class PaperFetcher:
                 return result
         except Exception as e:
             logger.warning("CARSI PDF failed: %s", e)
+        finally:
+            _close_response(resp)
+            if carsi is not None:
+                try:
+                    carsi.close()
+                except Exception as e:
+                    logger.warning("Failed to close CARSI PDF client: %s", e)
         return None
 
     def _try_carsi_html(self, url: str, paper: Paper) -> Paper | None:
@@ -642,6 +699,8 @@ class PaperFetcher:
 
         logger.info("Trying CARSI HTML: %s", url)
         self._rate_limit()
+        carsi = None
+        resp = None
         try:
             carsi = CARSIClient(self.config)
             resp = carsi.fetch(url)
@@ -660,6 +719,13 @@ class PaperFetcher:
                 return result
         except Exception as e:
             logger.warning("CARSI HTML failed: %s", e)
+        finally:
+            _close_response(resp)
+            if carsi is not None:
+                try:
+                    carsi.close()
+                except Exception as e:
+                    logger.warning("Failed to close CARSI HTML client: %s", e)
         return None
 
     def _fetch_via_webvpn(self, url: str, paper: Paper) -> Paper:
@@ -669,37 +735,44 @@ class PaperFetcher:
 
         paper.source = "institutional"
 
+        resp = None
         try:
-            resp = self.auth.fetch(url)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            logger.error("Failed to fetch via institutional access: %s", e)
-            return paper
-
-        if "pdf" in resp.headers.get("content-type", "").lower():
-            _apply_pdf_bytes(paper, resp.content, paper.doi or "unknown", "institutional",
-                             self._save_pdf)
-            return paper
-
-        self._apply_extracted(paper, html_extractor.extract(resp.text, resp.url))
-
-        pdf_url = self._find_pdf_link(resp.text, resp.url)
-        if pdf_url:
-            logger.info("Found PDF link in HTML, downloading: %s", pdf_url)
-            self._rate_limit()
             try:
-                pdf_resp = self.auth.fetch(pdf_url)
-                pdf_resp.raise_for_status()
-                ct = pdf_resp.headers.get("content-type", "").lower()
-                if "pdf" in ct and len(pdf_resp.content) > 10000:
-                    pdf_path = self._save_pdf(paper.doi or "unknown", pdf_resp.content)
-                    paper.pdf_path = str(pdf_path) if pdf_path else ""
-                    if not _is_good_result(paper):
-                        paper.full_text = pdf_extractor.extract_from_bytes(pdf_resp.content)
+                resp = self.auth.fetch(url)
+                resp.raise_for_status()
             except requests.RequestException as e:
-                logger.warning("Failed to download PDF: %s", e)
+                logger.error("Failed to fetch via institutional access: %s", e)
+                return paper
 
-        return paper
+            if "pdf" in resp.headers.get("content-type", "").lower():
+                _apply_pdf_bytes(paper, resp.content, paper.doi or "unknown", "institutional",
+                                 self._save_pdf)
+                return paper
+
+            self._apply_extracted(paper, html_extractor.extract(resp.text, resp.url))
+
+            pdf_url = self._find_pdf_link(resp.text, resp.url)
+            if pdf_url:
+                logger.info("Found PDF link in HTML, downloading: %s", pdf_url)
+                self._rate_limit()
+                pdf_resp = None
+                try:
+                    pdf_resp = self.auth.fetch(pdf_url)
+                    pdf_resp.raise_for_status()
+                    ct = pdf_resp.headers.get("content-type", "").lower()
+                    if "pdf" in ct and len(pdf_resp.content) > 10000:
+                        pdf_path = self._save_pdf(paper.doi or "unknown", pdf_resp.content)
+                        paper.pdf_path = str(pdf_path) if pdf_path else ""
+                        if not _is_good_result(paper):
+                            paper.full_text = pdf_extractor.extract_from_bytes(pdf_resp.content)
+                except requests.RequestException as e:
+                    logger.warning("Failed to download PDF: %s", e)
+                finally:
+                    _close_response(pdf_resp)
+
+            return paper
+        finally:
+            _close_response(resp)
 
     def _try_elsevier_api(self, doi: str, paper: Paper) -> Paper | None:
         from .sources import elsevier_api
@@ -852,6 +925,7 @@ class PaperFetcher:
         return identifier if identifier.startswith("http") else None
 
     def _resolve_doi(self, doi: str) -> str | None:
+        resp = None
         try:
             resp = request_with_retry(
                 "GET",
@@ -861,12 +935,13 @@ class PaperFetcher:
                 headers={"User-Agent": "scansci-pdf/1.5"},
                 stream=True,
             )
-            resp.close()
             if resp.url and resp.url != f"https://doi.org/{doi}":
                 logger.info("Resolved DOI %s → %s (status=%d)", doi, resp.url, resp.status_code)
                 return resp.url
         except requests.RequestException as e:
             logger.warning("Failed to resolve DOI %s: %s", doi, e)
+        finally:
+            _close_response(resp)
         return None
 
     def _rate_limit(self):
@@ -930,5 +1005,7 @@ class PaperFetcher:
             logger.info("Cache cleared.")
 
     def close(self):
-        if self._auth:
-            self._auth.close()
+        auth = self._auth
+        self._auth = None
+        if auth is not None:
+            auth.close()

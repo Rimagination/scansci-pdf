@@ -5,6 +5,7 @@ and it will be tried in the download tier system without requiring instsci_enabl
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +14,18 @@ from ..log import get_logger
 log = get_logger()
 
 
-def try_carsi(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_carsi(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try downloading via CARSI federated auth without WebVPN dependency.
 
     Returns a result dict on success, None on failure.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     if not config.get("carsi_enabled", False):
         return None
 
@@ -25,11 +33,14 @@ def try_carsi(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, 
     if not idp_name:
         return None
 
+    client = None
     try:
         from .carsi import CARSIClient, detect_publisher
         from .instsci import _resolve_doi_url
 
         resolved_url = _resolve_doi_url(doi)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         if not resolved_url:
             resolved_url = f"https://doi.org/{doi}"
 
@@ -55,11 +66,22 @@ def try_carsi(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, 
                 log.info(f"   [CARSI] Redirected to primary domain: {resolved_url[:80]}")
 
         # Try browser download (CloakBrowser first, Selenium fallback)
-        result = client.download_via_browser(doi, resolved_url, output_path)
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        result = client.download_via_browser(
+            doi,
+            resolved_url,
+            output_path,
+            cancel_event=cancel_event,
+        )
         if result:
             return result
     except ImportError:
         return None
     except Exception as e:
-        log.info(f"   [CARSI] {e}")
+        if cancel_event is None or not cancel_event.is_set():
+            log.info(f"   [CARSI] {e}")
+    finally:
+        if client is not None:
+            client.close()
     return None

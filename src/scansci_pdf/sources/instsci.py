@@ -13,6 +13,7 @@ from __future__ import annotations
 import binascii
 import json
 import re
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -23,11 +24,14 @@ from bs4 import BeautifulSoup
 
 from ..log import get_logger
 from ..pdf_utils import (
+    _bind_session_to_response,
     _response_looks_pdf,
     extract_pdf_url_from_html,
     is_pdf_file,
     is_plausible_pdf_url,
     success,
+    write_pdf_bytes_atomic,
+    write_pdf_stream_atomic,
 )
 
 # Import compiled core functions if available (Cython .pyd/.so)
@@ -59,15 +63,45 @@ _INSTSCI_DELAY_MIN = 2.0
 _INSTSCI_DELAY_MAX = 5.0
 
 
+def _cancelled(cancel_event: threading.Event | None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
 
-def _instsci_rate_limit() -> None:
+
+def _wait_or_cancel(
+    cancel_event: threading.Event | None,
+    timeout: float,
+) -> bool:
+    """Wait for ``timeout`` seconds; return True when cancellation wins."""
+    if cancel_event is None:
+        time.sleep(max(0.0, timeout))
+        return False
+    return cancel_event.wait(max(0.0, timeout))
+
+
+def _close_browser_resource(resource: Any) -> None:
+    """Best-effort close on the resource's owner thread, with one retry."""
+    if resource is None:
+        return
+    for _attempt in range(2):
+        try:
+            resource.close()
+            return
+        except Exception:
+            pass
+
+
+
+def _instsci_rate_limit(cancel_event: threading.Event | None = None) -> bool:
     global _last_instsci_time
+    if _cancelled(cancel_event):
+        return False
     now = time.time()
     elapsed = now - _last_instsci_time
     delay = __import__("random").uniform(_INSTSCI_DELAY_MIN, _INSTSCI_DELAY_MAX)
-    if elapsed < delay:
-        time.sleep(delay - elapsed)
+    if elapsed < delay and _wait_or_cancel(cancel_event, delay - elapsed):
+        return False
     _last_instsci_time = time.time()
+    return True
 
 
 def instsci_cookie_path(config: dict[str, Any]) -> Path:
@@ -203,6 +237,8 @@ def _validate_session(config: dict[str, Any]) -> bool:
     if not base:
         return False
     test_url = convert_url("https://www.nature.com", base, config)
+    s = None
+    resp = None
     try:
         s = requests.Session()
         s.trust_env = False
@@ -214,6 +250,17 @@ def _validate_session(config: dict[str, Any]) -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
 
 
 def instsci_login(config: dict[str, Any]) -> bool:
@@ -274,7 +321,17 @@ def _fetch_via_webvpn(url: str, config: dict[str, Any], *, stream: bool = False)
         s.proxies = {"http": socks5, "https": socks5}
         s.verify = False  # Campus connectors often use self-signed certs
 
-    return s.get(proxied, timeout=request_timeout(config), allow_redirects=True, stream=stream)
+    try:
+        resp = s.get(
+            proxied,
+            timeout=request_timeout(config),
+            allow_redirects=True,
+            stream=stream,
+        )
+    except Exception:
+        s.close()
+        raise
+    return _bind_session_to_response(resp, s)
 
 
 def _fetch_direct_via_socks5(url: str, config: dict[str, Any], *, stream: bool = False) -> requests.Response:
@@ -288,11 +345,22 @@ def _fetch_direct_via_socks5(url: str, config: dict[str, Any], *, stream: bool =
     s.proxies = {"http": socks5, "https": socks5}
     s.verify = False
 
-    return s.get(url, timeout=request_timeout(config), allow_redirects=True, stream=stream)
+    try:
+        resp = s.get(
+            url,
+            timeout=request_timeout(config),
+            allow_redirects=True,
+            stream=stream,
+        )
+    except Exception:
+        s.close()
+        raise
+    return _bind_session_to_response(resp, s)
 
 
 def _resolve_doi_url(doi: str) -> str | None:
     """Resolve DOI to get the publisher URL."""
+    resp = None
     try:
         resp = requests.get(
             f"https://doi.org/{doi}",
@@ -302,11 +370,17 @@ def _resolve_doi_url(doi: str) -> str | None:
             stream=True,
             verify=False,
         )
-        resp.close()
-        if resp.url and resp.url != f"https://doi.org/{doi}":
-            return resp.url
+        final_url = resp.url
+        if final_url and final_url != f"https://doi.org/{doi}":
+            return final_url
     except Exception:
         pass
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
     return None
 
 
@@ -522,15 +596,22 @@ def _extract_inline_pdf(page: Any) -> bytes | None:
 
 
 def _download_pdf_with_browser_cookies(
-    pdf_url: str, output_path: Path, config: dict[str, Any], doi: str, context: Any
+    pdf_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    doi: str,
+    context: Any,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any] | None:
     """Download PDF via WebVPN using cookies from a live browser context.
 
     Bypasses stale cookie files by pulling cookies directly from the
     Playwright browser context that was just used for login/page-navigation.
     """
-    if not is_plausible_pdf_url(pdf_url):
+    if _cancelled(cancel_event) or not is_plausible_pdf_url(pdf_url):
         return None
+    session = None
+    resp = None
     try:
         from ..network import USER_AGENT, request_timeout
 
@@ -539,59 +620,85 @@ def _download_pdf_with_browser_cookies(
             return None
         proxied = convert_url(pdf_url, base, config)
 
-        s = requests.Session()
-        s.trust_env = False
-        s.headers.update({"User-Agent": USER_AGENT})
+        session = requests.Session()
+        session.trust_env = False
+        session.headers.update({"User-Agent": USER_AGENT})
         for c in context.cookies():
+            if _cancelled(cancel_event):
+                return None
             name = c.get("name")
             value = c.get("value")
             if name and value is not None:
-                s.cookies.set(name, value, domain=c.get("domain", ""), path=c.get("path", "/"))
+                session.cookies.set(name, value, domain=c.get("domain", ""), path=c.get("path", "/"))
 
-        resp = s.get(proxied, timeout=request_timeout(config), allow_redirects=True, stream=True)
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event):
+            return None
+        resp = session.get(
+            proxied,
+            timeout=request_timeout(config),
+            allow_redirects=True,
+            stream=True,
+        )
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             log.info(f"   [WebVPN-Browser] Browser-cookie HTTP status={resp.status_code} for PDF URL")
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = output_path.with_suffix(output_path.suffix + ".part")
-        try:
-            with tmp.open("wb") as fh:
-                fh.write(first)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp.replace(output_path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        if not write_pdf_stream_atomic(
+            output_path,
+            first,
+            iterator,
+            cancel_event,
+        ):
+            return None
 
-        if is_pdf_file(output_path):
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             log.info(f"   [WebVPN-Browser] PDF downloaded via browser-cookie HTTP")
             return success(doi, output_path, "WebVPN(Browser)")
     except Exception as e:
-        log.info(f"   [WebVPN-Browser] Browser-cookie HTTP error: {e}")
+        if not _cancelled(cancel_event):
+            log.info(f"   [WebVPN-Browser] Browser-cookie HTTP error: {e}")
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
     return None
 
 
-def _try_instsci_socks5(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def _try_instsci_socks5(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try downloading via SOCKS5 campus connector (EasyConnect/aTrust).
 
     The SOCKS5 connector handles authentication at the network level,
     so no WebVPN URL conversion or CAS login is needed — just fetch
     the publisher URL directly through the proxy.
     """
-    _instsci_rate_limit()
+    if not _instsci_rate_limit(cancel_event):
+        return None
     socks5 = _get_socks5_proxy(config)
     log.info(f"   [CampusConnector] Trying {doi} via {socks5}")
 
     # Step 1: Resolve DOI to publisher URL
     resolved_url = _resolve_doi_url(doi)
+    if _cancelled(cancel_event):
+        return None
     if not resolved_url:
         resolved_url = f"https://doi.org/{doi}"
 
@@ -599,57 +706,86 @@ def _try_instsci_socks5(doi: str, output_path: Path, config: dict[str, Any]) -> 
     pdf_url = _construct_publisher_pdf_url(doi, resolved_url)
     if pdf_url:
         log.info(f"   [CampusConnector] Trying publisher PDF: {pdf_url[:80]}")
-        result = _download_pdf_socks5(pdf_url, output_path, config, doi)
+        result = _download_pdf_socks5(
+            pdf_url,
+            output_path,
+            config,
+            doi,
+            cancel_event=cancel_event,
+        )
         if result:
             return result
 
     # Step 3: Fetch landing page via SOCKS5 and find PDF link
+    resp = None
     try:
+        if _cancelled(cancel_event):
+            return None
         resp = _fetch_direct_via_socks5(resolved_url, config, stream=True)
+        if _cancelled(cancel_event):
+            return None
         if resp.status_code >= 400:
             log.info(f"   [CampusConnector] HTTP {resp.status_code} for {resolved_url[:60]}")
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
 
         # Direct PDF response
         if _response_looks_pdf(resp, first):
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-            try:
-                with tmp_path.open("wb") as fh:
-                    fh.write(first)
-                    for chunk in iterator:
-                        if chunk:
-                            fh.write(chunk)
-                tmp_path.replace(output_path)
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
-            if is_pdf_file(output_path):
+            if not write_pdf_stream_atomic(
+                output_path,
+                first,
+                iterator,
+                cancel_event,
+            ):
+                return None
+            if not _cancelled(cancel_event) and is_pdf_file(output_path):
                 log.info("   [CampusConnector] PDF downloaded directly")
                 return success(doi, output_path, "CampusConnector")
 
         # HTML response - look for PDF link
         html = first + resp.raw.read(512_000, decode_content=True)
+        if _cancelled(cancel_event):
+            return None
         html_str = html.decode("utf-8", errors="ignore")
 
         found_pdf = _find_pdf_link(html_str, resp.url)
         if found_pdf:
             log.info(f"   [CampusConnector] Found PDF link: {found_pdf[:80]}")
-            result = _download_pdf_socks5(found_pdf, output_path, config, doi)
+            result = _download_pdf_socks5(
+                found_pdf,
+                output_path,
+                config,
+                doi,
+                cancel_event=cancel_event,
+            )
             if result:
                 return result
 
         pdf_url = extract_pdf_url_from_html(html_str, resp.url)
         if pdf_url:
-            result = _download_pdf_socks5(pdf_url, output_path, config, doi)
+            result = _download_pdf_socks5(
+                pdf_url,
+                output_path,
+                config,
+                doi,
+                cancel_event=cancel_event,
+            )
             if result:
                 return result
 
     except Exception as e:
-        log.info(f"   [CampusConnector] {e}")
+        if not _cancelled(cancel_event):
+            log.info(f"   [CampusConnector] {e}")
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     return None
 
@@ -659,47 +795,67 @@ def _download_pdf_socks5(
     output_path: Path,
     config: dict[str, Any],
     doi: str,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any] | None:
     """Download a PDF URL directly through SOCKS5 campus connector."""
-    if not is_plausible_pdf_url(url):
+    if _cancelled(cancel_event) or not is_plausible_pdf_url(url):
         return None
+    resp = None
     try:
-        _instsci_rate_limit()
+        if not _instsci_rate_limit(cancel_event):
+            return None
         resp = _fetch_direct_via_socks5(url, config, stream=True)
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first_chunk = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first_chunk):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        try:
-            with tmp_path.open("wb") as fh:
-                fh.write(first_chunk)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        if not write_pdf_stream_atomic(
+            output_path,
+            first_chunk,
+            iterator,
+            cancel_event,
+        ):
+            return None
 
-        if is_pdf_file(output_path):
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             log.info(f"   [CampusConnector] PDF downloaded: {doi}")
             return success(doi, output_path, "CampusConnector")
     except Exception as e:
-        log.info(f"   [CampusConnector] Download error: {e}")
+        if not _cancelled(cancel_event):
+            log.info(f"   [CampusConnector] Download error: {e}")
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
     return None
 
 
-def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def _try_instsci_browser(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Download via visible stealth browser browser. Login + download in same session."""
+    if _cancelled(cancel_event):
+        return None
     try:
+        from ..cloakbrowser_compat import (
+            launch_with_driver_cleanup,
+            prepare_cloakbrowser_runtime,
+        )
+
+        prepare_cloakbrowser_runtime()
         from cloakbrowser import launch
-    except ImportError:
+    except Exception:
         log.info("   [WebVPN-Browser] cloakbrowser not installed")
         return None
 
@@ -708,6 +864,8 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
         return None
 
     resolved_url = _resolve_doi_url(doi)
+    if _cancelled(cancel_event):
+        return None
     if not resolved_url:
         resolved_url = f"https://doi.org/{doi}"
 
@@ -716,11 +874,35 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
     print(f"\n  [WebVPN] 正在打开浏览器，请在浏览器中登录 WebVPN...")
     print(f"  登录完成后等待 5 秒，程序会自动继续下载。\n")
 
+    browser = None
+    context = None
+    page = None
+    slot_lease = None
+    captured_pdf: list[bytes] = []
+    capture_lock = threading.Lock()
+    capture_in_progress = False
+    on_response = None
     try:
-        browser = launch(headless=False, humanize=True,
-                     args=["--disable-features=CrossOriginOpenerPolicy"])
+        if _cancelled(cancel_event):
+            return None
+        from .. import browser_engine
+        slot_lease = browser_engine._retain_browser_slot(config, cancel_event)
+        raw_browser = launch_with_driver_cleanup(
+            launch,
+            headless=False,
+            humanize=True,
+            args=["--disable-features=CrossOriginOpenerPolicy"],
+        )
+        browser = browser_engine._LeasedBrowser(raw_browser, slot_lease)
+        slot_lease = None
+        if _cancelled(cancel_event):
+            return None
         context = browser.new_context()
+        if _cancelled(cancel_event):
+            return None
         page = context.new_page()
+        if _cancelled(cancel_event):
+            return None
 
         # Restore saved cookies before navigating
         cookie_path = instsci_cookie_path(config)
@@ -750,9 +932,10 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 pass
 
         # Capture PDF from network responses
-        captured_pdf = []
-
         def on_response(response):
+            nonlocal capture_in_progress
+            if _cancelled(cancel_event):
+                return
             try:
                 ct = response.headers.get("content-type", "")
                 url = response.url
@@ -763,10 +946,20 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                     return
                 if response.status >= 400:
                     return
-                body = response.body()
-                if len(body) > 5000 and body[:4] == b"%PDF-":
-                    captured_pdf.append(body)
-                    log.info(f"   [WebVPN-Browser] PDF captured: {len(body)} bytes from {url[:60]}")
+                with capture_lock:
+                    if _cancelled(cancel_event) or capture_in_progress or captured_pdf:
+                        return
+                    capture_in_progress = True
+                try:
+                    body = response.body()
+                    if _cancelled(cancel_event) or captured_pdf:
+                        return
+                    if len(body) > 5000 and body.startswith(b"%PDF-"):
+                        captured_pdf.append(body)
+                        log.info(f"   [WebVPN-Browser] PDF captured: {len(body)} bytes from {url[:60]}")
+                finally:
+                    with capture_lock:
+                        capture_in_progress = False
             except Exception:
                 pass
 
@@ -774,11 +967,14 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
 
         # Navigate to paper URL directly via WebVPN
         # If not logged in, will redirect to login page
+        if _cancelled(cancel_event):
+            return None
         try:
             page.goto(webvpn_url, wait_until="domcontentloaded", timeout=60000)
         except Exception:
             pass
-        time.sleep(3)
+        if _wait_or_cancel(cancel_event, 3):
+            return None
 
         # If on login page, wait for user to login then retry
         title = page.title()
@@ -792,7 +988,8 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
             print(f"  检测到登录页面，请完成登录...")
             # Wait up to 5 minutes, checking title every 3 seconds
             for i in range(100):
-                time.sleep(3)
+                if _wait_or_cancel(cancel_event, 3):
+                    return None
                 try:
                     title = page.title()
                     url_now = page.url
@@ -837,19 +1034,33 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
             # Try HTTP download with fresh browser cookies (bypasses JS-heavy pages)
             pdf_url = _construct_publisher_pdf_url(doi, resolved_url)
             if pdf_url:
-                time.sleep(2)
-                result = _download_pdf_with_browser_cookies(pdf_url, output_path, config, doi, context)
+                if _wait_or_cancel(cancel_event, 2):
+                    return None
+                result = _download_pdf_with_browser_cookies(
+                    pdf_url,
+                    output_path,
+                    config,
+                    doi,
+                    context,
+                    cancel_event=cancel_event,
+                )
                 if result:
                     return result
 
             # Fall back to browser-based PDF extraction
-            time.sleep(2)
+            if _wait_or_cancel(cancel_event, 2):
+                return None
+            if _cancelled(cancel_event):
+                return None
             try:
                 page.goto(webvpn_url, wait_until="domcontentloaded", timeout=60000)
             except Exception:
                 pass
+            if _cancelled(cancel_event):
+                return None
             for _w in range(20):
-                time.sleep(2)
+                if _wait_or_cancel(cancel_event, 2):
+                    return None
                 try:
                     _t = (page.title() or "").lower()
                     _b = (page.evaluate("document.body?.innerText?.length || 0") or 0)
@@ -861,22 +1072,37 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
             # Already authenticated — try HTTP download with browser cookies
             pdf_url = _construct_publisher_pdf_url(doi, resolved_url)
             if pdf_url:
-                time.sleep(2)
-                result = _download_pdf_with_browser_cookies(pdf_url, output_path, config, doi, context)
+                if _wait_or_cancel(cancel_event, 2):
+                    return None
+                result = _download_pdf_with_browser_cookies(
+                    pdf_url,
+                    output_path,
+                    config,
+                    doi,
+                    context,
+                    cancel_event=cancel_event,
+                )
                 if result:
                     return result
-            time.sleep(5)
+            if _wait_or_cancel(cancel_event, 5):
+                return None
 
         # Helper: try to save captured PDF
         def _save_captured():
+            if _cancelled(cancel_event):
+                return None
             if captured_pdf:
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(captured_pdf[-1])
-                if is_pdf_file(output_path):
+                if write_pdf_bytes_atomic(
+                    output_path,
+                    captured_pdf[-1],
+                    cancel_event,
+                ) and is_pdf_file(output_path):
                     return success(doi, output_path, "WebVPN(Browser)")
             return None
 
         # Check if page itself is a PDF (inline viewer)
+        if _cancelled(cancel_event):
+            return None
         page_url = page.url
         page_title = page.title()
         log.info(f"   [WebVPN-Browser] On page: title='{page_title[:40]}' url={page_url[:60]}")
@@ -889,17 +1115,30 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
         # If page looks like inline PDF viewer, try to get the PDF bytes
         if _is_inline_pdf_page(page):
             pdf_bytes = _extract_inline_pdf(page)
+            if _cancelled(cancel_event):
+                return None
             if pdf_bytes:
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(pdf_bytes)
-                if is_pdf_file(output_path):
+                if write_pdf_bytes_atomic(
+                    output_path,
+                    pdf_bytes,
+                    cancel_event,
+                ) and is_pdf_file(output_path):
                     return success(doi, output_path, "WebVPN(Browser)")
 
         # Strategy 1: Try direct publisher PDF URL via browser-cookie HTTP first
         resolved_for_pdf = _resolve_doi_url(doi) or f"https://doi.org/{doi}"
+        if _cancelled(cancel_event):
+            return None
         pdf_url = _construct_publisher_pdf_url(doi, resolved_for_pdf)
         if pdf_url:
-            result = _download_pdf_with_browser_cookies(pdf_url, output_path, config, doi, context)
+            result = _download_pdf_with_browser_cookies(
+                pdf_url,
+                output_path,
+                config,
+                doi,
+                context,
+                cancel_event=cancel_event,
+            )
             if result:
                 return result
 
@@ -907,66 +1146,101 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
             pdf_webvpn = convert_url(pdf_url, base, config)
             log.info(f"   [WebVPN-Browser] Trying direct PDF via browser: {pdf_webvpn[:80]}")
             captured_pdf.clear()
+            if _cancelled(cancel_event):
+                return None
             try:
                 with page.expect_download(timeout=30000) as download_info:
                     page.goto(pdf_webvpn, wait_until="commit", timeout=30000)
+                if _cancelled(cancel_event):
+                    return None
                 download = download_info.value
                 tmp = download.path()
                 pdf_bytes = tmp.read_bytes() if tmp else None
-                if pdf_bytes and pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    output_path.write_bytes(pdf_bytes)
-                    if is_pdf_file(output_path):
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 5000:
+                    if write_pdf_bytes_atomic(
+                        output_path,
+                        pdf_bytes,
+                        cancel_event,
+                    ) and is_pdf_file(output_path):
                         return success(doi, output_path, "WebVPN(Browser)")
             except Exception as dl_exc:
                 log.info(f"   [WebVPN-Browser] Download event not triggered: {dl_exc}")
-                time.sleep(5)
+                if _wait_or_cancel(cancel_event, 5):
+                    return None
                 result = _save_captured()
                 if result:
                     return result
                 if _is_inline_pdf_page(page):
                     pdf_bytes = _extract_inline_pdf(page)
+                    if _cancelled(cancel_event):
+                        return None
                     if pdf_bytes:
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        output_path.write_bytes(pdf_bytes)
-                        if is_pdf_file(output_path):
+                        if write_pdf_bytes_atomic(
+                            output_path,
+                            pdf_bytes,
+                            cancel_event,
+                        ) and is_pdf_file(output_path):
                             return success(doi, output_path, "WebVPN(Browser)")
 
         # Strategy 2: Find PDF link in HTML, try browser-cookie HTTP first
+        if _cancelled(cancel_event):
+            return None
         html = page.content()
+        if _cancelled(cancel_event):
+            return None
         found_pdf_url = extract_pdf_url_from_html(html, page.url)
         if found_pdf_url:
             log.info(f"   [WebVPN-Browser] Found PDF link: {found_pdf_url[:80]}")
-            result = _download_pdf_with_browser_cookies(found_pdf_url, output_path, config, doi, context)
+            result = _download_pdf_with_browser_cookies(
+                found_pdf_url,
+                output_path,
+                config,
+                doi,
+                context,
+                cancel_event=cancel_event,
+            )
             if result:
                 return result
 
             # Fallback: expect_download in browser
             captured_pdf.clear()
+            if _cancelled(cancel_event):
+                return None
             try:
                 with page.expect_download(timeout=30000) as download_info:
                     page.goto(found_pdf_url, wait_until="commit", timeout=30000)
+                if _cancelled(cancel_event):
+                    return None
                 download = download_info.value
                 tmp = download.path()
                 pdf_bytes = tmp.read_bytes() if tmp else None
-                if pdf_bytes and pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    output_path.write_bytes(pdf_bytes)
-                    if is_pdf_file(output_path):
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 5000:
+                    if write_pdf_bytes_atomic(
+                        output_path,
+                        pdf_bytes,
+                        cancel_event,
+                    ) and is_pdf_file(output_path):
                         return success(doi, output_path, "WebVPN(Browser)")
             except Exception:
-                time.sleep(5)
+                if _wait_or_cancel(cancel_event, 5):
+                    return None
                 result = _save_captured()
                 if result:
                     return result
                 if _is_inline_pdf_page(page):
                     pdf_bytes = _extract_inline_pdf(page)
+                    if _cancelled(cancel_event):
+                        return None
                     if pdf_bytes:
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        output_path.write_bytes(pdf_bytes)
-                        if is_pdf_file(output_path):
+                        if write_pdf_bytes_atomic(
+                            output_path,
+                            pdf_bytes,
+                            cancel_event,
+                        ) and is_pdf_file(output_path):
                             return success(doi, output_path, "WebVPN(Browser)")
 
+        if _cancelled(cancel_event):
+            return None
         log.info(f"   [WebVPN-Browser] No PDF found. Title: {page.title()[:40]} URL: {page.url[:60]}")
         return None
 
@@ -974,13 +1248,25 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
         log.info(f"   [WebVPN-Browser] Error: {e}")
         return None
     finally:
-        try:
-            browser.close()
-        except Exception:
-            pass
+        if page is not None and on_response is not None:
+            try:
+                page.remove_listener("response", on_response)
+            except Exception:
+                pass
+        with capture_lock:
+            captured_pdf.clear()
+        for resource in (page, context, browser):
+            _close_browser_resource(resource)
+        if browser is None and slot_lease is not None:
+            slot_lease.close()
 
 
-def try_instsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def try_instsci(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try downloading paper through institutional access.
 
     Strategy:
@@ -991,17 +1277,29 @@ def try_instsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     Note: CARSI is now a standalone source tier (carsi_source.try_carsi),
     called independently from the download orchestrator.
     """
-    if not _cfg(config, "enabled", False):
+    if _cancelled(cancel_event) or not _cfg(config, "enabled", False):
         return None
 
     # Step 0: SOCKS5 campus connector mode (EasyConnect/aTrust) — direct access
     if _is_campus_connector_mode(config):
-        result = _try_instsci_socks5(doi, output_path, config)
+        result = _try_instsci_socks5(
+            doi,
+            output_path,
+            config,
+            cancel_event=cancel_event,
+        )
         if result:
             return result
 
     # Step 1: Try stealth browser download (handles CAS auth + Cloudflare)
-    result = _try_instsci_browser(doi, output_path, config)
+    if _cancelled(cancel_event):
+        return None
+    result = _try_instsci_browser(
+        doi,
+        output_path,
+        config,
+        cancel_event=cancel_event,
+    )
     if result:
         return result
 
@@ -1009,8 +1307,13 @@ def try_instsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     # _validate_session fails — the stealth browser may have just logged in
     # and saved fresh cookies that work for the target paper but fail
     # validation's unrelated test URL)
-    if instsci_cookie_path(config).exists():
-        result = _try_instsci_http(doi, output_path, config)
+    if not _cancelled(cancel_event) and instsci_cookie_path(config).exists():
+        result = _try_instsci_http(
+            doi,
+            output_path,
+            config,
+            cancel_event=cancel_event,
+        )
         if result:
             return result
 
@@ -1018,15 +1321,23 @@ def try_instsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     return None
 
 
-def _try_instsci_http(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def _try_instsci_http(
+    doi: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try downloading via HTTP with saved cookies."""
 
-    _instsci_rate_limit()
+    if not _instsci_rate_limit(cancel_event):
+        return None
 
     log.info(f"   [WebVPN] Trying {doi}")
 
     # Step 1: Resolve DOI to get publisher URL
     resolved_url = _resolve_doi_url(doi)
+    if _cancelled(cancel_event):
+        return None
     if not resolved_url:
         resolved_url = f"https://doi.org/{doi}"
 
@@ -1034,46 +1345,58 @@ def _try_instsci_http(doi: str, output_path: Path, config: dict[str, Any]) -> di
     pdf_url = _construct_publisher_pdf_url(doi, resolved_url)
     if pdf_url:
         log.info(f"   [WebVPN] Trying publisher PDF: {pdf_url[:80]}...")
-        result = _download_pdf_instsci(pdf_url, output_path, config, doi)
+        result = _download_pdf_instsci(
+            pdf_url,
+            output_path,
+            config,
+            doi,
+            cancel_event=cancel_event,
+        )
         if result:
             return result
 
     # Step 3: Fetch via WebVPN and look for PDF link in HTML
+    resp = None
     try:
         doi_url = f"https://doi.org/{doi}"
+        if _cancelled(cancel_event):
+            return None
         resp = _fetch_via_webvpn(doi_url, config, stream=True)
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
 
         # Direct PDF response
         if _response_looks_pdf(resp, first):
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-            try:
-                with tmp_path.open("wb") as fh:
-                    fh.write(first)
-                    for chunk in iterator:
-                        if chunk:
-                            fh.write(chunk)
-                tmp_path.replace(output_path)
-            except Exception:
-                tmp_path.unlink(missing_ok=True)
-                raise
-            if is_pdf_file(output_path):
+            if not write_pdf_stream_atomic(
+                output_path,
+                first,
+                iterator,
+                cancel_event,
+            ):
+                return None
+            if not _cancelled(cancel_event) and is_pdf_file(output_path):
                 return success(doi, output_path, "WebVPN")
 
         # HTML response - extract PDF link
         html = first + resp.raw.read(512_000, decode_content=True)
+        if _cancelled(cancel_event):
+            return None
         html_str = html.decode("utf-8", errors="ignore")
 
         # Check for Cloudflare block
         from ..network import _is_cloudflare_block
         if any(sig in html_str.lower() for sig in ("cf-browser-verification", "challenge-platform", "just a moment", "请稍候", "正在验证", "checking your browser")):
             log.info("   [WebVPN] Cloudflare detected, trying browser...")
-            browser_html = _try_browser_via_webvpn(doi_url, config)
+            browser_html = _try_browser_via_webvpn(
+                doi_url,
+                config,
+                cancel_event=cancel_event,
+            )
             if browser_html:
                 html_str = browser_html
 
@@ -1081,25 +1404,51 @@ def _try_instsci_http(doi: str, output_path: Path, config: dict[str, Any]) -> di
         found_pdf = _find_pdf_link(html_str, resp.url)
         if found_pdf:
             log.info(f"   [WebVPN] Found PDF link in HTML: {found_pdf[:80]}...")
-            result = _download_pdf_instsci(found_pdf, output_path, config, doi)
+            result = _download_pdf_instsci(
+                found_pdf,
+                output_path,
+                config,
+                doi,
+                cancel_event=cancel_event,
+            )
             if result:
                 return result
 
         # Fallback to extract_pdf_url_from_html
         pdf_url = extract_pdf_url_from_html(html_str, resp.url)
         if pdf_url:
-            return _download_pdf_instsci(pdf_url, output_path, config, doi)
+            return _download_pdf_instsci(
+                pdf_url,
+                output_path,
+                config,
+                doi,
+                cancel_event=cancel_event,
+            )
 
     except Exception as e:
-        log.info(f"   [WebVPN] {e}")
+        if not _cancelled(cancel_event):
+            log.info(f"   [WebVPN] {e}")
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     return None
 
 
-def _try_carsi(doi: str, resolved_url: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+def _try_carsi(
+    doi: str,
+    resolved_url: str,
+    output_path: Path,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Try downloading via CARSI federated auth (browser-based)."""
-    if not config.get("carsi_enabled", False):
+    if _cancelled(cancel_event) or not config.get("carsi_enabled", False):
         return None
+    client = None
     try:
         from .carsi import CARSIClient, detect_publisher
         publisher = detect_publisher(resolved_url)
@@ -1109,55 +1458,71 @@ def _try_carsi(doi: str, resolved_url: str, output_path: Path, config: dict[str,
 
         # Try stealth browser first (stealth browser, handles Cloudflare)
         log.info(f"   [CARSI] Trying browser download for {doi}...")
-        result = client.download_via_browser(doi, resolved_url, output_path)
-        if result:
-            return result
-
-        # Fallback to browser download
-        log.info(f"   [CARSI] Trying browser download for {doi}...")
-        result = client.download_via_browser(doi, resolved_url, output_path)
+        result = client.download_via_browser(
+            doi,
+            resolved_url,
+            output_path,
+            cancel_event=cancel_event,
+        )
         if result:
             return result
     except Exception as e:
-        log.info(f"   [CARSI] {e}")
+        if not _cancelled(cancel_event):
+            log.info(f"   [CARSI] {e}")
+    finally:
+        if client is not None:
+            client.close()
     return None
 
 
-def _save_pdf_response(resp: requests.Response, output_path: Path, doi: str, source: str) -> dict[str, Any] | None:
+def _save_pdf_response(
+    resp: requests.Response,
+    output_path: Path,
+    doi: str,
+    source: str,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any] | None:
     """Save a PDF response to disk and validate it."""
     try:
+        if _cancelled(cancel_event):
+            return None
         iterator = resp.iter_content(chunk_size=8192)
         first = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first):
             return None
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        try:
-            with tmp_path.open("wb") as fh:
-                fh.write(first)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
-        if is_pdf_file(output_path):
+        if not write_pdf_stream_atomic(
+            output_path,
+            first,
+            iterator,
+            cancel_event,
+        ):
+            return None
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             return success(doi, output_path, source)
     except Exception:
         pass
     return None
 
 
-def _try_browser_via_webvpn(url: str, config: dict[str, Any]) -> str | None:
+def _try_browser_via_webvpn(
+    url: str,
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> str | None:
     """Try fetching a URL through CloakBrowser, using WebVPN proxy."""
+    if _cancelled(cancel_event):
+        return None
     base = _get_webvpn_base(config)
     proxied_url = convert_url(url, base, config)
     try:
         from ..browser_engine import is_available as browser_avail, get_html as browser_html
         if browser_avail(config):
+            if _cancelled(cancel_event):
+                return None
             result = browser_html(proxied_url, config)
-            if result:
+            if result and not _cancelled(cancel_event):
                 return result
     except Exception as e:
         log.info(f"   [browser] {e}")
@@ -1169,38 +1534,44 @@ def _download_pdf_instsci(
     output_path: Path,
     config: dict[str, Any],
     doi: str,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any] | None:
-    if not is_plausible_pdf_url(url):
+    if _cancelled(cancel_event) or not is_plausible_pdf_url(url):
         return None
+    resp = None
     try:
-        _instsci_rate_limit()
+        if not _instsci_rate_limit(cancel_event):
+            return None
         resp = _fetch_via_webvpn(url, config, stream=True)
-        if resp.status_code >= 400:
+        if _cancelled(cancel_event) or resp.status_code >= 400:
             return None
 
         iterator = resp.iter_content(chunk_size=8192)
         first_chunk = next(iterator, b"")
+        if _cancelled(cancel_event):
+            return None
         if not _response_looks_pdf(resp, first_chunk):
             return None
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(output_path.suffix + ".part")
-        try:
-            with tmp_path.open("wb") as fh:
-                fh.write(first_chunk)
-                for chunk in iterator:
-                    if chunk:
-                        fh.write(chunk)
-            tmp_path.replace(output_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        if not write_pdf_stream_atomic(
+            output_path,
+            first_chunk,
+            iterator,
+            cancel_event,
+        ):
+            return None
 
-        if is_pdf_file(output_path):
+        if not _cancelled(cancel_event) and is_pdf_file(output_path):
             result = success(doi, output_path, "WebVPN")
             result["doi"] = doi
             result["identifier"] = doi
             return result
     except Exception:
         pass
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
     return None

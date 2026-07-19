@@ -51,6 +51,7 @@ MDPI_ISSN_JOURNAL_CODES = {
     "2077-0375": "membranes",
     "2227-7390": "math",
     "2304-8158": "foods",
+    "2673-3986": "epidemiologia",
 }
 MDPI_JOURNAL_CODE_ISSNS = {
     journal_code: issn

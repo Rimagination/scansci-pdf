@@ -289,60 +289,115 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
 # ============================================================
 
 def try_mdpi_direct(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
-    """Download MDPI open access papers directly."""
+    """Download an MDPI paper only through its official PDF routes."""
     if not doi.startswith("10.3390/"):
         return None
 
+    from ..network import USER_AGENT, fetch_json, polite_delay
     from ..pdf_utils import is_pdf_file, success, _response_looks_pdf
-    from ..network import USER_AGENT, polite_delay
+    from ..publisher_pdf_router import (
+        _mdpi_landing_url_from_doi,
+        _mdpi_pdf_url_from_landing_url,
+    )
 
-    article_id = doi.split("10.3390/")[-1]
+    urls: list[str] = []
 
-    urls = [
-        f"https://www.mdpi.com/{article_id}/pdf",
-    ]
+    def add_url(url: str | None) -> None:
+        candidate = str(url or "").strip()
+        if candidate and candidate not in urls:
+            urls.append(candidate)
 
+    try:
+        payload = fetch_json(
+            f"https://api.crossref.org/works/{requests.utils.quote(doi, safe='')}",
+            config,
+            headers={"Accept": "application/json"},
+        )
+        message = payload.get("message", {}) if isinstance(payload, dict) else {}
+        links = message.get("link", [])
+        if isinstance(links, dict):
+            links = [links]
+        if isinstance(links, list):
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                link_url = str(link.get("URL") or "")
+                if "mdpi.com/" in link_url.lower():
+                    add_url(link_url)
+
+        landing_url = str(
+            message.get("resource", {}).get("primary", {}).get("URL")
+            or message.get("URL")
+            or ""
+        )
+        add_url(_mdpi_pdf_url_from_landing_url(landing_url))
+    except Exception as exc:
+        log.info(f"   [MDPI] Crossref route lookup failed: {exc}")
+
+    add_url(_mdpi_pdf_url_from_landing_url(_mdpi_landing_url_from_doi(doi)))
+    if not urls:
+        log.info(f"   [MDPI] No official PDF route found for {doi}")
+        return None
+
+    session = None
     try:
         session = requests.Session()
         session.trust_env = False
         session.headers.update({"User-Agent": USER_AGENT})
         polite_delay(config)
 
-        # First try landing page to get real PDF URL
-        try:
-            resp = session.get(f"https://www.mdpi.com/{article_id}", timeout=10, allow_redirects=True)
-            if resp.status_code == 200:
-                pdf_match = re.search(r'citation_pdf_url["\s]+content="([^"]+)"', resp.text[:5000], re.I)
-                if not pdf_match:
-                    pdf_match = re.search(r'href="(/[^"]*?/pdf[^"]*)"', resp.text[:10000], re.I)
-                if pdf_match:
-                    pdf_url = pdf_match.group(1)
-                    if pdf_url.startswith("/"):
-                        pdf_url = f"https://www.mdpi.com{pdf_url}"
-                    urls.insert(0, pdf_url)
-        except Exception:
-            pass
-
         for pdf_url in urls:
+            response = None
             try:
-                resp2 = session.get(pdf_url, timeout=15, stream=True,
-                                    headers={"Accept": "application/pdf,*/*"})
-                if resp2.status_code >= 400:
+                response = session.get(
+                    pdf_url,
+                    timeout=15,
+                    stream=True,
+                    headers={"Accept": "application/pdf,*/*"},
+                )
+                if response.status_code >= 400:
+                    log.info(f"   [MDPI] HTTP {response.status_code}: {pdf_url}")
                     continue
 
-                iterator = resp2.iter_content(chunk_size=8192)
+                iterator = response.iter_content(chunk_size=8192)
                 first = next(iterator, b"")
-                if not _response_looks_pdf(resp2, first):
+                if not _response_looks_pdf(response, first):
                     continue
-
                 if not _write_pdf_atomic(output_path, first, iterator):
                     continue
                 if is_pdf_file(output_path):
                     return success(doi, output_path, "MDPIDirect")
             except Exception:
                 continue
-    except Exception:
-        pass
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    if config.get("browser_enabled", True):
+        try:
+            from ..browser_engine import download_pdf_via_browser, is_available
+
+            if is_available(config):
+                for pdf_url in urls:
+                    log.info(f"   [MDPI] browser download: {pdf_url}")
+                    if download_pdf_via_browser(
+                        pdf_url,
+                        output_path,
+                        config,
+                        timeout=90.0,
+                    ) and is_pdf_file(output_path):
+                        return success(doi, output_path, "MDPI(Browser)")
+        except Exception as exc:
+            log.info(f"   [MDPI] browser fallback failed: {exc}")
     return None
 
 
