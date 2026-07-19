@@ -54,23 +54,24 @@
 <main class="max-w-4xl mx-auto px-4 py-8">
 
     <!-- Search Box -->
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <section class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
         <form @submit.prevent="doAction()" class="space-y-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-2">
-                    Enter DOI, title, arXiv ID, or search keywords
+                    DOI, arXiv ID, title, keywords, or advanced expression
                 </label>
                 <div class="relative">
                     <input type="text"
                            x-model="query"
                            @input="onInput()"
                            @keydown.enter.prevent="doAction()"
-                           placeholder="e.g. 10.1038/nature12373, or paper title..."
+                           placeholder='title:"climate change" AND (author:Smith OR mesh:warming)'
                            class="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg text-base
                                   focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none
                                   placeholder:text-gray-400 transition">
                     <button type="submit"
-                            :disabled="loading || !query.trim()"
+                            :disabled="loading || downloading || !canAct()"
+                            title="Run selected action"
                             class="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg
                                    bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-300
                                    disabled:cursor-not-allowed transition">
@@ -82,25 +83,201 @@
                 </div>
             </div>
 
-            <!-- Action buttons -->
-            <div class="flex items-center gap-3">
+            <div class="flex flex-wrap items-center gap-3">
+                <div class="inline-flex rounded-lg border border-gray-300 overflow-hidden">
+                    <button type="button"
+                            @click="mode = 'search'"
+                            class="px-4 py-2 text-sm transition"
+                            :class="mode === 'search' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'">
+                        Search
+                    </button>
+                    <button type="button"
+                            @click="mode = 'download'"
+                            class="px-4 py-2 text-sm border-l border-gray-300 transition"
+                            :class="mode === 'download' ? 'bg-emerald-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'">
+                        Download
+                    </button>
+                </div>
                 <button type="button"
-                        @click="mode = 'search'; doAction()"
-                        :disabled="loading || !query.trim()"
-                        class="px-4 py-2 text-sm rounded-lg border transition"
-                        :class="mode === 'search' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'">
-                    Search Papers
-                </button>
+                        @click="showAdvanced = !showAdvanced"
+                        class="px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                        x-text="showAdvanced ? 'Hide advanced search' : 'Advanced search'"></button>
                 <button type="button"
-                        @click="mode = 'download'; doAction()"
-                        :disabled="loading || !query.trim()"
-                        class="px-4 py-2 text-sm rounded-lg border transition"
-                        :class="mode === 'download' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'">
-                    Direct Download
-                </button>
+                        @click="doAction()"
+                        :disabled="loading || downloading || !canAct()"
+                        class="px-4 py-2 text-sm rounded-lg text-white transition disabled:bg-gray-300
+                               disabled:cursor-not-allowed"
+                        :class="mode === 'search' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-emerald-600 hover:bg-emerald-700'"
+                        x-text="mode === 'search' ? 'Run search' : 'Download PDF'"></button>
+            </div>
+
+            <div x-show="showAdvanced" x-cloak class="border-t border-gray-200 pt-5 space-y-6">
+                <div>
+                    <h2 class="text-sm font-semibold text-gray-900 mb-2">Expression builder</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-[150px_1fr_auto] gap-2">
+                        <select x-model="builderField" class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="title">title:</option>
+                            <option value="author">author:</option>
+                            <option value="abstract">abstract:</option>
+                            <option value="journal">journal:</option>
+                            <option value="doi">doi:</option>
+                            <option value="category">category:</option>
+                            <option value="mesh">mesh:</option>
+                            <option value="fulltext">fulltext:</option>
+                        </select>
+                        <input x-model="builderValue" type="text"
+                               @keydown.enter.prevent="appendFieldTerm()"
+                               placeholder="Field value; spaces become an exact phrase"
+                               class="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <button type="button" @click="appendFieldTerm()"
+                                class="px-3 py-2 rounded-lg bg-gray-900 text-white text-sm disabled:bg-gray-300"
+                                :disabled="!builderValue.trim()">Add field</button>
+                    </div>
+                    <div class="flex flex-wrap gap-2 mt-3">
+                        <template x-for="token in ['AND', 'OR', 'NOT', '(', ')', '&quot;&quot;', '*']" :key="token">
+                            <button type="button" @click="insertQueryToken(token)"
+                                    class="min-w-10 px-2.5 py-1.5 border border-gray-300 rounded-lg text-xs font-mono
+                                           text-gray-700 hover:bg-gray-50" x-text="token"></button>
+                        </template>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">
+                        Common syntax: quoted phrases, parentheses, wildcard <code>*</code>,
+                        <code>AND</code>/<code>OR</code>/<code>NOT</code>, and the field prefixes above.
+                    </p>
+                </div>
+
+                <div>
+                    <div class="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+                        <h2 class="text-sm font-semibold text-gray-900">Databases</h2>
+                        <button type="button" @click="selectedSources = []"
+                                class="text-xs text-blue-600 hover:text-blue-800">Use intent routing</button>
+                    </div>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                        <template x-for="source in availableSources" :key="source.id">
+                            <label class="flex items-center gap-2 px-2.5 py-2 border border-gray-200 rounded-lg text-xs">
+                                <input type="checkbox" :value="source.id" x-model="selectedSources"
+                                       class="rounded border-gray-300 text-blue-600">
+                                <span x-text="source.label"></span>
+                            </label>
+                        </template>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">
+                        No selection routes DOI lookups to Crossref + Semantic Scholar + Unpaywall,
+                        arXiv IDs to arXiv + Semantic Scholar + OpenAlex, and topics to
+                        PubMed + OpenAlex + Semantic Scholar + Crossref.
+                    </p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <label class="text-xs text-gray-600">From date
+                        <input type="date" x-model="dateFrom"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">To date
+                        <input type="date" x-model="dateTo"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Sort
+                        <select x-model="searchSort" class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="relevance">Relevance</option>
+                            <option value="publication_date">Publication date</option>
+                            <option value="updated_date">Updated date</option>
+                            <option value="cited_by_count">Citation count</option>
+                        </select>
+                    </label>
+                    <label class="text-xs text-gray-600">Query mode
+                        <select x-model="queryMode" class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="auto">Auto detect</option>
+                            <option value="plain">Plain text</option>
+                            <option value="advanced">Advanced</option>
+                        </select>
+                    </label>
+                    <label class="text-xs text-gray-600">Publication types
+                        <input type="text" x-model="publicationTypes" placeholder="Review, JournalArticle"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Fields of study
+                        <input type="text" x-model="fieldsOfStudy" placeholder="Medicine, Biology"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Venue
+                        <input type="text" x-model="venue" placeholder="Nature"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Category
+                        <input type="text" x-model="category" placeholder="cs.LG or neuroscience"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Language
+                        <input type="text" x-model="language" placeholder="en"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Minimum citations
+                        <input type="number" min="0" x-model.number="minCitations"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Limit
+                        <input type="number" min="1" max="100" x-model.number="searchLimit"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Offset
+                        <input type="number" min="0" x-model.number="searchOffset"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                        <span class="block mt-1 text-gray-400">Per-source pagination</span>
+                    </label>
+                    <label class="text-xs text-gray-600">Recent days
+                        <input type="number" min="1" max="365" x-model.number="recentDays"
+                               placeholder="PubMed / preprints"
+                               class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                    </label>
+                    <label class="text-xs text-gray-600">Abstract
+                        <select x-model="hasAbstract" class="mt-1 w-full px-2.5 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="">Any</option>
+                            <option value="true">Required</option>
+                            <option value="false">Exclude</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div class="flex flex-wrap gap-x-5 gap-y-2 text-sm text-gray-700">
+                    <label class="flex items-center gap-2">
+                        <input type="checkbox" x-model="exact" class="rounded border-gray-300 text-blue-600">
+                        Exact match
+                    </label>
+                    <label class="flex items-center gap-2">
+                        <input type="checkbox" x-model="openAccessOnly" class="rounded border-gray-300 text-blue-600">
+                        Open access only
+                    </label>
+                    <label class="flex items-center gap-2">
+                        <input type="checkbox" x-model="enrichOpenAccess" class="rounded border-gray-300 text-blue-600">
+                        Enrich up to 10 DOIs with Unpaywall
+                    </label>
+                </div>
+
+                <details class="border-t border-gray-200 pt-4">
+                    <summary class="text-sm font-semibold text-gray-900 cursor-pointer">Supported parameters by source</summary>
+                    <div class="overflow-x-auto mt-3">
+                        <table class="w-full text-xs text-left border-collapse">
+                            <thead><tr class="border-b border-gray-200 text-gray-500">
+                                <th class="py-2 pr-3">Source</th><th class="py-2 pr-3">Advanced query</th>
+                                <th class="py-2 pr-3">Filters</th><th class="py-2">Pagination / note</th>
+                            </tr></thead>
+                            <tbody class="text-gray-700">
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">PubMed / PMC</td><td class="pr-3">Fields, Boolean, MeSH</td><td class="pr-3">date, type, language, abstract, OA</td><td>retstart; PMC is full text</td></tr>
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">arXiv</td><td class="pr-3">Fields, Boolean, category</td><td class="pr-3">date, category</td><td>start; 1 request / 3 seconds</td></tr>
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">OpenAlex</td><td class="pr-3">Boolean, phrase, wildcard, fuzzy</td><td class="pr-3">date, type, OA, abstract, citations, language</td><td>page; author ID supported</td></tr>
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">Semantic Scholar</td><td class="pr-3">Bulk Boolean, phrase, wildcard</td><td class="pr-3">date, field, type, venue, OA, citations</td><td>offset or bulk token</td></tr>
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">Crossref</td><td class="pr-3">Bibliographic + author/journal fields</td><td class="pr-3">date, type, abstract</td><td>offset; OA cannot be proven</td></tr>
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">CORE</td><td class="pr-3">Fields, Boolean, range, exists</td><td class="pr-3">date, type, language, abstract</td><td>offset; key improves quota</td></tr>
+                                <tr class="border-b border-gray-100"><td class="py-2 pr-3">bioRxiv / medRxiv</td><td class="pr-3">No keyword API</td><td class="pr-3">date, recent days, category, DOI</td><td>100-record cursor pages</td></tr>
+                                <tr><td class="py-2 pr-3">Unpaywall</td><td class="pr-3">DOI only</td><td class="pr-3">OA status/location</td><td>Real config email required</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
             </div>
         </form>
-    </div>
+    </section>
 
     <!-- Error -->
     <div x-show="error" class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 fade-in">
@@ -122,6 +299,48 @@
             </div>
         </div>
     </div>
+
+    <!-- Retrieval provenance -->
+    <section x-show="retrieval" x-cloak class="bg-white border border-gray-200 rounded-lg p-4 mb-6 fade-in">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold text-gray-900">Retrieval provenance</h2>
+            <span class="text-xs text-gray-500"
+                  x-text="retrieval ? (retrieval.access_date + ' | ' + retrieval.query_mode + ' | ' + retrieval.scope) : ''"></span>
+        </div>
+        <div class="flex flex-wrap gap-2 mt-3">
+            <template x-for="source in (retrieval?.sources_requested || [])" :key="source">
+                <span class="px-2 py-1 rounded bg-gray-100 text-gray-700 text-xs" x-text="source"></span>
+            </template>
+        </div>
+        <div x-show="searchWarnings.length" class="mt-3 space-y-1">
+            <template x-for="warning in searchWarnings" :key="warning">
+                <p class="text-xs text-amber-700" x-text="warning"></p>
+            </template>
+        </div>
+        <div x-show="retrieval && Object.keys(retrieval.errors || {}).length" class="mt-3 space-y-1">
+            <template x-for="[source, message] in Object.entries(retrieval?.errors || {})" :key="source">
+                <p class="text-xs text-red-700"><span class="font-semibold" x-text="source + ': '"></span><span x-text="message"></span></p>
+            </template>
+        </div>
+        <div class="overflow-x-auto mt-3">
+            <table class="w-full text-xs text-left">
+                <thead><tr class="border-b border-gray-200 text-gray-500">
+                    <th class="py-2 pr-3">Source</th><th class="py-2 pr-3">Retrieved / total</th>
+                    <th class="py-2 pr-3">Time</th><th class="py-2">Endpoint</th>
+                </tr></thead>
+                <tbody>
+                    <template x-for="report in (retrieval?.source_provenance || [])" :key="report.source">
+                        <tr class="border-b border-gray-100 last:border-0">
+                            <td class="py-2 pr-3 font-medium text-gray-700" x-text="report.source"></td>
+                            <td class="py-2 pr-3 text-gray-600" x-text="report.retrieved + ' / ' + (report.total ?? '?')"></td>
+                            <td class="py-2 pr-3 text-gray-600" x-text="report.elapsed_ms + ' ms'"></td>
+                            <td class="py-2 text-gray-500 font-mono truncate max-w-xs" x-text="report.endpoint || 'not called'"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </section>
 
     <!-- Download Progress -->
     <div x-show="downloading" class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 fade-in">
@@ -160,11 +379,14 @@
                             <span x-show="paper.is_oa" class="text-xs px-1.5 py-0.5 bg-green-100 text-green-700 rounded">Open Access</span>
                             <span x-show="paper.cited_by_count > 0" class="text-xs text-gray-400"
                                   x-text="'Cited: ' + paper.cited_by_count"></span>
+                            <span x-show="paper.source" class="text-xs px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded"
+                                  x-text="paper.source"></span>
                         </div>
                         <p x-show="paper.abstract" class="text-xs text-gray-500 mt-2 line-clamp-2"
                            x-text="(paper.abstract || '').substring(0, 200)"></p>
                     </div>
-                    <button @click="downloadPaper(paper.doi || paper.identifier)"
+                    <button x-show="downloadableIdentifier(paper)"
+                            @click="downloadPaper(downloadableIdentifier(paper))"
                             :disabled="downloading"
                             class="flex-shrink-0 px-3 py-2 text-sm rounded-lg bg-emerald-600 text-white
                                    hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed
@@ -174,6 +396,12 @@
                         </svg>
                         PDF
                     </button>
+                    <a x-show="!downloadableIdentifier(paper) && openUrl(paper)"
+                       :href="openUrl(paper)" target="_blank" rel="noopener noreferrer"
+                       class="flex-shrink-0 px-3 py-2 text-sm rounded-lg border border-gray-300
+                              text-gray-700 hover:bg-gray-50 transition">
+                        Open
+                    </a>
                 </div>
             </div>
         </template>
@@ -227,6 +455,36 @@ function app() {
         errorGuidance: [],
         status: 'checking',
         sources: {},
+        showAdvanced: false,
+        builderField: 'title',
+        builderValue: '',
+        availableSources: [
+            {id: 'pubmed', label: 'PubMed'}, {id: 'pmc', label: 'PMC'},
+            {id: 'biorxiv', label: 'bioRxiv'}, {id: 'medrxiv', label: 'medRxiv'},
+            {id: 'arxiv', label: 'arXiv'}, {id: 'openalex', label: 'OpenAlex'},
+            {id: 'crossref', label: 'Crossref'}, {id: 'semantic_scholar', label: 'Semantic Scholar'},
+            {id: 'core', label: 'CORE'}, {id: 'unpaywall', label: 'Unpaywall'},
+        ],
+        selectedSources: [],
+        queryMode: 'auto',
+        exact: false,
+        dateFrom: '',
+        dateTo: '',
+        searchSort: 'relevance',
+        publicationTypes: '',
+        fieldsOfStudy: '',
+        venue: '',
+        category: '',
+        language: '',
+        minCitations: null,
+        searchLimit: 10,
+        searchOffset: 0,
+        recentDays: null,
+        hasAbstract: '',
+        openAccessOnly: false,
+        enrichOpenAccess: false,
+        retrieval: null,
+        searchWarnings: [],
 
         async init() {
             try {
@@ -235,6 +493,46 @@ function app() {
                 this.status = d.status;
                 this.sources = d.sources || {};
             } catch { this.status = 'offline'; }
+        },
+
+        canAct() {
+            if (this.mode === 'download') return Boolean(this.query.trim());
+            if (this.query.trim()) return true;
+            const browseOnly = this.selectedSources.length > 0
+                && this.selectedSources.every(source => ['biorxiv', 'medrxiv'].includes(source));
+            return browseOnly && Boolean(this.dateFrom || this.dateTo || this.recentDays);
+        },
+
+        splitList(value) {
+            return value.split(',').map(item => item.trim()).filter(Boolean);
+        },
+
+        downloadableIdentifier(paper) {
+            return paper.published_doi || paper.doi || paper.arxiv_id || '';
+        },
+
+        openUrl(paper) {
+            return paper.oa_url || paper.url || '';
+        },
+
+        insertQueryToken(token) {
+            const punctuation = token === ')' || token === '*';
+            const prefix = this.query && !this.query.endsWith(' ') && !punctuation ? ' ' : '';
+            const suffix = ['AND', 'OR', 'NOT'].includes(token) ? ' ' : '';
+            this.query += prefix + token + suffix;
+            this.mode = 'search';
+        },
+
+        appendFieldTerm() {
+            const raw = this.builderValue.trim();
+            if (!raw) return;
+            const value = /\s/.test(raw) && !(raw.startsWith('"') && raw.endsWith('"'))
+                ? '"' + raw.replaceAll('"', '\\"') + '"'
+                : raw;
+            const term = this.builderField + ':' + value;
+            this.query += (this.query.trim() ? ' AND ' : '') + term;
+            this.builderValue = '';
+            this.mode = 'search';
         },
 
         onInput() {
@@ -249,7 +547,7 @@ function app() {
         },
 
         doAction() {
-            if (!this.query.trim()) return;
+            if (!this.canAct() || this.downloading) return;
             if (this.mode === 'download') {
                 this.downloadPaper(this.query.trim());
             } else {
@@ -263,21 +561,50 @@ function app() {
             this.errorHint = '';
             this.errorGuidance = [];
             this.results = [];
+            this.retrieval = null;
+            this.searchWarnings = [];
+
+            const body = {
+                query: this.query.trim(),
+                limit: Number(this.searchLimit) || 10,
+                detailed: true,
+                offset: Number(this.searchOffset) || 0,
+                sources: this.selectedSources.length ? this.selectedSources : null,
+                query_mode: this.queryMode,
+                exact: this.exact,
+                date_from: this.dateFrom || null,
+                date_to: this.dateTo || null,
+                sort: this.searchSort,
+                publication_types: this.splitList(this.publicationTypes),
+                fields_of_study: this.splitList(this.fieldsOfStudy),
+                venue: this.venue.trim() || null,
+                category: this.category.trim() || null,
+                open_access_only: this.openAccessOnly,
+                has_abstract: this.hasAbstract === '' ? null : this.hasAbstract === 'true',
+                min_citations: this.minCitations === '' || this.minCitations === null
+                    ? null : Number(this.minCitations),
+                language: this.language.trim() || null,
+                recent_days: this.recentDays === '' || this.recentDays === null
+                    ? null : Number(this.recentDays),
+                enrich_open_access: this.enrichOpenAccess,
+            };
 
             try {
                 const resp = await fetch('/api/search', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query: this.query.trim(), limit: 10}),
+                    body: JSON.stringify(body),
                 });
+                const data = await resp.json();
                 if (!resp.ok) {
-                    const d = await resp.json();
-                    this.error = d.error || 'Search failed';
+                    this.error = data.error || 'Search failed';
                     return;
                 }
-                this.results = await resp.json();
+                this.results = Array.isArray(data) ? data : (data.results || []);
+                this.retrieval = Array.isArray(data) ? null : (data.retrieval || null);
+                this.searchWarnings = this.retrieval?.warnings || [];
                 if (this.results.length === 0) {
-                    this.error = 'No results found. Try different keywords.';
+                    this.error = 'No results found for the selected contract.';
                 }
             } catch (e) {
                 this.error = 'Network error: ' + e.message;
@@ -287,7 +614,7 @@ function app() {
         },
 
         async downloadPaper(identifier) {
-            if (!identifier) return;
+            if (!identifier || this.downloading) return;
             this.downloading = true;
             this.downloadMsg = identifier;
             this.downloadElapsed = 0;
@@ -306,28 +633,30 @@ function app() {
                 });
 
                 if (resp.ok && resp.headers.get('content-type')?.includes('application/pdf')) {
-                    // Trigger browser download
                     const blob = await resp.blob();
                     const cd = resp.headers.get('content-disposition') || '';
                     let filename = 'paper.pdf';
-                    const m = cd.match(/filename[*]?=(?:UTF-8''|"?)([^";]+)/i);
-                    if (m) filename = decodeURIComponent(m[1].replace(/"/g, ''));
+                    const match = cd.match(/filename[*]?=(?:UTF-8''|"?)([^";]+)/i);
+                    if (match) filename = decodeURIComponent(match[1].replace(/"/g, ''));
                     const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url; a.download = filename;
-                    document.body.appendChild(a); a.click();
-                    document.body.removeChild(a);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
                     URL.revokeObjectURL(url);
 
-                    const realSource = resp.headers.get('x-scansci-source') || 'unknown';
-                    this.history.unshift({title: filename.replace('.pdf',''), identifier, source: realSource});
+                    const source = resp.headers.get('x-scansci-source') || 'unknown';
+                    this.history.unshift({
+                        title: filename.replace('.pdf', ''), identifier, source,
+                    });
                     if (this.history.length > 20) this.history.pop();
                 } else {
                     const d = await resp.json();
                     this.error = d.error || d.reason || 'Download failed';
                     this.errorHint = d.hint?.message || '';
                     this.errorGuidance = d.guidance || [];
-                    // Update source status if returned
                     if (d.sources) this.sources = d.sources;
                 }
             } catch (e) {

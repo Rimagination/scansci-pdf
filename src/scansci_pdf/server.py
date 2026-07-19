@@ -5,22 +5,23 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
+from .advanced_search import search_papers_detailed
 from .cache import cache_clear, cache_get
 from .config import get_config_safe, load_config, update_config
 from .network import fetch_json
 from .paperlist import PaperEntry, parse_paper_list
 from .resolver import batch_resolve
-from .search import search_papers
 from .sources import batch_download, download
 from .tor import check_tor_circuit
 
 mcp_app = FastMCP(
     name="scansci-pdf",
-    instructions="Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. Supports DOI, arXiv ID, keyword search, and resumable batch downloads.",
+    instructions="Academic paper downloader and auditable literature search service. Search supports 10 scholarly APIs, advanced Boolean and field expressions, structured filters, provenance, DOI/arXiv lookup, and bounded pagination; downloads use 13+ sources, institutional access, Tor, and resumable batches.",
 )
 
 
@@ -182,35 +183,66 @@ def scansci_pdf_batch_download(
 
 @mcp_app.tool()
 def scansci_pdf_search(
-    query: str = "",
-    limit: int = 10,
-    year_from: int | None = None,
-    year_to: int | None = None,
-    sort: str | None = None,
-    author: str | None = None,
-    author_id: str | None = None,
+    query: Annotated[str, Field(description="Plain keywords, DOI/arXiv ID, or advanced Boolean/field expression.")] = "",
+    limit: Annotated[int, Field(description="Final result limit from 1 to 100; each source is also bounded.")] = 10,
+    year_from: Annotated[int | None, Field(description="Compatibility lower publication year.")] = None,
+    year_to: Annotated[int | None, Field(description="Compatibility upper publication year.")] = None,
+    sort: Annotated[str | None, Field(description="relevance, publication_date, updated_date, or cited_by_count.")] = None,
+    author: Annotated[str | None, Field(description="Author name; OpenAlex resolves a profile and other sources search author text.")] = None,
+    author_id: Annotated[str | None, Field(description="Exact OpenAlex author ID, for example A5102961214.")] = None,
+    sources: Annotated[list[str] | None, Field(description="Selected sources: pubmed, pmc, biorxiv, medrxiv, arxiv, openalex, crossref, semantic_scholar, core, unpaywall.")] = None,
+    query_mode: Annotated[str, Field(description="auto, plain, or advanced.")] = "auto",
+    exact: Annotated[bool, Field(description="Request exact matching for plain queries where supported.")] = False,
+    offset: Annotated[int, Field(description="Per-source zero-based offset where supported; page/token APIs report warnings.")] = 0,
+    date_from: Annotated[str | None, Field(description="Lower ISO publication date YYYY-MM-DD.")] = None,
+    date_to: Annotated[str | None, Field(description="Upper ISO publication date YYYY-MM-DD.")] = None,
+    publication_types: Annotated[list[str] | None, Field(description="Source-native publication or work types.")] = None,
+    fields_of_study: Annotated[list[str] | None, Field(description="Semantic Scholar fields or broad text topics elsewhere.")] = None,
+    venue: Annotated[str | None, Field(description="Journal or conference name.")] = None,
+    category: Annotated[str | None, Field(description="arXiv, bioRxiv, or medRxiv category.")] = None,
+    open_access_only: Annotated[bool, Field(description="Keep only results confirmed as open access.")] = False,
+    has_abstract: Annotated[bool | None, Field(description="True requires an abstract, False excludes records with one, null does not filter.")] = None,
+    min_citations: Annotated[int | None, Field(description="Minimum known citation count.")] = None,
+    language: Annotated[str | None, Field(description="Language code or name where supported.")] = None,
+    recent_days: Annotated[int | None, Field(description="1-365 days for recent PubMed or bioRxiv/medRxiv retrieval.")] = None,
+    enrich_open_access: Annotated[bool, Field(description="Check up to 10 result DOIs in Unpaywall; requires a real config email.")] = False,
 ) -> str:
-    """Search for academic papers by keyword or author using OpenAlex API.
+    """Search academic literature with auditable multi-database retrieval.
 
     Args:
-        query: Search query (e.g. "machine learning drug discovery"). Leave empty when using --author/--author_id.
-        limit: Maximum number of results (default 10, max 50)
-        year_from: Filter papers published from this year (e.g. 2020)
-        year_to: Filter papers published up to this year (e.g. 2025)
-        sort: Sort order - "cited_by_count" (most cited first), "publication_date" (newest first), or omit for relevance
-        author: Search by author name — resolves to OpenAlex author ID automatically (e.g. "Fang Jingyun")
-        author_id: Search by OpenAlex author ID directly (e.g. "A5102961214")
+        query: Keywords, DOI/arXiv ID, or Boolean/field syntax such as
+            title:"climate change" AND (author:Smith OR mesh:"global warming").
+        sources: Omit for intent routing; use ["all"] only for explicit fan-out.
+        offset: Per-source offset where supported, not a global merged offset.
+
+    The response preserves the results field and adds retrieval provenance,
+    non-secret parameters, source totals, warnings, and errors.
+
+    bioRxiv and medRxiv have no keyword API; use DOI/date browsing directly,
+    or discover topic matches through OpenAlex and Semantic Scholar.
     """
-    results = search_papers(
-        query,
-        limit=min(limit, 50),
-        year_from=year_from,
-        year_to=year_to,
-        sort=sort,
-        author=author,
-        author_id=author_id,
-    )
-    return json.dumps({"results": results}, ensure_ascii=False)
+    try:
+        result = search_papers_detailed(
+            query=query, limit=limit, year_from=year_from, year_to=year_to,
+            sort=sort, author=author, author_id=author_id, sources=sources,
+            query_mode=query_mode, exact=exact, offset=offset,
+            date_from=date_from, date_to=date_to,
+            publication_types=publication_types,
+            fields_of_study=fields_of_study, venue=venue, category=category,
+            open_access_only=open_access_only, has_abstract=has_abstract,
+            min_citations=min_citations, language=language,
+            recent_days=recent_days, enrich_open_access=enrich_open_access,
+        )
+    except ValueError as exc:
+        result = {
+            "results": [],
+            "error": str(exc),
+            "supported_sources": [
+                "pubmed", "pmc", "biorxiv", "medrxiv", "arxiv",
+                "openalex", "crossref", "semantic_scholar", "core", "unpaywall",
+            ],
+        }
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp_app.tool()
