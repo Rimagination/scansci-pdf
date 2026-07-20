@@ -466,7 +466,10 @@ def _run_tiers_parallel(
         # Timeout reached — give late-finishing threads a grace period.
         # Visible browser login can take 60-300s (browser launch + SSO + redirect),
         # so we wait much longer if browser-based sources are in the pool.
-        has_browser = any("Browser" in lbl for _, lbl, _, _ in all_sources)
+        has_browser = any(
+            lbl in _BROWSER_SOURCE_LABELS or "Browser" in lbl
+            for _, lbl, _, _ in all_sources
+        )
         has_carsi = any("CARSI" in lbl for _, lbl, _, _ in all_sources)
         if has_carsi:
             grace = 300
@@ -567,6 +570,7 @@ def download(
     rename: bool = True,
     _institutional: bool = True,
     strategy: str | None = None,
+    ezproxy_interactive: bool = False,
 ) -> dict[str, Any]:
     config = load_config()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -576,6 +580,7 @@ def download(
 
     if strategy is not None:
         config["download_strategy"] = strategy
+    config["_ezproxy_interactive"] = bool(ezproxy_interactive)
 
     target_dir = Path(output_dir) if output_dir else Path(config["output_dir"])
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -630,6 +635,37 @@ def download(
                     doi_index.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
+
+    # Explicit institutional fast path: keep validation and local-cache checks,
+    # but skip metadata discovery, free-source racing and every non-EZProxy source.
+    if config.get("download_strategy") == "ezproxy_only":
+        if is_arxiv_identifier(identifier):
+            return fail(identifier, "ezproxy_only requires a DOI", error_type="invalid_identifier")
+        if not config.get("ezproxy_enabled") or not config.get("ezproxy_login_url"):
+            return fail(
+                identifier,
+                "EZProxy is not configured",
+                error_type="configuration",
+                action="run scansci-pdf setup or configure ezproxy_login_url",
+            )
+        log.info(f"ScanSci PDF - {identifier}")
+        log.info("   [EZProxyOnly] Skipping all non-EZProxy sources")
+        result = try_ezproxy(doi, output_path, config)
+        if result and result.get("success"):
+            _update_doi_index(target_dir, doi, Path(result.get("file", "")))
+            if rename:
+                _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
+            cache_set(identifier, result, config)
+            if bibtex:
+                from ..bibtex import fetch_bibtex
+                result["bibtex"] = fetch_bibtex(doi, config)
+            return result
+        return fail(
+            identifier,
+            "EZProxy download failed or timed out",
+            error_type="ezproxy_failed",
+            action="refresh login with scansci-pdf login --login-type ezproxy",
+        )
 
     from ..citation import fetch_metadata
     metadata = fetch_metadata(doi, config)

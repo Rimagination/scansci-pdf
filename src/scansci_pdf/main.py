@@ -79,6 +79,11 @@ def web_server(
 def login(
     login_type: str = typer.Option("cookies", help="Login type: cookies, webvpn, carsi, ezproxy, custom"),
     url: str = typer.Option("", help="URL to open (for cookies/custom type)"),
+    manual_confirm: bool = typer.Option(
+        False,
+        "--manual-confirm",
+        help="After logging in, press Enter in the terminal to save browser cookies.",
+    ),
 ) -> None:
     """Log in to your institution via stealth browser. Cookies are saved for all future downloads."""
     from .config import load_config
@@ -99,7 +104,7 @@ def login(
         raise typer.Exit(0 if success else 1)
     elif login_type == "ezproxy":
         from .browser_login import ezproxy_login
-        success = ezproxy_login(config)
+        success = ezproxy_login(config, manual_confirm=manual_confirm)
         raise typer.Exit(0 if success else 1)
     elif login_type == "custom":
         if not url:
@@ -120,23 +125,34 @@ def get_paper(
     identifier: str = typer.Argument(help="DOI or arXiv ID"),
     output: str = typer.Option(".", help="Output directory (default: current directory)"),
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
-    strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
+    strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only, scihub_only, scihub_first, oa_first, legal_only, ezproxy_only"),
+    ezproxy_only: bool = typer.Option(
+        False,
+        "--ezproxy-only",
+        help="Skip every other source and download directly through configured EZProxy.",
+    ),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
     from .sources import download
     from .config import load_config, update_config
 
+    if ezproxy_only and strategy and strategy != "ezproxy_only":
+        raise typer.BadParameter("--ezproxy-only cannot be combined with another --strategy")
+    effective_strategy = "ezproxy_only" if ezproxy_only else (strategy or None)
+
     result = download(
         identifier, output,
         scihub_enabled=True, use_tor=True, use_vpnsci=True,
         bibtex=not no_bibtex,
-        strategy=strategy if strategy else None,
+        strategy=effective_strategy,
+        ezproxy_interactive=True,
     )
     if result.get("success"):
         print(f"  OK: {result.get('file', '')}")
         print(f"  Source: {result.get('source', '?')}")
     else:
-        print(f"  FAILED: {result.get('error', 'unknown')}")
+        failure_message = result.get("error") or result.get("reason") or "unknown"
+        print(f"  FAILED: {failure_message}")
         hint = result.get('agent_hint', '')
         if hint:
             print(f"  Hint: {hint}")

@@ -168,6 +168,7 @@ scansci-pdf get 10.1016/j.neunet.2026.108582
 | 搜索支持的学校 | `scansci-pdf schools 清华` |
 | 配置学校 WebVPN | `scansci-pdf setup 学校名称` |
 | 浏览器登录出版商 | `scansci-pdf login --url 出版商网址` |
+| 只通过 EZProxy 下载 | `scansci-pdf get DOI --ezproxy-only` |
 | 配置 Elsevier API | `scansci-pdf elsevier-setup --api-key YOUR_KEY` |
 | 查看或修改配置 | `scansci-pdf config-cmd` |
 | 启动 Web UI | `scansci-pdf web --port 8080` |
@@ -179,6 +180,27 @@ scansci-pdf get 10.1016/j.neunet.2026.108582
 scansci-pdf config-cmd output_dir D:/papers
 scansci-pdf config-cmd network_proxy socks5://127.0.0.1:1080
 ```
+
+### EZProxy 直达下载
+
+配置学校的 EZProxy 登录 URL（必须保留 `{url}`），并在 ScanSci 打开的可见
+Chromium 中登录一次：
+
+```bash
+scansci-pdf config-cmd ezproxy_enabled true
+scansci-pdf config-cmd ezproxy_login_url 'https://your-ezproxy.example/login?url={url}'
+scansci-pdf login --login-type ezproxy --manual-confirm
+scansci-pdf get DOI --ezproxy-only
+```
+
+例如 HKU 使用：
+
+```bash
+scansci-pdf config-cmd ezproxy_login_url 'https://eproxy.lib.hku.hk/login?url={url}'
+```
+
+若文章或 PDF 页出现 `Processing Verification`、CAPTCHA 等验证，浏览器会保持
+打开，供用户完成验证；验证仍由用户手动处理。
 
 ---
 
@@ -243,6 +265,9 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `elsevier_insttoken` | 空 | Elsevier institutional token，可选 |
 | `browser_headless` | `false` | 浏览器是否无头运行 |
 | `browser_humanize` | `true` | 浏览器人性化操作 |
+| `ezproxy_enabled` | `false` | 启用 EZProxy 机构访问 |
+| `ezproxy_login_url` | 空 | EZProxy 登录 URL 模板，必须包含 `{url}` |
+| `ezproxy_challenge_timeout` | `120` | 每个登录/验证等待窗口的秒数（15–600） |
 
 查看全部配置：
 
