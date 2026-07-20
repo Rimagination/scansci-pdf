@@ -40,7 +40,7 @@ def scansci_pdf_smart_download(
         identifier: DOI (e.g. 10.1038/nature12373), DOI URL, or arXiv ID (e.g. 2301.00001)
         output_dir: Override default output directory
         bibtex: Also return BibTeX citation for this paper
-        strategy: Override download strategy: fastest (default, all sources), scihub_only (only Sci-Hub/LibGen), scihub_first, oa_first, legal_only
+        strategy: Override download strategy: fastest (default), scihub_only, scihub_first, oa_first, legal_only, ezproxy_only (EZProxy only)
     """
     result = download(
         identifier, output_dir,
@@ -89,7 +89,7 @@ def scansci_pdf_download(
         use_tor: Route through Tor SOCKS5 proxy for anonymity
         use_vpnsci: Try WebVPN institutional proxy as last resort (requires prior login via scansci_pdf_vpnsci_login)
         bibtex: Also return BibTeX citation for this paper
-        strategy: Override download strategy: fastest, scihub_only, scihub_first, oa_first, legal_only
+        strategy: Override download strategy: fastest, scihub_only, scihub_first, oa_first, legal_only, ezproxy_only (EZProxy only)
     """
     result = download(identifier, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, bibtex=bibtex, strategy=strategy)
 

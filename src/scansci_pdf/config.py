@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cache_dir": str(DATA_DIR / "cache"),
     "network_proxy": "",
     "proxy_pool": "",  # 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP
-    "download_strategy": "fastest",  # fastest / grey_only(all 3 grey) / scihub_only(Sci-Hub only) / scihub_first / oa_first / legal_only
+    "download_strategy": "fastest",  # fastest / grey_only / scihub_only / scihub_first / oa_first / legal_only / ezproxy_only
     "scihub_enabled": True,
     "scihub_domains": DEFAULT_SCIHUB_DOMAINS,
     "vpnsci_enabled": False,
@@ -45,6 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "carsi_idp_name": "",
     "ezproxy_enabled": False,
     "ezproxy_login_url": "",
+    "ezproxy_challenge_timeout": 120,
     "core_api_key": "",
     "openalex_api_key": "",
     "elsevier_api_key": "",
@@ -107,6 +108,7 @@ _VALIDATION_RULES: dict[str, tuple[type, Any, Any]] = {
     # key: (type, min_value, max_value)
     "connect_timeout": (int, 1, 60),
     "read_timeout": (int, 1, 120),
+    "ezproxy_challenge_timeout": (int, 15, 600),
     "request_delay_min": (float, 0.0, 30.0),
     "request_delay_max": (float, 0.0, 60.0),
     "json_probe_cache_seconds": (int, 0, 86400),
@@ -117,7 +119,9 @@ _VALIDATION_RULES: dict[str, tuple[type, Any, Any]] = {
     "google_scholar_limit": (int, 1, 50),
 }
 
-_VALID_STRATEGIES = frozenset({"fastest", "scihub_first", "scihub_only", "grey_only", "oa_first", "legal_only"})
+_VALID_STRATEGIES = frozenset(
+    {"fastest", "scihub_first", "scihub_only", "grey_only", "oa_first", "legal_only", "ezproxy_only"}
+)
 
 
 def update_config(key: str, value: str) -> dict[str, Any]:
