@@ -37,6 +37,8 @@ NON_ARTICLE_PDF_MARKERS = (
     "plain language summary",
     "p l a i n l a n g u a g e s u m m a r y",
     "electronic supporting information",
+    "electronic supplementary material",
+    "supporting information to https://doi.org",
     "we are delighted to inform you that your manuscript",
     "department of health and human services food and drug administration",
     "new drug application",
