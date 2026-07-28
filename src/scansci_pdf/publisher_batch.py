@@ -61,6 +61,17 @@ IP_BLOCK_STOP_THRESHOLD = 3
 # treated as an IP block signal. 403 is ACS's block-page status; 429 is the
 # generic rate-limit/block code.
 _IP_BLOCK_STATUS_CODES = {403, 429}
+_UTF8_REPLACEMENT_BYTES = b"\xef\xbf\xbd"
+_UTF8_REPLACEMENT_PDF_THRESHOLD = 8
+
+
+def _is_usable_pdf_response(body: bytes) -> bool:
+    """Reject binary PDFs that were lossy-decoded and re-encoded as UTF-8."""
+    return (
+        body[:5] == b"%PDF-"
+        and len(body) > MIN_PDF_BYTES
+        and body.count(_UTF8_REPLACEMENT_BYTES) < _UTF8_REPLACEMENT_PDF_THRESHOLD
+    )
 
 # Reusable JS helpers injected into page.evaluate() calls
 _JS_VISIBLE = """(el) => {
@@ -2003,7 +2014,15 @@ class PublisherBatchDownloader:
                     if self._is_ip_block_response(None, body):
                         captured["block_reason"] = "ip_blocked"
                         self._event(result, "ip_blocked_body", url)
-                if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                if (
+                    body[:5] == b"%PDF-"
+                    and len(body) > MIN_PDF_BYTES
+                    and not _is_usable_pdf_response(body)
+                ):
+                    captured["deferred_url"] = url
+                    self._event(result, "pdf_response_utf8_corruption", url)
+                    return
+                if _is_usable_pdf_response(body):
                     captured["bytes"] = body
                     captured["url"] = url
             except Exception:
@@ -2040,7 +2059,14 @@ class PublisherBatchDownloader:
                             captured["deferred_url"] = response_url
                         else:
                             body = response.body()
-                            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                            if (
+                                body[:5] == b"%PDF-"
+                                and len(body) > MIN_PDF_BYTES
+                                and not _is_usable_pdf_response(body)
+                            ):
+                                captured["deferred_url"] = response_url
+                                self._event(result, "pdf_response_utf8_corruption", response_url)
+                            elif _is_usable_pdf_response(body):
                                 captured["bytes"] = body
                                 captured["url"] = response.url
                     if not captured["bytes"]:
@@ -2339,8 +2365,10 @@ class PublisherBatchDownloader:
             download = download_info.value
             path = download.path()
             body = Path(path).read_bytes()
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if _is_usable_pdf_response(body):
                 return body, str(getattr(download, "url", "") or pdf_url)
+            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+                self._event(result, "pdf_download_utf8_corruption", pdf_url)
         except Exception as exc:
             self._event(result, "download_capture_error", f"{type(exc).__name__}: {exc}")
         return None, pdf_url
@@ -2478,7 +2506,7 @@ class PublisherBatchDownloader:
             if self._is_ip_block_response(resp.status_code, resp.text):
                 return None, resp.url, "ip_blocked"
             body = resp.content
-            if body[:5] == b"%PDF-" and len(body) > MIN_PDF_BYTES:
+            if _is_usable_pdf_response(body):
                 return body, resp.url, None
         except Exception:
             return None, url, None
