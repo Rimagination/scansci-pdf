@@ -1,0 +1,92 @@
+[
+  {
+    "doi": "10.1016/j.watres.2026.126243",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 3429,
+    "title": "Breaking the “Wall”: Mechanistic insights into low-intensity ultrasound (LIU)-induced recovery of calcified CANDAN granular sludge",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126243.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126241",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 3359,
+    "title": "Microbial selective response to photogenerated electrons stabilizes nitrogen removal in oxygenic photogranules under low C/N conditions",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126241.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126246",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 3404,
+    "title": "A feature selection and per-indicator modeling framework for forecasting multivariate effluent water quality in wastewater treatment plant",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126246.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126218",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 4084,
+    "title": "Stage-resolved non-target reactomics and toxicity screening across a full-scale WWTP",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126218.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126237",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 3729,
+    "title": "Homoacetogenesis inhibition and electrode regulation strengthen an in situ hydrogen-retaining reducing environment for Fe3+ reduction-driven vivianite formation",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126237.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126239",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 3387,
+    "title": "Microplastics in constructed wetland ecological systems: Behavior, fate and environmental risks",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126239.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126234",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 4108,
+    "title": "Iron-bearing halloysite for wetland remediation: Curvature-controlled oxidation pathways and ecological implications",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126234.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126251",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 1796,
+    "title": "Microplastics identification framework: integration of microplastic-derived dissolved organic matter fingerprints and machine learning",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126251.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126263",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 1489,
+    "title": "Nanoscale Roughness Controls Reversible Virus Attachment and the Setback Distance to Protect Human Health",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126263.pdf"
+  },
+  {
+    "doi": "10.1016/j.watres.2026.126249",
+    "status": "success",
+    "quality": "full_text",
+    "source": "elsevier_api",
+    "text_len": 1779,
+    "title": "Coordination-Tailored High-Spin Fe-MOF Membrane Electrode Ensures Selective Singlet Oxygen Electrosynthesis: Non-Radical Emerging Contaminants Removal",
+    "pdf_path": "C:\\Users\\Liang\\.scansci-pdf\\papers\\10.1016_j.watres.2026.126249.pdf"
+  }
+]

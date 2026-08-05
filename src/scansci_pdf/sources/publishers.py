@@ -107,7 +107,7 @@ PREPRINT_PREFIXES: dict[str, str] = {
 }
 
 # Fast sources per publisher (used by tiered racing)
-# Browser strategies (ElsevierBrowser, etc.) use browser for anti-bot bypass
+# Browser strategies (ElsevierBrowser, etc.) use camofox for anti-bot bypass
 PUBLISHER_TOOL_MAP: dict[str, list[str]] = {
     "Nature": ["NatureDirect", "PublisherDirect", "NatureBrowser", "Crossref", "Unpaywall"],
     "MDPI": ["MDPIDirect", "Crossref", "Unpaywall"],
@@ -266,11 +266,11 @@ def try_publisher_direct(doi: str, output_path: Path, config: dict[str, Any]) ->
         except Exception as e:
             log.info(f"   [Publisher] {name}: {e}")
 
-    # Phase 2: Browser-based download via browser (handles anti-bot)
+    # Phase 2: Browser-based download via camofox (handles anti-bot)
     publisher = get_publisher(doi)
-    if publisher and config.get("browser_enabled", True):
-        from ..browser_engine import is_available as _browser_avail
-        if _browser_avail(config):
+    if publisher and config.get("camofox_enabled", True):
+        from ..camofox import is_available as _camofox_avail
+        if _camofox_avail(config):
             log.info(f"   [PublisherDirect] Trying browser strategy for {publisher}")
             fn = _FN_MAP.get(f"{publisher}Browser") or _FN_MAP.get("GenericBrowser")
             if fn:
@@ -358,11 +358,11 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
     from ..network import polite_delay
     from ..pdf_utils import is_pdf_file, success, _response_looks_pdf
 
-    def _fetch_pdf_browser(pdf_url: str) -> "requests.Response | None":  # type: ignore[name-defined]
-        from ..browser_engine import is_available as _browser_avail, solve_url as _browser_solve
-        if not _browser_avail(config):
+    def _fetch_pdf_camofox(pdf_url: str) -> "requests.Response | None":  # type: ignore[name-defined]
+        from ..camofox import is_available as _camofox_avail, solve_url as _camofox_solve
+        if not _camofox_avail(config):
             return None
-        result = _browser_solve(pdf_url, config)
+        result = _camofox_solve(pdf_url, config)
         if not result:
             return None
         solution = result.get("solution", {})
@@ -392,7 +392,7 @@ def try_science_direct(doi: str, output_path: Path, config: dict[str, Any]) -> d
     for pdf_url in pdf_urls:
         try:
             polite_delay(config)
-            resp = _fetch_pdf_browser(pdf_url)
+            resp = _fetch_pdf_camofox(pdf_url)
             if resp is None:
                 continue
 
@@ -615,34 +615,24 @@ def _elsevier_api_fn() -> Any:
 
 
 def _browser_strategy(publisher: str) -> Any:
-    """Create a browser download function for a publisher."""
-    from ..publisher_strategies import (
-        try_elsevier_browser, try_wiley_browser, try_ieee_browser,
-        try_acs_browser, try_rsc_browser, try_aip_browser,
-        try_springer_browser, try_aps_browser, try_tandfonline_browser,
-        try_iop_browser, try_oxford_browser, try_acm_browser,
-        try_nature_browser, try_science_browser, try_generic_browser,
-        try_sage_browser, try_asce_browser,
-    )
-    mapping = {
-        "Elsevier": try_elsevier_browser,
-        "Wiley": try_wiley_browser,
-        "IEEE": try_ieee_browser,
-        "ACS": try_acs_browser,
-        "RSC": try_rsc_browser,
-        "AIP": try_aip_browser,
-        "Springer": try_springer_browser,
-        "APS": try_aps_browser,
-        "Tandfonline": try_tandfonline_browser,
-        "IOP": try_iop_browser,
-        "Oxford": try_oxford_browser,
-        "ACM": try_acm_browser,
-        "Nature": try_nature_browser,
-        "Science": try_science_browser,
-        "SAGE": try_sage_browser,
-        "ASCE": try_asce_browser,
-    }
-    return mapping.get(publisher, try_generic_browser)
+    """Create a browser download function for a publisher.
+
+    Uses the new StrategyRegistry to validate the publisher, then returns
+    the legacy ``try_*_browser`` function via the compatibility bridge.
+    """
+    from ..publisher_strategies import StrategyRegistry
+    from .._publisher_strategies_core import try_generic_browser
+
+    strategy = StrategyRegistry.get_by_name(publisher)
+    if not strategy:
+        return try_generic_browser
+
+    # Resolve the legacy function name from the strategy's data
+    # Standard naming: try_{publisher.lower()}_browser
+    # Special cases handled by the strategy's aliases
+    fn_name = f"try_{strategy.name.lower().replace(' ', '_')}_browser"
+    from .. import _publisher_strategies_core as _core
+    return getattr(_core, fn_name, try_generic_browser)
 
 
 def get_publisher_fast_sources(doi: str) -> list[tuple[Any, str]]:
@@ -681,7 +671,7 @@ _FN_MAP.update({
     "BMCDirect": try_bmc_direct,
     # API strategies
     "ElsevierAPI": _elsevier_api_fn(),
-    # Browser strategies via browser
+    # Browser strategies via camofox
     "ElsevierBrowser": _browser_strategy("Elsevier"),
     "WileyBrowser": _browser_strategy("Wiley"),
     "IEEEBrowser": _browser_strategy("IEEE"),

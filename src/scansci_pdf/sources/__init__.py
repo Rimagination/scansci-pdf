@@ -923,9 +923,13 @@ def _batch_institutional_phase(
         return
 
     try:
-        from cloakbrowser import launch_persistent_context  # noqa: F401
+        from ..browser_backend import launch_persistent_context  # noqa: F401
+        from ..browser_backend import is_available as _browser_backend_available
+        if not _browser_backend_available():
+            log.info("   [Batch] no browser backend available, skipping institutional phase")
+            return
     except ImportError:
-        log.info("   [Batch] cloakbrowser not installed, skipping institutional phase")
+        log.info("   [Batch] no browser backend available, skipping institutional phase")
         return
 
     # Group DOIs by publisher profile

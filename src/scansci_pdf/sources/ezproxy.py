@@ -119,10 +119,14 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
     log.info(f"   [EZProxy] Trying {doi} via library proxy...")
 
     try:
-        from cloakbrowser import launch
+        from ..browser_backend import launch
+        from ..browser_backend import is_available as _browser_backend_available
         from ..browser_engine import _build_browser_args
+        if not _browser_backend_available():
+            log.info("   [EZProxy] no browser backend available")
+            return None
     except ImportError:
-        log.info("   [EZProxy] cloakbrowser not installed")
+        log.info("   [EZProxy] no browser backend available")
         return None
 
     download_dir = str(output_path.parent)

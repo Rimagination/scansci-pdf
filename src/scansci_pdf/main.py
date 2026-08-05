@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from pathlib import Path
 
@@ -146,12 +147,38 @@ def get_paper(
 
 @app.command("browser-status")
 def browser_status() -> None:
-    """Check CloakBrowser availability."""
+    """Check browser backend availability and which browser kernel is in effect."""
     from .config import load_config
     from .browser_engine import is_available
+    from .browser_backend import browser_info
+    import importlib.metadata as _md
+
     config = load_config()
     available = is_available(config)
-    print(f"  CloakBrowser: {'available' if available else 'not installed'}")
+    print(f"  Browser backend: {'available' if available else 'not installed'}")
+    if not available:
+        return
+    info = browser_info(config)
+    print(f"  backend: {info.get('backend', '?')}")
+    for pkg in ("patchright", "cloakbrowser"):
+        try:
+            print(f"  {pkg} package: {_md.version(pkg)}")
+        except Exception:
+            pass
+    if info.get("binary"):
+        print(f"  browser kernel: {info['binary']} (version {info.get('version') or '?'})")
+    else:
+        print(f"  browser kernel: {info.get('binary') or '?'}")
+
+
+@app.command("browser-doctor")
+def browser_doctor_cmd() -> None:
+    """Report reusable shared browser runtime options without installing anything."""
+    import json as _json
+
+    from .browser_discovery import doctor
+
+    print(_json.dumps(doctor(), ensure_ascii=False))
 
 
 @app.command("browser-doctor")
@@ -604,7 +631,7 @@ def search_cmd(
       scansci-pdf search --author-id A5102961214 --limit 10 --sort cited_by_count
     """
     import json as _json
-    from .search import search_papers
+    from .search import search_papers_v2 as search_papers
 
     if author or author_id:
         # Author-based search
@@ -631,6 +658,176 @@ def search_cmd(
             print(f"    {authors}  ({r.get('year', '?')})  cited={cited}  doi:{r.get('doi', '?')}")
             if i < len(results):
                 print()
+
+
+@app.command("plan")
+def plan_cmd(
+    query: str = typer.Argument(help="Research topic"),
+    domain: str = typer.Option("general", "--domain", help="Domain profile (general/medicine/computer_science/chinese_general/...)"),
+    depth: str = typer.Option("standard", "--depth", help="Depth: quick/standard/systematic"),
+    question: str = typer.Option("", "--question", help="Research question"),
+    year_from: int = typer.Option(None, "--year-from"),
+    year_to: int = typer.Option(None, "--year-to"),
+) -> None:
+    """Build an auditable search protocol without running a search (ScanSci Find)."""
+    from .discovery import find_cli_available, plan
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    print(json.dumps(plan(query, domain=domain, depth=depth, question=question,
+                          year_from=year_from, year_to=year_to), ensure_ascii=False, indent=2))
+
+
+@app.command("estimate")
+def estimate_cmd(
+    query: str = typer.Argument(help="Research topic"),
+    domain: str = typer.Option("general", "--domain"),
+    depth: str = typer.Option("standard", "--depth"),
+    question: str = typer.Option("", "--question"),
+    year_from: int = typer.Option(None, "--year-from"),
+    year_to: int = typer.Option(None, "--year-to"),
+) -> None:
+    """Estimate result volume before spending a full search budget (ScanSci Find)."""
+    from .discovery import find_cli_available, estimate
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    print(json.dumps(estimate(query, domain=domain, depth=depth, question=question,
+                              year_from=year_from, year_to=year_to), ensure_ascii=False, indent=2))
+
+
+@app.command("smoke")
+def smoke_cmd(
+    query: str = typer.Argument(help="Research topic"),
+    domain: str = typer.Option("general", "--domain"),
+    records: int = typer.Option(4, "--records", help="Records per source (default 4)"),
+) -> None:
+    """Fetch a few records per source and validate the candidate contract (ScanSci Find)."""
+    from .discovery import find_cli_available, smoke
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    print(json.dumps(smoke(query, domain=domain, records_per_source=records), ensure_ascii=False, indent=2))
+
+
+@app.command("calibrate")
+def calibrate_cmd(
+    query: str = typer.Argument(help="Research topic"),
+    domain: str = typer.Option("general", "--domain"),
+    depth: str = typer.Option("standard", "--depth"),
+    sample_size: int = typer.Option(100, "--sample-size"),
+) -> None:
+    """Run a bounded calibration sample before a high-recall search (ScanSci Find)."""
+    from .discovery import find_cli_available, calibrate
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    print(json.dumps(calibrate(query, domain=domain, depth=depth, sample_size=sample_size), ensure_ascii=False, indent=2))
+
+
+@app.command("verify")
+def verify_cmd(
+    input_file: str = typer.Argument(help="Candidates JSON file (from discovery search)"),
+    limit: int = typer.Option(None, "--limit"),
+) -> None:
+    """Verify DOI/PMID/arXiv identifiers against authoritative APIs (ScanSci Find)."""
+    from .discovery import find_cli_available, verify
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    print(json.dumps(verify(input_file, limit=limit), ensure_ascii=False, indent=2))
+
+
+@app.command("resolve-oa")
+def resolve_oa_cmd(
+    input_file: str = typer.Argument(help="Candidates JSON file (from discovery search)"),
+    limit: int = typer.Option(None, "--limit"),
+) -> None:
+    """Resolve DOI open-access locations through Unpaywall (ScanSci Find)."""
+    from .discovery import find_cli_available, resolve_oa
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    print(json.dumps(resolve_oa(input_file, limit=limit), ensure_ascii=False, indent=2))
+
+
+@app.command("build-queue")
+def build_queue_cmd(
+    input_path: str = typer.Argument(help="Discovery output dir (with download_queue.json) or candidates JSON file"),
+    out: str = typer.Option("", "--out", help="Write identifier list to file (one per line)"),
+) -> None:
+    """Build a download identifier queue from ScanSci Find output — feed to 'scansci-pdf batch'."""
+    from pathlib import Path as _Path
+    from .discovery import build_download_queue
+    import json as _json
+
+    p = _Path(input_path)
+    if p.is_dir():
+        identifiers = build_download_queue(p)
+    else:
+        try:
+            candidates = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            print(f"Error: cannot read {input_path}")
+            raise typer.Exit(1)
+        if isinstance(candidates, dict):
+            candidates = candidates.get("candidates", [])
+        identifiers = []
+        for c in candidates:
+            for key in ("doi", "arxiv_id"):
+                if c.get(key):
+                    identifiers.append(str(c[key]))
+                    break
+    # Resolve any bare titles (no DOI/arXiv) through the built-in resolver
+    unresolved = [i for i in identifiers if i]
+    for i in unresolved:
+        print(i)
+    if out:
+        _Path(out).write_text("\n".join(unresolved) + "\n", encoding="utf-8")
+        print(f"\nWrote {len(unresolved)} identifiers to {out} (use: scansci-pdf batch {out})")
+    else:
+        print(f"\n{len(unresolved)} identifiers ready (use: scansci-pdf batch <file>)")
+
+
+@app.command("find")
+def find_cmd(
+    query: str = typer.Argument(help="Research topic"),
+    out: str = typer.Option(..., "--out", help="Output directory for ScanSci Find artifacts"),
+    domain: str = typer.Option("general", "--domain"),
+    depth: str = typer.Option("quick", "--depth", help="quick/standard/systematic"),
+    limit: int = typer.Option(20, "--limit"),
+    expand_citations: bool = typer.Option(False, "--expand-citations"),
+    citation_rounds: int = typer.Option(None, "--citation-rounds"),
+    citation_source: str = typer.Option("semantic", "--citation-source"),
+    verify_identifiers: bool = typer.Option(False, "--verify-identifiers"),
+    resolve_oa: bool = typer.Option(False, "--resolve-oa"),
+    year_from: int = typer.Option(None, "--year-from"),
+    year_to: int = typer.Option(None, "--year-to"),
+) -> None:
+    """Full discovery search via ScanSci Find's 13-source engine.
+
+    Writes candidates.json / download_queue.json / coverage & PRISMA reports
+    into --out. Follow up with 'scansci-pdf build-queue <dir>' then
+    'scansci-pdf batch <queue file>' to download.
+    """
+    from .discovery import build_download_queue, find_cli_available, search
+    if not find_cli_available():
+        print("Error: scansci-find CLI not available. Install it, e.g.: pip install -e D:\\Projects\\active\\scansci-find")
+        raise typer.Exit(1)
+    payload = search(
+        query, out, domain=domain, depth=depth, limit=limit,
+        expand_citations=expand_citations, citation_source=citation_source,
+        citation_rounds=citation_rounds,
+        verify_identifiers=verify_identifiers, resolve_oa=resolve_oa,
+        year_from=year_from, year_to=year_to,
+    )
+    queue = build_download_queue(out)
+    print(f"  Query: {query}")
+    print(f"  Domain: {domain} | Depth: {depth} | Total candidates: {payload.get('total', 0)}")
+    print(f"  Download queue: {len(queue)} identifiers")
+    print(f"  Artifacts: {out}")
+    if queue:
+        print(f"  Next: scansci-pdf build-queue {out} --out queue.txt && scansci-pdf batch queue.txt")
 
 
 @app.command("config-cmd")

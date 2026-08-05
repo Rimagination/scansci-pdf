@@ -14,7 +14,7 @@ from .config import get_config_safe, load_config, update_config
 from .network import fetch_json
 from .paperlist import PaperEntry, parse_paper_list
 from .resolver import batch_resolve
-from .search import search_papers
+from .search import search_papers_v2 as search_papers
 from .sources import batch_download, download
 from .tor import check_tor_circuit
 
@@ -211,6 +211,174 @@ def scansci_pdf_search(
         author_id=author_id,
     )
     return json.dumps({"results": results}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_plan_search(
+    query: str,
+    domain: str = "general",
+    depth: str = "standard",
+) -> str:
+    """Build an auditable search protocol before running a search (ScanSci Find 13-source engine).
+
+    Args:
+        query: Research topic (e.g. "carbon emission reduction China").
+        domain: Domain profile: general/medicine/computer_science/chinese_general/...
+        depth: quick/standard/systematic.
+    """
+    from .discovery import plan
+    try:
+        return json.dumps(plan(query, domain=domain, depth=depth), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_estimate_search(
+    query: str,
+    domain: str = "general",
+    depth: str = "standard",
+) -> str:
+    """Estimate result volume (size_band: narrow/workable/broad/revise_query) before a full search.
+
+    Args:
+        query: Research topic.
+        domain: Domain profile.
+        depth: quick/standard/systematic.
+    """
+    from .discovery import estimate
+    try:
+        return json.dumps(estimate(query, domain=domain, depth=depth), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_smoke_search(
+    query: str,
+    domain: str = "general",
+) -> str:
+    """Fetch 4 records per source and validate the candidate contract before the real search."""
+    from .discovery import smoke
+    try:
+        return json.dumps(smoke(query, domain=domain), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_calibrate_search(
+    query: str,
+    domain: str = "general",
+    depth: str = "standard",
+    sample_size: int = 100,
+) -> str:
+    """Run a bounded calibration sample; reports human_queue_rate and gold-set recall.
+
+    Args:
+        query: Research topic.
+        domain: Domain profile.
+        depth: quick/standard/systematic.
+        sample_size: Records to sample (default 100).
+    """
+    from .discovery import calibrate
+    try:
+        return json.dumps(calibrate(query, domain=domain, depth=depth, sample_size=sample_size),
+                          ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_expand_citations(
+    query: str,
+    rounds: int = 1,
+    citation_source: str = "semantic",
+    limit: int = 20,
+) -> str:
+    """Search plus backward/forward citation chasing (Semantic Scholar / OpenCitations).
+
+    Args:
+        query: Seed topic for the search.
+        rounds: Citation chasing rounds (default 1, max 5).
+        citation_source: semantic/opencitations/both.
+        limit: Initial seed candidates (default 20).
+    """
+    import tempfile as _tempfile
+    from .discovery import expand_citations
+    try:
+        with _tempfile.TemporaryDirectory(prefix="scansci_find_") as tmp:
+            payload = expand_citations(
+                query, tmp, rounds=min(rounds, 5),
+                citation_source=citation_source, limit=min(limit, 100),
+            )
+        candidates = payload.get("candidates") or []
+        summary = {
+            "total": payload.get("total", len(candidates)),
+            "dois": [c.get("doi") for c in candidates if c.get("doi")][:50],
+            "arxiv_ids": [c.get("arxiv_id") for c in candidates if c.get("arxiv_id")][:20],
+            "saturated": bool(payload.get("citation_report", {}).get("saturated")),
+        }
+        return json.dumps(summary, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_verify_identifiers(candidates_json: str) -> str:
+    """Verify DOI/PMID/arXiv identifiers in a candidate list against authoritative APIs.
+
+    Args:
+        candidates_json: JSON array of candidates (as produced by ScanSci Find), or a path to one.
+    """
+    from .discovery import verify
+    try:
+        return json.dumps(verify(candidates_json), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_resolve_oa(candidates_json: str) -> str:
+    """Resolve open-access locations for DOIs in a candidate list via Unpaywall.
+
+    Args:
+        candidates_json: JSON array of candidates (as produced by ScanSci Find), or a path to one.
+    """
+    from .discovery import resolve_oa
+    try:
+        return json.dumps(resolve_oa(candidates_json), ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+@mcp_app.tool()
+def scansci_pdf_build_download_queue(
+    query: str,
+    limit: int = 10,
+    depth: str = "quick",
+) -> str:
+    """Search via the 13-source discovery engine and return a ready download identifier queue.
+
+    Args:
+        query: Search topic.
+        limit: Max identifiers (default 10).
+        depth: quick/standard (default quick).
+    """
+    import tempfile as _tempfile
+    from .discovery import build_download_queue, search
+    try:
+        with _tempfile.TemporaryDirectory(prefix="scansci_find_") as tmp:
+            payload = search(query, tmp, depth=depth, limit=min(limit * 2, 60))
+            identifiers = build_download_queue(tmp)
+        return json.dumps({
+            "query": query,
+            "total_found": payload.get("total", 0),
+            "identifiers": identifiers[:limit],
+            "hint": "Feed identifiers to scansci_pdf_batch_download",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
 @mcp_app.tool()

@@ -38,8 +38,19 @@ download_*.py
 login_and_download.py
 test_download*.py
 ISSUE_REPORT*.md
+
+# Browser profile/cache directories (Chrome user data, CloakBrowser kernels)
+carsi_sciencedirect/
 src/scansci_pdf/_browsers/
-downloads/
-Default/
-segmentation_platform/
-*.txt
+GrShaderCache/
+GraphiteDawnCache/
+BrowserMetrics-spare.pma
+
+# Downloaded papers / login screenshots / cookie test leftovers
+guan_dabo_papers/
+cas_login*.png
+.scidown_*
+.tmp/
+
+# Test download artifacts (downloaded PDFs, run records)
+test_downloads/

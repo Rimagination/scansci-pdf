@@ -12,6 +12,8 @@ dependencies = [
     "mcp[cli]>=1.12",
     "typer>=0.15",
     "uvicorn>=0.34",
+    "fastapi>=0.115",
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -22,12 +24,12 @@ vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
 cloakbrowser = ["cloakbrowser>=0.4.11"]
 web = ["fastapi>=0.115", "jinja2>=3.1"]
+patchright = ["patchright>=1.61"]
 dev = ["pytest>=8.0"]
 compile = ["cython>=3.0"]
 
 [project.scripts]
 scansci-pdf = "scansci_pdf.main:main"
-scansci-pdf-browser = "scansci_pdf.browser_discovery:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "pycryptodome>=3.20"]
@@ -37,7 +39,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyd", "_core/*.so"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyd", "_core/*.so", "templates/*.html"]

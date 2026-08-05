@@ -63,6 +63,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_pdf_size_bytes": 10000,
     "browser_headless": False,
     "browser_humanize": True,
+    # 浏览器后端：patchright（默认，Apache-2.0 开源 playwright fork，内核随本机 Chrome 自动更新）
+    # 或 cloakbrowser（免费版内核卡 Chromium 146，作为可选回退）
+    "browser_backend": "patchright",
+    # 浏览器内核选择（CloakBrowser 免费版内置 Chromium 146 已过老，遇 Cloudflare Turnstile 会反复验证）：
+    #   browser_executable: 显式指定浏览器二进制路径（本机 Chrome/Edge）；留空=自动探测
+    #   browser_auto_upgrade: True 时自动探测本机 Chrome/Edge（版本 > 146 优先于内置 stealth Chromium）
+    "browser_executable": "",
+    "browser_auto_upgrade": True,
     "is_campus_network": False,
     "tor_proxy": os.environ.get("TOR_PROXY", ""),
     "tor_use_bridges": False,

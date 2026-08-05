@@ -1078,7 +1078,7 @@ dev = [
 fast = [
     { name = "lxml" },
 ]
-instsci = [
+vpnsci = [
     { name = "pycryptodome" },
     { name = "selenium" },
 ]
@@ -1090,15 +1090,15 @@ requires-dist = [
     { name = "cython", marker = "extra == 'compile'", specifier = ">=3.0" },
     { name = "lxml", marker = "extra == 'fast'", specifier = ">=4.9" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12" },
-    { name = "pycryptodome", marker = "extra == 'instsci'", specifier = ">=3.20" },
+    { name = "pycryptodome", marker = "extra == 'vpnsci'", specifier = ">=3.20" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "requests", specifier = ">=2.31" },
     { name = "requests", extras = ["socks"], specifier = ">=2.31" },
-    { name = "selenium", marker = "extra == 'instsci'", specifier = ">=4.15" },
+    { name = "selenium", marker = "extra == 'vpnsci'", specifier = ">=4.15" },
     { name = "typer", specifier = ">=0.15" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
-provides-extras = ["fast", "instsci", "dev", "compile"]
+provides-extras = ["fast", "vpnsci", "dev", "compile"]
 
 [[package]]
 name = "selenium"

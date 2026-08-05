@@ -10,13 +10,12 @@ from urllib.parse import urlparse
 import requests
 from Crypto.Cipher import AES
 
-from .cloakbrowser_compat import prepare_cloakbrowser_runtime
 from .session_store import CookieStore
 
 try:
-    prepare_cloakbrowser_runtime()
-    from cloakbrowser import launch
-    _HAS_CLOAKBROWSER = True
+    from .browser_backend import launch
+    from .browser_backend import is_available as _browser_backend_available
+    _HAS_CLOAKBROWSER = _browser_backend_available()
 except ImportError:
     launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False
@@ -171,12 +170,11 @@ class WebVPNAuth:
 
     def _browser_login(self) -> bool:
         if not _HAS_CLOAKBROWSER:
-            logger.error("cloakbrowser not installed. Run: pip install cloakbrowser")
+            logger.error("no browser backend available. Run: pip install patchright (or pip install cloakbrowser)")
             return False
 
         try:
-            prepare_cloakbrowser_runtime()
-            from cloakbrowser import launch_persistent_context
+            from .browser_backend import launch_persistent_context
             profile_dir = _get_profile_dir(self.config)
             profile_dir.mkdir(parents=True, exist_ok=True)
             self._context = launch_persistent_context(
@@ -392,7 +390,7 @@ class EZProxyAuth:
 
     def _browser_login(self) -> bool:
         if not _HAS_CLOAKBROWSER:
-            logger.error("cloakbrowser not installed. Run: pip install cloakbrowser")
+            logger.error("no browser backend available. Run: pip install patchright (or pip install cloakbrowser)")
             return False
 
         try:

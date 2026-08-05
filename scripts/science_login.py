@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from scansci_pdf.browser_login import (
-    _save_cookies_json, _save_cookies_netscape, _import_to_browser,
+from scansci_pdf.camofox_login import (
+    _save_cookies_json, _save_cookies_netscape, _import_to_camofox_browser,
 )
 from scansci_pdf.config import load_config, DATA_DIR
 
@@ -56,8 +56,8 @@ def _save_all(context, config, cookie_file):
     _save_cookies_json(cookies, cookie_file)
     netscape_path = cookie_file.with_suffix(".txt")
     _save_cookies_netscape(cookies, netscape_path)
-    count = _import_to_browser(netscape_path, config)
-    print(f"Captured {len(cookies)} cookies, imported {count} into CloakBrowser")
+    count = _import_to_camofox_browser(netscape_path, config)
+    print(f"Captured {len(cookies)} cookies, imported {count} into camofox-browser")
     return cookies
 
 
