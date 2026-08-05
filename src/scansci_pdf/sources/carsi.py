@@ -140,9 +140,13 @@ class CARSIClient:
             return None
 
         try:
-            from cloakbrowser import launch  # noqa: F401
+            from ..browser_backend import launch  # noqa: F401
+            from ..browser_backend import is_available as _browser_backend_available
+            if not _browser_backend_available():
+                log.info("   [CARSI-Browser] no browser backend available")
+                return None
         except ImportError:
-            log.info("   [CARSI-Browser] cloakbrowser not installed")
+            log.info("   [CARSI-Browser] no browser backend available")
             return None
 
         idp_name = self.config.get("carsi_idp_name", "")

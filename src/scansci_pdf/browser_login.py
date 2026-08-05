@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from cloakbrowser import launch
-    _HAS_CLOAKBROWSER = True
+    from .browser_backend import launch
+    from .browser_backend import is_available as _browser_backend_available
+    _HAS_CLOAKBROWSER = _browser_backend_available()
 except ImportError:
     launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False

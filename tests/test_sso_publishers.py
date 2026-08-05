@@ -118,9 +118,13 @@ def test_publisher(
     }
 
     try:
-        from cloakbrowser import launch  # noqa: F401
+        from scansci_pdf.browser_backend import launch  # noqa: F401
+        from scansci_pdf.browser_backend import is_available as _browser_backend_available
+        if not _browser_backend_available():
+            result["error"] = "no browser backend available"
+            return result
     except ImportError:
-        result["error"] = "cloakbrowser not installed"
+        result["error"] = "no browser backend available"
         return result
 
     sso_cfg = _PUBLISHER_SSO_CONFIG.get(publisher, _PUBLISHER_SSO_CONFIG["_default"])

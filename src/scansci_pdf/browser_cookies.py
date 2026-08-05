@@ -109,12 +109,19 @@ def extract_via_browser(
         Result dict with success, cookies_count, domains, etc.
     """
     try:
-        from cloakbrowser import launch
+        from .browser_backend import launch
+        from .browser_backend import is_available as _browser_backend_available
+        if not _browser_backend_available():
+            return {
+                "success": False,
+                "error": "no browser backend available",
+                "fix": "pip install patchright (or pip install cloakbrowser)",
+            }
     except ImportError:
         return {
             "success": False,
-            "error": "cloakbrowser not installed",
-            "fix": "pip install cloakbrowser",
+            "error": "no browser backend available",
+            "fix": "pip install patchright (or pip install cloakbrowser)",
         }
 
     from .config import DATA_DIR

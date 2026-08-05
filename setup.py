@@ -15,8 +15,8 @@ class BuildPyWithEncryption(build_py):
     """Custom build_py that encrypts webvpn.json -> webvpn.dat."""
 
     def run(self):
-        self._encrypt_webvpn_data()
         super().run()
+        self._encrypt_webvpn_data()
 
     def _encrypt_webvpn_data(self):
         """Encrypt webvpn.json into webvpn.dat for IP protection."""
@@ -34,7 +34,7 @@ class BuildPyWithEncryption(build_py):
 
         # Try to use compiled core for encryption
         try:
-            from scansci_pdf._core.instsci_core import encrypt_data
+            from scansci_pdf._core.vpnsci_core import encrypt_data
             encrypted = encrypt_data(plaintext)
         except ImportError:
             # Fallback: use pycryptodome directly (for first build before .pyx is compiled)
@@ -56,8 +56,8 @@ try:
 
     extensions = [
         Extension(
-            "scansci_pdf._core.instsci_core",
-            ["src/scansci_pdf/_core/instsci_core.pyx"],
+            "scansci_pdf._core.vpnsci_core",
+            ["src/scansci_pdf/_core/vpnsci_core.pyx"],
         ),
         Extension(
             "scansci_pdf._core.scihub_core",

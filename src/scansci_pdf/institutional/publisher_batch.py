@@ -399,10 +399,7 @@ class PublisherBatchDownloader:
         return target
 
     def _launch_context(self, profile_dir: str | Path | None = None):
-        from ..cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-
-        ensure_cloakbrowser_platform_compatible()
-        from cloakbrowser import launch_persistent_context
+        from ..browser_backend import launch_persistent_context
 
         profile_path = Path(profile_dir) if profile_dir else Path(self.config.chrome_profile_dir)
         profile_path.mkdir(parents=True, exist_ok=True)

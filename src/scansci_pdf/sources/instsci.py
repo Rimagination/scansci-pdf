@@ -698,9 +698,13 @@ def _download_pdf_socks5(
 def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
     """Download via visible stealth browser browser. Login + download in same session."""
     try:
-        from cloakbrowser import launch
+        from ..browser_backend import launch
+        from ..browser_backend import is_available as _browser_backend_available
+        if not _browser_backend_available():
+            log.info("   [WebVPN-Browser] no browser backend available")
+            return None
     except ImportError:
-        log.info("   [WebVPN-Browser] cloakbrowser not installed")
+        log.info("   [WebVPN-Browser] no browser backend available")
         return None
 
     base = _get_webvpn_base(config)

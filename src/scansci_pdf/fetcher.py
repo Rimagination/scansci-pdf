@@ -20,10 +20,8 @@ from .publisher_pdf_router import build_pdf_candidates, discover_pdf_candidates_
 from .publisher_profiles import infer_publisher_profile, infer_publisher_profile_from_url
 
 try:
-    from .cloakbrowser_compat import prepare_cloakbrowser_runtime
-    prepare_cloakbrowser_runtime()
-    import cloakbrowser  # noqa: F401
-    _HAS_CLOAKBROWSER = True
+    from .browser_backend import is_available as _browser_backend_available
+    _HAS_CLOAKBROWSER = _browser_backend_available()
 except ImportError:
     _HAS_CLOAKBROWSER = False
 

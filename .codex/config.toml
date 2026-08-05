@@ -1,5 +1,0 @@
-[shell_environment_policy]
-inherit = "core"
-
-[shell_environment_policy.set]
-SSL_CERT_FILE = "C:/Users/Liang/.zcode/ca-bundle-merged.pem"

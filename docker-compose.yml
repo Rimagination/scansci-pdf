@@ -5,12 +5,21 @@ services:
       - "8000:8000"
     environment:
       - TOR_PROXY=socks5h://tor:1080
+      - CAMOFOX_URL=http://camofox:9377
       - SCANSCI_PDF_DATA_DIR=/data/paper-fetch
-      - NO_PROXY=localhost,127.0.0.1,tor
+      - NO_PROXY=localhost,127.0.0.1,camofox,tor
     volumes:
       - scansci-pdf-data:/data/paper-fetch
     depends_on:
       - tor
+    networks:
+      - scansci-pdf-net
+    restart: unless-stopped
+
+  camofox:
+    image: ghcr.io/nicedayzhu/camofox-browser:latest
+    ports:
+      - "9377:9377"
     networks:
       - scansci-pdf-net
     restart: unless-stopped

@@ -15,6 +15,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import re
+import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -24,21 +28,44 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# CloakBrowser availability check
+# Browser backend (patchright default, CloakBrowser opt-in fallback)
+# ---------------------------------------------------------------------------
+# patchright is the Apache-2.0 open-source Playwright fork that patches the
+# detectable automation fingerprints and drives the local Chrome (channel).
+# CloakBrowser's free tier is pinned to Chromium 146 (newer 148/150 are
+# Pro-only), so it remains as an opt-in fallback via the `browser_backend`
+# config key. Local browser detection / CLOAKBROWSER_BINARY_PATH logic for
+# the CloakBrowser backend lives in browser_backend.py.
 # ---------------------------------------------------------------------------
 
-_HAS_CLOAKBROWSER: bool | None = None
+from .browser_backend import (  # noqa: E402
+    BACKEND_CLOAKBROWSER,
+    BACKEND_PATCHRIGHT,
+    find_local_browser,  # noqa: F401  (re-exported for CLI diagnostics)
+    launch,
+    launch_persistent_context,
+    resolve_backend,
+    resolve_browser_binary,  # noqa: F401  (re-exported for CLI diagnostics)
+)
+
+# ---------------------------------------------------------------------------
+# Browser backend availability check
+# ---------------------------------------------------------------------------
+
+_HAS_BROWSER_BACKEND: bool | None = None
 
 
-def _check_cloakbrowser() -> bool:
-    global _HAS_CLOAKBROWSER
-    if _HAS_CLOAKBROWSER is None:
-        try:
-            from cloakbrowser import launch  # noqa: F401
-            _HAS_CLOAKBROWSER = True
-        except ImportError:
-            _HAS_CLOAKBROWSER = False
-    return _HAS_CLOAKBROWSER
+def _check_browser_backend(config: dict[str, Any] | None = None) -> bool:
+    """Check whether the resolved backend is importable (cached per backend)."""
+    from .browser_backend import is_available
+
+    global _HAS_BROWSER_BACKEND
+    backend = resolve_backend(config)
+    if backend == BACKEND_CLOAKBROWSER:
+        return is_available(BACKEND_CLOAKBROWSER)
+    if _HAS_BROWSER_BACKEND is None:
+        _HAS_BROWSER_BACKEND = is_available(BACKEND_PATCHRIGHT)
+    return _HAS_BROWSER_BACKEND
 
 
 # ---------------------------------------------------------------------------
@@ -73,12 +100,12 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
     # Playwright's Sync API cannot run inside a running asyncio event loop.
     # Detect that case and bail out early with a clear message instead of
     # hitting a confusing "asyncio.run() cannot be called from a running
-    # event loop" deep inside CloakBrowser.
+    # event loop" deep inside the browser backend.
     try:
         import asyncio
         asyncio.get_running_loop()
         raise RuntimeError(
-            "CloakBrowser (Playwright Sync API) cannot run inside an asyncio "
+            "Browser (Playwright Sync API) cannot run inside an asyncio "
             "event loop. Use the HTTP download sources instead, or call from "
             "a synchronous context."
         )
@@ -87,21 +114,27 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
             raise
         # No running loop — safe to proceed.
 
-    if not _check_cloakbrowser():
-        raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
+    if not _check_browser_backend(config):
+        raise RuntimeError(
+            "no browser backend available. Run: pip install patchright (or pip install cloakbrowser)"
+        )
 
-    # Platform compat shim
-    try:
-        from ..institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-        ensure_cloakbrowser_platform_compatible()
-    except Exception:
+    backend = resolve_backend(config)
+
+    # Platform compat shim + kernel override only apply to CloakBrowser
+    if backend == BACKEND_CLOAKBROWSER:
         try:
-            from .institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
+            from ..institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
             ensure_cloakbrowser_platform_compatible()
         except Exception:
-            pass
-
-    from cloakbrowser import launch
+            try:
+                from .institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
+                ensure_cloakbrowser_platform_compatible()
+            except Exception:
+                pass
+        binary = resolve_browser_binary(config)
+        if binary:
+            os.environ["CLOAKBROWSER_BINARY_PATH"] = binary
 
     headless = False
     humanize = True
@@ -110,7 +143,7 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
         humanize = config.get("browser_humanize", True)
 
     args = _build_browser_args(config)
-    browser = launch(headless=headless, humanize=humanize, args=args)
+    browser = launch(headless=headless, humanize=humanize, args=args, config=config)
     context = browser.new_context()
     _tls.browser = browser
     _tls.context = context
@@ -132,16 +165,22 @@ def get_persistent_context(
     This is the recommended approach for publisher sessions that need
     stable identity across multiple download runs.
     """
-    if not _check_cloakbrowser():
-        raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
+    if not _check_browser_backend(config):
+        raise RuntimeError(
+            "no browser backend available. Run: pip install patchright (or pip install cloakbrowser)"
+        )
 
-    try:
-        from .cloakbrowser_compat import prepare_cloakbrowser_runtime
-        prepare_cloakbrowser_runtime()
-    except Exception:
-        pass
+    backend = resolve_backend(config)
 
-    from cloakbrowser import launch_persistent_context
+    if backend == BACKEND_CLOAKBROWSER:
+        try:
+            from .cloakbrowser_compat import prepare_cloakbrowser_runtime
+            prepare_cloakbrowser_runtime()
+        except Exception:
+            pass
+        binary = resolve_browser_binary(config)
+        if binary:
+            os.environ["CLOAKBROWSER_BINARY_PATH"] = binary
 
     headless = False
     humanize = True
@@ -158,6 +197,7 @@ def get_persistent_context(
         headless=headless,
         humanize=humanize,
         args=args,
+        config=config,
     )
     logger.info(f"browser_engine: persistent context ready at {profile_path}")
     return ctx
@@ -169,7 +209,7 @@ def get_browser_page(config: dict[str, Any] | None = None):
     Returns a Playwright Page object that the caller must close after use.
     Returns None if the browser is not available.
     """
-    if not _check_cloakbrowser():
+    if not _check_browser_backend(config):
         return None
     try:
         _browser, context = _get_shared_browser(config)
@@ -209,8 +249,8 @@ def _ensure_compat():
 # ---------------------------------------------------------------------------
 
 def is_available(config: dict[str, Any] | None = None) -> bool:
-    """Check if CloakBrowser is available (importable)."""
-    return _check_cloakbrowser()
+    """Check if the resolved browser backend is available (importable)."""
+    return _check_browser_backend(config)
 
 
 # ---------------------------------------------------------------------------

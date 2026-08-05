@@ -22,7 +22,8 @@ CORE_DEPS = {
 OPTIONAL_DEPS = {
     "socks": "SOCKS proxy support (requests[socks])",
     "Crypto": "WebVPN AES encryption (pycryptodome)",
-    "cloakbrowser": "Stealth browser for publisher access",
+    "patchright": "Stealth browser backend (default; open-source Playwright fork)",
+    "cloakbrowser": "Stealth browser backend (fallback; free tier pinned to Chromium 146)",
 }
 
 _feature_status: dict[str, bool] = {}

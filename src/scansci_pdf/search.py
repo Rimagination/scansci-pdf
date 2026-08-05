@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
 
 from .config import load_config
+
+logger = logging.getLogger(__name__)
 
 _SEARCH_TIMEOUT = 30  # seconds, longer than default because these are public APIs
 _USER_AGENT = "scansci-pdf/1.5 (https://github.com/Rimagination/scansci-pdf)"
@@ -192,6 +196,56 @@ def _search_openalex_by_author(
     except Exception:
         return []
     return _parse_openalex_works(data.get("results", []))
+
+
+def search_papers_v2(
+    query: str = "",
+    limit: int = 10,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    sort: str | None = None,
+    *,
+    author: str | None = None,
+    author_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Keyword search via ScanSci Find's 13-source discovery when available.
+
+    Falls back transparently to the built-in three-source ``search_papers``
+    when the scansci-find CLI is missing or the discovery call fails. Author
+    search always stays on the built-in OpenAlex path (ScanSci Find exposes
+    no author-specific endpoint through its CLI).
+
+    Result fields are unchanged (doi/title/authors/year/cited_by_count/is_oa/
+    oa_url/source) so existing callers are unaffected.
+    """
+    if author_id or author:
+        return search_papers(
+            query, limit=limit, year_from=year_from, year_to=year_to, sort=sort,
+            author=author, author_id=author_id,
+        )
+    if not query:
+        return []
+
+    try:
+        from .discovery import find_cli_available, search as discovery_search, to_legacy_results
+        if not find_cli_available():
+            return search_papers(query, limit=limit, year_from=year_from, year_to=year_to, sort=sort)
+        with tempfile.TemporaryDirectory(prefix="scansci_find_") as tmp:
+            payload = discovery_search(
+                query, tmp, depth="quick", limit=max(limit * 3, 30),
+                year_from=year_from, year_to=year_to,
+            )
+            results = to_legacy_results(payload.get("candidates") or [], limit=limit * 3)
+        logger.info("search: discovery engine returned %d results", len(results))
+    except Exception as exc:  # noqa: BLE001 - degrade gracefully to 3-source search
+        logger.warning("search: discovery engine failed (%s), falling back to 3-source", exc)
+        return search_papers(query, limit=limit, year_from=year_from, year_to=year_to, sort=sort)
+
+    if sort == "cited_by_count":
+        results.sort(key=lambda x: x.get("cited_by_count", 0), reverse=True)
+    elif sort == "publication_date":
+        results.sort(key=lambda x: x.get("year", 0), reverse=True)
+    return results[:limit]
 
 
 def search_papers(
