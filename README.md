@@ -123,6 +123,8 @@ scansci-pdf run --mode streamable_http --host 0.0.0.0 --port 8000
 | `instsci_school` | 空 | WebVPN 学校名称 |
 | `carsi_enabled` | `false` | 启用 CARSI |
 | `carsi_idp_name` | 空 | CARSI 机构名称 |
+| `auto_relogin` | `true` | 机构会话自愈：下载走机构渠道前自动校验 WebVPN 会话，已过期时打开浏览器重新登录。仅当存在历史 cookie 且校验明确判定过期才触发；新用户或网络不可达绝不弹浏览器 |
+| `cache_ttl_hours` | `168` | 全局下载缓存与 `.doi_index.json` 的 TTL（小时）；设为 0 禁用过期 |
 | `elsevier_api_key` | 空 | Elsevier / ScienceDirect API Key |
 | `elsevier_insttoken` | 空 | Elsevier institutional token，可选 |
 | `browser_headless` | `false` | 浏览器是否无头运行 |
@@ -395,6 +397,16 @@ scansci-pdf config --proxy-pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080,socks
 | `oa_first` | 优先开放获取，Sci-Hub 兜底 |
 | `scihub_only` | 仅使用 Sci-Hub |
 | `legal_only` | 仅使用合法数据源（不含 Sci-Hub/LibGen） |
+
+### 缓存与重下语义
+
+- 每个输出目录的 `.doi_index.json` 记录 `{file, source, strategy, ts}`；条目超过 `cache_ttl_hours` 视为过期，自动重新下载（旧版纯路径格式自动兼容升级）。
+- 显式策略（`scihub_only` / `legal_only` / `scihub_first`）与缓存记录策略不符时视为未命中重新下载，无需手动 `rm` 缓存；默认 `fastest` / `oa_first` 命中缓存。
+- 全局下载缓存（`cache_ttl_hours`，默认 168 小时）按 mtime 过期，`scansci_pdf_cache_clear` 可整体清空。
+
+### 机构会话自愈
+
+下载进入机构阶段前会自动校验 WebVPN 会话（HTTP 探测登录页重定向）。判定过期且 `auto_relogin=true`（默认）时自动打开浏览器重新登录后再继续；新用户（无 cookie）或网络不可达时不会弹浏览器。CARSI 会话在 `login()` 内自带 24 小时新鲜度校验与自动重登。
 
 ---
 

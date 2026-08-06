@@ -358,7 +358,9 @@ def webvpn_login(config: dict[str, Any]) -> bool:
 
     from .config import DATA_DIR
     cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
-    cookie_file = cache_dir / "instsci_cookies.json"
+    # Canonical name matches the loader in instsci.instsci_cookie_path; the
+    # loader also accepts the legacy underscore variant for migration.
+    cookie_file = cache_dir / "instsci-cookies.json"
 
     return open_login_browser(base, config, cookie_file=cookie_file, max_wait=600)
 

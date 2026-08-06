@@ -517,14 +517,87 @@ def _run_tiers_parallel(
     return None
 
 
-def _update_doi_index(target_dir: Path, doi: str, file_path: Path) -> None:
-    """Update the DOI→file index for dedup."""
+#: Strategies that encode an explicit user source preference. For these, a
+#: cached file obtained through a different strategy is treated as a miss so
+#: the requested channel is actually used; the default strategies reuse cache.
+_EXPLICIT_STRATEGIES = ("scihub_only", "legal_only", "scihub_first")
+
+
+def _index_entry(entry: Any) -> dict[str, Any] | None:
+    """Normalize a .doi_index entry to a record dict.
+
+    Legacy ``str -> path`` entries have no provenance and no timestamp; they
+    are treated as fresh (ts=None) and upgraded on the next cache hit.
+    """
+    if isinstance(entry, str):
+        return {"file": entry, "source": "", "strategy": "", "ts": None}
+    if isinstance(entry, dict):
+        ts = entry.get("ts")
+        try:
+            ts_value = float(ts) if ts is not None else None
+        except (TypeError, ValueError):
+            ts_value = None
+        return {
+            "file": str(entry.get("file") or ""),
+            "source": str(entry.get("source") or ""),
+            "strategy": str(entry.get("strategy") or ""),
+            "ts": ts_value,
+        }
+    return None
+
+
+def _index_entry_is_fresh(entry: dict[str, Any], config: dict[str, Any]) -> bool:
+    """Apply the cache TTL (cache_ttl_hours) to an index entry."""
+    try:
+        ttl_hours = float(config.get("cache_ttl_hours", 168))
+    except (TypeError, ValueError):
+        ttl_hours = 168.0
+    if ttl_hours <= 0 or entry.get("ts") is None:
+        return True
+    return (time.time() - entry["ts"]) <= ttl_hours * 3600
+
+
+def _index_strategy_compatible(entry: dict[str, Any], config: dict[str, Any]) -> bool:
+    """Honor an explicitly requested download strategy over cached files."""
+    current = str(config.get("download_strategy") or "fastest").strip()
+    if current not in _EXPLICIT_STRATEGIES:
+        return True
+    recorded = str(entry.get("strategy") or "").strip()
+    return recorded == current
+
+
+def _update_doi_index(
+    target_dir: Path,
+    doi: str,
+    file_path: Path,
+    *,
+    source: str = "",
+    strategy: str = "",
+    config: dict[str, Any] | None = None,
+) -> None:
+    """Update the DOI→file index for dedup.
+
+    Records carry provenance (``source``/``strategy``) and a timestamp so
+    stale or channel-mismatched entries can be invalidated by TTL and by
+    explicit strategy changes instead of manual ``rm``. Existing entries keep
+    their recorded source/strategy when the caller does not supply new ones
+    (e.g. a rename that just moves the file).
+    """
     doi_index = target_dir / ".doi_index.json"
     try:
-        idx: dict[str, str] = {}
+        idx: dict[str, Any] = {}
         if doi_index.exists():
             idx = json.loads(doi_index.read_text(encoding="utf-8"))
-        idx[doi] = str(file_path)
+        existing = _index_entry(idx.get(doi)) if doi in idx else None
+        if existing:
+            source = source or existing["source"]
+            strategy = strategy or existing["strategy"]
+        idx[doi] = {
+            "file": str(file_path),
+            "source": source or "",
+            "strategy": strategy or (config or {}).get("download_strategy", "") or "",
+            "ts": time.time(),
+        }
         doi_index.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
@@ -549,7 +622,14 @@ def _auto_rename(result: dict[str, Any], identifier: str, config: dict[str, Any]
             log.info(f"   Renamed: {file_path.name} -> {new_path.name}")
             # Update DOI→file index for dedup
             if target_dir and _doi:
-                _update_doi_index(target_dir, _doi, new_path)
+                _update_doi_index(
+                    target_dir,
+                    _doi,
+                    new_path,
+                    source=result.get("source") or "",
+                    strategy=config.get("download_strategy", ""),
+                    config=config,
+                )
         else:
             log.info(f"   Kept original name: {file_path.name}")
     else:
@@ -612,22 +692,32 @@ def download(
     if doi_index.exists():
         try:
             idx = json.loads(doi_index.read_text(encoding="utf-8"))
-            entry = idx.get(doi)
-            if entry:
-                candidate = Path(entry)
-                if candidate.exists():
-                    log.info(f"   Found existing file (index): {candidate.name}")
-                    result = {
-                        "success": True, "identifier": identifier,
-                        "doi": doi, "file": str(candidate),
-                        "source": "local_cache", "cached": True,
-                    }
-                    cache_set(identifier, result, config)
-                    return result
-                else:
-                    # Stale entry — file was deleted
-                    del idx[doi]
-                    doi_index.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
+            raw_entry = idx.get(doi)
+            if raw_entry:
+                entry = _index_entry(raw_entry)
+                candidate = Path(entry["file"]) if entry and entry.get("file") else None
+                if entry and candidate and _index_entry_is_fresh(entry, config) and _index_strategy_compatible(entry, config):
+                    if candidate.exists():
+                        log.info(f"   Found existing file (index): {candidate.name}")
+                        result = {
+                            "success": True, "identifier": identifier,
+                            "doi": doi, "file": str(candidate),
+                            "source": "local_cache", "cached": True,
+                        }
+                        # Upgrade legacy entries to records and refresh provenance.
+                        idx[doi] = {
+                            "file": str(candidate),
+                            "source": entry["source"] or "local_cache",
+                            "strategy": entry["strategy"] or config.get("download_strategy", ""),
+                            "ts": time.time(),
+                        }
+                        doi_index.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
+                        cache_set(identifier, result, config)
+                        return result
+                # Stale (file deleted), TTL-expired, or strategy-mismatched entry —
+                # drop it so the download is retried instead of serving stale state.
+                del idx[doi]
+                doi_index.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 
@@ -654,7 +744,14 @@ def download(
         log.info("   [L0] arXiv direct")
         result = try_arxiv(identifier, output_path, config)
         if result:
-            _update_doi_index(target_dir, identifier, Path(result.get("file", "")))
+            _update_doi_index(
+                target_dir,
+                identifier,
+                Path(result.get("file", "")),
+                source=result.get("source") or "arXiv",
+                strategy=config.get("download_strategy", ""),
+                config=config,
+            )
             if rename:
                 _auto_rename(result, identifier, config, doi=identifier, target_dir=target_dir)
             cache_set(identifier, result, config)
@@ -673,7 +770,14 @@ def download(
             [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
         )
         if result:
-            _update_doi_index(target_dir, doi, Path(result.get("file", "")))
+            _update_doi_index(
+                target_dir,
+                doi,
+                Path(result.get("file", "")),
+                source=result.get("source") or "",
+                strategy=config.get("download_strategy", ""),
+                config=config,
+            )
             if rename:
                 _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
             cache_set(identifier, result, config)
@@ -685,6 +789,15 @@ def download(
     # Phase 2: Institutional access — only when Phase 1 failed
     # Skip institutional fallback for grey_only/scihub_only strategy
     if _institutional and config.get("download_strategy") not in ("scihub_only", "grey_only"):
+        # Session self-healing: validate and refresh institutional sessions
+        # before racing them (WebVPN only; CARSI self-heals inside login()).
+        try:
+            from ..session_heal import ensure_institutional_sessions
+            heal_report = ensure_institutional_sessions(config, use_vpnsci=use_vpnsci)
+            for channel, state in heal_report.items():
+                log.info(f"   [session-heal] {channel}: {state.get('status')}")
+        except Exception as exc:
+            log.info(f"   [session-heal] skipped: {exc}")
         inst_sources = _build_institutional_sources(doi, config, use_vpnsci=use_vpnsci)
         if inst_sources:
             log.info("   Phase 1 failed, trying institutional access...")
@@ -692,7 +805,14 @@ def download(
                 [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30
             )
             if result:
-                _update_doi_index(target_dir, doi, Path(result.get("file", "")))
+                _update_doi_index(
+                    target_dir,
+                    doi,
+                    Path(result.get("file", "")),
+                    source=result.get("source") or "",
+                    strategy=config.get("download_strategy", ""),
+                    config=config,
+                )
                 if rename:
                     _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
                 cache_set(identifier, result, config)
