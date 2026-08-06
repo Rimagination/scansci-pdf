@@ -45,6 +45,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "carsi_idp_name": "",
     "ezproxy_enabled": False,
     "ezproxy_login_url": "",
+    # 机构会话自愈：下载走机构渠道前自动校验 WebVPN/CARSI 会话，
+    # 已过期时打开浏览器重新登录。仅当存在历史 cookie 且校验明确判定
+    # 过期才触发；新用户或网络不可达绝不弹浏览器。
+    "auto_relogin": True,
     "core_api_key": "",
     "openalex_api_key": "",
     "elsevier_api_key": "",

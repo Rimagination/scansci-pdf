@@ -168,7 +168,12 @@ def _load_cookies(config: dict[str, Any]) -> requests.cookies.RequestsCookieJar:
     path = instsci_cookie_path(config)
     jar = requests.cookies.RequestsCookieJar()
     if not path.exists():
-        return jar
+        # Legacy underscore variant written by older browser_login versions.
+        legacy = Path(str(path).replace("instsci-cookies.json", "instsci_cookies.json"))
+        if legacy.exists():
+            path = legacy
+        else:
+            return jar
     try:
         cookies = json.loads(path.read_text(encoding="utf-8"))
         for c in cookies:
@@ -193,15 +198,21 @@ def _save_cookies(cookies: list[dict], config: dict[str, Any]) -> None:
     log.info(f"   [WebVPN] Saved {len(cookies)} cookies")
 
 
-def _validate_session(config: dict[str, Any]) -> bool:
-    """Check if saved cookies still work."""
-    from ..network import USER_AGENT
+def session_status(config: dict[str, Any]) -> str:
+    """Classify the WebVPN session: ``none`` | ``valid`` | ``expired`` | ``unreachable``.
+
+    ``none``: no cookies or no base configured (fresh user — never auto-login).
+    ``expired``: cookies exist but the probe lands on a CAS/login page.
+    ``unreachable``: the probe failed for network reasons — do not treat as
+    expired, so auto re-login is not triggered during an outage.
+    """
     jar = _load_cookies(config)
     if not jar:
-        return False
+        return "none"
     base = _get_webvpn_base(config)
     if not base:
-        return False
+        return "none"
+    from ..network import USER_AGENT
     test_url = convert_url("https://www.nature.com", base, config)
     try:
         s = requests.Session()
@@ -210,10 +221,15 @@ def _validate_session(config: dict[str, Any]) -> bool:
         resp = s.get(test_url, timeout=15, allow_redirects=True,
                      headers={"User-Agent": USER_AGENT})
         if "cas" in resp.url.lower() or "login" in resp.url.lower():
-            return False
-        return resp.status_code == 200
+            return "expired"
+        return "valid" if resp.status_code == 200 else "unreachable"
     except Exception:
-        return False
+        return "unreachable"
+
+
+def _validate_session(config: dict[str, Any]) -> bool:
+    """Check if saved cookies still work."""
+    return session_status(config) == "valid"
 
 
 def instsci_login(config: dict[str, Any]) -> bool:
