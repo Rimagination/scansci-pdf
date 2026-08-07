@@ -408,6 +408,21 @@ scansci-pdf config --proxy-pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080,socks
 
 下载进入机构阶段前会自动校验 WebVPN 会话（HTTP 探测登录页重定向）。判定过期且 `auto_relogin=true`（默认）时自动打开浏览器重新登录后再继续；新用户（无 cookie）或网络不可达时不会弹浏览器。CARSI 会话在 `login()` 内自带 24 小时新鲜度校验与自动重登。
 
+### 与 ScanSci Find 的闭环
+
+```bash
+# 1. 发现（13 源引擎 + 可选 preprint/代码补全/排序）
+scansci-pdf find "urban heat island" --out runs/x --depth standard --find-preprints --code-links --sort recency
+# 2a. 按 oa_manifest 路由下载：open_pdf 直下，needs_institution 走机构阶段
+scansci-pdf manifest runs/x/oa_manifest.json --output runs/x/pdfs
+# 2b. 或批量下载（--runs-dir 自动用队列 + 预印本兜底：付费墙失败的 DOI 用 arXiv 预印本重试）
+scansci-pdf batch queue.txt --scihub --runs-dir runs/x --output runs/x/pdfs
+# 3. 结果回写：batch/manifest 产出 download_results.json，find 侧 reconcile 更新候选状态
+scansci-find reconcile runs/x
+```
+
+`batch` 与 `manifest` 都会在输出目录写 `download_results.json`（成功来源/失败原因），`scansci-find reconcile` 将其回写为候选的实况状态（`downloaded`/`anti_bot_blocked`/`html_not_pdf` 等）。
+
 ---
 
 ## 付费墙：机构登录
