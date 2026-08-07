@@ -402,15 +402,27 @@ def batch_fetch_cmd(
     output: str = typer.Option(".", help="Output directory (default: current directory)"),
     format: str = typer.Option("json", help="Output format: json, text"),
     scihub: bool = typer.Option(False, "--scihub", help="Use Sci-Hub racing engine (includes grey sources) instead of institutional cascade"),
+    runs_dir: str = typer.Option("", "--runs-dir", help="ScanSci Find run directory: use its download queue as input and its preprint arXiv IDs as fallbacks for failed DOIs"),
 ) -> None:
     """Batch fetch papers. Default: institutional cascade. Use --scihub for grey-source racing."""
     import json as _json
     from .config import load_config as _load_config
 
-    dois = [
-        line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
+    fallbacks: dict[str, list[str]] | None = None
+    if runs_dir:
+        from .discovery import build_download_queue, build_preprint_fallbacks
+        run_identifiers = build_download_queue(runs_dir)
+        fallbacks = build_preprint_fallbacks(runs_dir) or None
+        if not run_identifiers:
+            print(f"  No identifiers found in {runs_dir}/download_queue.json")
+            return
+        dois = run_identifiers
+        print(f"  Using ScanSci Find queue from {runs_dir}: {len(dois)} identifiers")
+    else:
+        dois = [
+            line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
     if not dois:
         print("  No DOIs/URLs found in input file.")
         return
@@ -425,7 +437,7 @@ def batch_fetch_cmd(
     if _auto_scihub:
         # Use the source-racing engine (includes Sci-Hub/SciBban/LibGen)
         from .sources import batch_download
-        results = batch_download(dois, output_dir=output, scihub_enabled=True)
+        results = batch_download(dois, output_dir=output, scihub_enabled=True, fallbacks=fallbacks)
         # Verify file existence for each "success" result before writing report
         _verify_batch_results(results, output)
         if format == "json":
@@ -801,6 +813,9 @@ def find_cmd(
     citation_source: str = typer.Option("semantic", "--citation-source"),
     verify_identifiers: bool = typer.Option(False, "--verify-identifiers"),
     resolve_oa: bool = typer.Option(False, "--resolve-oa"),
+    find_preprints: bool = typer.Option(False, "--find-preprints", help="Find lawful preprint copies of paywalled candidates"),
+    code_links: bool = typer.Option(False, "--code-links", help="Attach Papers with Code code-availability metadata"),
+    sort: str = typer.Option("", "--sort", help="relevance | recency | citations"),
     year_from: int = typer.Option(None, "--year-from"),
     year_to: int = typer.Option(None, "--year-to"),
 ) -> None:
@@ -819,6 +834,7 @@ def find_cmd(
         expand_citations=expand_citations, citation_source=citation_source,
         citation_rounds=citation_rounds,
         verify_identifiers=verify_identifiers, resolve_oa=resolve_oa,
+        find_preprints=find_preprints, code_links=code_links, sort=sort,
         year_from=year_from, year_to=year_to,
     )
     queue = build_download_queue(out)
@@ -828,6 +844,72 @@ def find_cmd(
     print(f"  Artifacts: {out}")
     if queue:
         print(f"  Next: scansci-pdf build-queue {out} --out queue.txt && scansci-pdf batch queue.txt")
+
+
+@app.command("manifest")
+def manifest_cmd(
+    input_file: str = typer.Argument(help="oa_manifest.json produced by scansci-find"),
+    output: str = typer.Option(".", help="Output directory"),
+    scihub: bool = typer.Option(False, "--scihub", help="Allow grey sources for non-eligible entries"),
+    use_tor: bool = typer.Option(False, "--use-tor"),
+    use_vpnsci: bool = typer.Option(True, "--use-vpnsci", help="Enable WebVPN/institutional phase for needs_institution entries"),
+) -> None:
+    """Download per a ScanSci Find oa_manifest.
+
+    Eligible entries (open_pdf/preprint with a PDF URL) are fetched directly
+    from the manifest URL; needs_institution entries go through the racing
+    engine with the institutional phase enabled. Writes download_results.json
+    so scansci-find reconcile can write results back into the candidate set.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from .identifiers import safe_filename
+    from .pdf_utils import download_pdf, is_pdf_file
+    from .sources import _update_doi_index, download
+
+    payload = _json.loads(_Path(input_file).read_text(encoding="utf-8"))
+    entries = payload.get("entries") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        print("  Invalid manifest: expected a list of entries or {'entries': [...]}")
+        raise typer.Exit(1)
+    config = load_config()
+    out_dir = _Path(output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    direct_hits = 0
+    for entry in entries:
+        identifier = str(entry.get("identifier") or "").strip()
+        if not identifier:
+            continue
+        status = str(entry.get("download_status") or "")
+        pdf_url = str(entry.get("pdf_url") or "").strip()
+        if status == "eligible" and pdf_url:
+            out_path = out_dir / f"{safe_filename(identifier)}.pdf"
+            result = download_pdf(pdf_url, out_path, config, source="oa_manifest")
+            if result and result.get("success") and is_pdf_file(out_path):
+                result["identifier"] = identifier
+                result["doi"] = identifier
+                result["cached"] = False
+                _update_doi_index(out_dir, identifier, out_path, source="oa_manifest", strategy=config.get("download_strategy", ""), config=config)
+                results.append(result)
+                direct_hits += 1
+                continue
+            print(f"  Direct PDF failed for {identifier}, falling back to engine")
+        result = download(identifier, out_dir, scihub_enabled=scihub, use_tor=use_tor, use_vpnsci=use_vpnsci)
+        results.append(result)
+
+    succeeded = sum(1 for r in results if r and r.get("success"))
+    report = {
+        "total": len(results),
+        "direct_downloads": direct_hits,
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "results": results,
+    }
+    (out_dir / "download_results.json").write_text(_json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(_json.dumps(report, indent=2, ensure_ascii=False))
 
 
 @app.command("config-cmd")

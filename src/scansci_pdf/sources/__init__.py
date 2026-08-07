@@ -1152,6 +1152,69 @@ def _batch_institutional_phase(
         _save_progress(batch_id, doi, result)
 
 
+def _write_download_results(results: list[dict[str, Any]], output_dir: str | Path | None, **extra: Any) -> None:
+    """Persist batch outcomes as download_results.json for scansci-find reconcile."""
+    try:
+        out = Path(output_dir) if output_dir else Path(load_config().get("output_dir", "."))
+        out.mkdir(parents=True, exist_ok=True)
+        report: dict[str, Any] = {
+            "service": "scansci-pdf",
+            "total": len(results),
+            "succeeded": sum(1 for r in results if r and r.get("success")),
+            "entries": [
+                {
+                    "identifier": r.get("identifier") or r.get("doi") or "",
+                    "doi": r.get("doi") or "",
+                    "success": bool(r.get("success")),
+                    "source": r.get("source") or "",
+                    "file": r.get("file") or "",
+                    "cached": bool(r.get("cached")),
+                    "preprint_fallback": r.get("preprint_fallback") or "",
+                    "error_type": r.get("error_type") or "",
+                    "reason": r.get("reason") or r.get("error") or "",
+                }
+                for r in results
+                if r
+            ],
+        }
+        report.update(extra)
+        (out / "download_results.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _apply_preprint_fallbacks(
+    fallbacks: dict[str, list[str]],
+    identifiers: list[str],
+    final_map: dict[str, dict[str, Any]],
+    batch_id: str,
+    *,
+    output_dir: str | Path | None,
+    scihub_enabled: bool | None,
+    use_tor: bool,
+    use_vpnsci: bool,
+) -> None:
+    """Retry failed DOIs with their matched preprint arXiv IDs, in place.
+
+    Updates ``final_map`` (and the batch progress file) when a fallback
+    download succeeds so downstream result aggregation picks it up.
+    """
+    for ident in [i for i in identifiers if not (final_map.get(i) or {}).get("success")]:
+        for fallback_id in fallbacks.get(ident, []):
+            log.info(f"   [Fallback] {ident} -> preprint {fallback_id}")
+            fb_result = download(
+                fallback_id, output_dir,
+                scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=False, _institutional=False,
+            )
+            if fb_result and fb_result.get("success"):
+                fb_result["identifier"] = ident
+                fb_result["doi"] = ident
+                fb_result["preprint_fallback"] = fallback_id
+                _save_progress(batch_id, ident, fb_result)
+                final_map[ident] = fb_result
+                break
+
+
 def batch_download(
     identifiers: list[str],
     output_dir: str | Path | None = None,
@@ -1162,6 +1225,7 @@ def batch_download(
     progress_callback: Any = None,
     batch_id: str | None = None,
     resume: bool = True,
+    fallbacks: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     config = load_config()
     workers = config.get("batch_workers", 5)
@@ -1201,7 +1265,7 @@ def batch_download(
         log.info("All items already completed")
         all_results = [completed_map[i] for i in unique_identifiers]
         succeeded = sum(1 for r in all_results if r.get("success"))
-        return {
+        summary = {
             "total": len(identifiers),
             "unique": len(unique_identifiers),
             "skipped_duplicates": skipped_duplicates,
@@ -1212,6 +1276,8 @@ def batch_download(
             "failed_dois": [i for i in unique_identifiers if not completed_map.get(i, {}).get("success")],
             "batch_id": batch_id,
         }
+        _write_download_results(all_results, output_dir)
+        return summary
 
     # Pre-validate DOIs concurrently
     from ..identifiers import validate_doi
@@ -1325,6 +1391,14 @@ def batch_download(
     # Reload progress to include newly-saved invalid results
     final_map = _load_progress(batch_id)
 
+    # Preprint fallback: DOIs that failed every phase retry with the arXiv
+    # preprint IDs recorded in the ScanSci Find download queue (fallbacks map).
+    if fallbacks:
+        _apply_preprint_fallbacks(
+            fallbacks, pending_identifiers, final_map, batch_id,
+            output_dir=output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci,
+        )
+
     # Build a lookup from pending_identifiers → download results
     pending_results = dict(zip(pending_identifiers, results))
 
@@ -1347,7 +1421,7 @@ def batch_download(
     if not failed_dois:
         _clear_progress(batch_id)
 
-    return {
+    summary = {
         "total": len(identifiers),
         "unique": len(unique_identifiers),
         "skipped_duplicates": skipped_duplicates,
@@ -1359,3 +1433,5 @@ def batch_download(
         "failed_dois": failed_dois,
         "batch_id": batch_id,
     }
+    _write_download_results(all_results, output_dir)
+    return summary

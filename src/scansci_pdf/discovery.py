@@ -168,7 +168,8 @@ def search(query: str, out_dir: str | Path, *, domain: str = "general",
            year_to: int | None = None, sources: list[str] | None = None,
            expand_citations: bool = False, citation_source: str = "semantic",
            citation_rounds: int | None = None, verify_identifiers: bool = False,
-           resolve_oa: bool = False) -> dict[str, Any]:
+           resolve_oa: bool = False, find_preprints: bool = False,
+           code_links: bool = False, sort: str = "") -> dict[str, Any]:
     """Run a ScanSci Find search into ``out_dir`` and return its artifacts.
 
     Returns {"out": str, "total": int, "candidates": [...], "download_queue": [...]}.
@@ -191,6 +192,12 @@ def search(query: str, out_dir: str | Path, *, domain: str = "general",
         args += ["--verify-identifiers"]
     if resolve_oa:
         args += ["--resolve-oa"]
+    if find_preprints:
+        args += ["--find-preprints"]
+    if code_links:
+        args += ["--code-links"]
+    if sort:
+        args += ["--sort", sort]
     summary = _run(args, timeout=600 if expand_citations else DEFAULT_TIMEOUT)
 
     payload: dict[str, Any] = {
@@ -285,6 +292,29 @@ def build_download_queue(out_dir: str | Path) -> list[str]:
                     identifiers.append(str(value))
                     break
     return identifiers
+
+
+def build_preprint_fallbacks(out_dir: str | Path) -> dict[str, list[str]]:
+    """Map queue DOIs to their matched preprint arXiv IDs for fallback retries.
+
+    Reads ``preprint_identifiers`` from each download_queue entry so a batch
+    that fails on a paywalled DOI can retry the open preprint version.
+    """
+    out = Path(out_dir)
+    queue = _read_json(out / "download_queue.json", default=[])
+    fallbacks: dict[str, list[str]] = {}
+    for entry in queue:
+        if not isinstance(entry, dict):
+            continue
+        identifier = str(entry.get("identifier") or entry.get("doi") or "").strip()
+        preprint_values = []
+        for item in entry.get("preprint_identifiers") or []:
+            value = str(item.get("value") or "").strip()
+            if value:
+                preprint_values.append(value)
+        if identifier and preprint_values:
+            fallbacks[identifier] = preprint_values
+    return fallbacks
 
 
 def to_legacy_results(candidates: list[dict[str, Any]], *, limit: int = 20) -> list[dict[str, Any]]:
