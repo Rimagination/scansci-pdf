@@ -618,8 +618,8 @@ ScanSci PDF 会自动检测 Cloudflare 并回退到 FlareSolverr，无需手动�
 
 <a href="https://www.star-history.com/?repos=Rimagination%2Fscansci-pdf&type=date&legend=top-left">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Rimagination/scansci-pdf&type=date&theme=dark&legend=top-left&sealed_token=8pDjpXBg9FQXpm48tO6mQWLFO21sygFgvN3eX2sFMSRUGNfjWDWdNZ24u4P0gZn_OXud2hLYNTWVs5tZ6UHOmX1lE20H0BRvPUtlFgtfcSmLIQ8CJtFgv8IJ" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Rimagination/scansci-pdf&type=date&legend=top-left&sealed_token=8pDjpXBg9FQXpm48tO6mQWLFO21sygFgvN3eX2sFMSRUGNfjWDWdNZ24u4P0gZn_OXud2hLYNTWVs5tZ6UHOmX1lE20H0BRvPUtlFgtfcSmLIQ8CJtFgv8IJ" />
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Rimagination/scansci-pdf&type=date&legend=top-left&sealed_token=8pDjpXBg9FQXpm48tO6mQWLFO21sygFgvN3eX2sFMSRUGNfjWDWdNZ24u4P0gZn_OXud2hLYNTWVs5tZ6UHOmX1lE20H0BRvPUtlFgtfcSmLIQ8CJtFgv8IJ" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Rimagination/scansci-pdf&type=date&theme=dark&legend=top-left&sealed_token=-3REmYoQw3gcSqlHpnO43mv0pAj10Pk-39tqCU4YolzW87eaEZIg68TcqHKMA9aaxLeUNqLANcEbSQmlSgzhAnFqtuUvML7Ne_7SMhtJtLJ_i37QH-6S_YX2" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Rimagination/scansci-pdf&type=date&legend=top-left&sealed_token=-3REmYoQw3gcSqlHpnO43mv0pAj10Pk-39tqCU4YolzW87eaEZIg68TcqHKMA9aaxLeUNqLANcEbSQmlSgzhAnFqtuUvML7Ne_7SMhtJtLJ_i37QH-6S_YX2" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Rimagination/scansci-pdf&type=date&legend=top-left&sealed_token=-3REmYoQw3gcSqlHpnO43mv0pAj10Pk-39tqCU4YolzW87eaEZIg68TcqHKMA9aaxLeUNqLANcEbSQmlSgzhAnFqtuUvML7Ne_7SMhtJtLJ_i37QH-6S_YX2" />
   </picture>
 </a>
