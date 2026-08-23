@@ -3,7 +3,10 @@
 import logging
 import sys
 
-from mcp.server.fastmcp import FastMCP
+try:  # MCP SDK >= 2.0 renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except ImportError:  # MCP SDK 1.x
+    from mcp.server.fastmcp import FastMCP
 
 from .config import load_config, save_config
 from .institutional.config_adapter import ConfigAdapter
