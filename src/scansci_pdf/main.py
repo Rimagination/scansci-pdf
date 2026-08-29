@@ -499,7 +499,7 @@ def _verify_batch_results(results: dict, output_dir: str) -> None:
 @app.command("elsevier-setup")
 def elsevier_setup(
     api_key: str = typer.Option("", help="Elsevier API key"),
-    inst_token: str = typer.Option("", help="Elsevier institutional token"),
+    inst_token: str = typer.Option("", help="Elsevier institutional token（可选，通常无需配置：校园网 + API key 即可）"),
 ) -> None:
     """Configure Elsevier API access for direct full-text retrieval."""
     from .config import load_config, save_config
@@ -520,8 +520,10 @@ def elsevier_setup(
         has_key = bool(config.get("elsevier_api_key"))
         has_token = bool(config.get("elsevier_insttoken"))
         print(f"  Elsevier API key:   {'set' if has_key else '(not set)'}")
-        print(f"  Elsevier inst token: {'set' if has_token else '(not set)'}")
-        print(f"\n  Usage: scansci-pdf elsevier-setup --api-key YOUR_KEY --inst-token YOUR_TOKEN")
+        print(f"  Elsevier inst token: {'set' if has_token else '(not set, 通常不需要)'}")
+        print(f"\n  Usage: scansci-pdf elsevier-setup --api-key YOUR_KEY")
+        print(f"\n  提示：insttoken 通常不需要——API key + 校园网/机构网络出口即可。")
+        print(f"  NOT_ENTITLED 表示未连校园网或学校未订阅该刊，不是缺 insttoken。")
 
 
 @app.command("session-doctor")

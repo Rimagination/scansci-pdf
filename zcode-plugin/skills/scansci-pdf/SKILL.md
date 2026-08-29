@@ -71,6 +71,7 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 | cloakbrowser 内核过老 | `config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"` |
 | 所有源超时 | 查 `network_proxy`;本机代理可能没启动,先测端口 |
 | Elsevier 只回 1 页预览 | key 无效/无权限,重新 setup --validate |
+| Agent 坚持要 Elsevier insttoken | 不需要:API key + 校园网出口即可;NOT_ENTITLED=未连校园网或学校未订阅,连网重试或转其他渠道 |
 | MCP 无 `scansci_pdf_*` 工具 | plugin 未启用 → 走 CLI 兜底 |
 | 403/超时 ≠ 无全文 | 多为反爬或网络受限,留给浏览器/代理轮 |
 

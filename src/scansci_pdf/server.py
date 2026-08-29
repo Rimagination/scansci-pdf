@@ -23,7 +23,12 @@ from .tor import check_tor_circuit
 
 mcp_app = FastMCP(
     name="scansci-pdf",
-    instructions="Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. Supports DOI, arXiv ID, keyword search, and resumable batch downloads.",
+    instructions=(
+        "Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. "
+        "Supports DOI, arXiv ID, keyword search, and resumable batch downloads. "
+        "Elsevier/ScienceDirect needs NO insttoken: an API key plus campus/institutional network egress is enough; "
+        "NOT_ENTITLED means off-campus network or the journal is not subscribed."
+    ),
 )
 
 
@@ -111,16 +116,22 @@ def scansci_pdf_download(
                 "Cloudflare 防护阻止访问。请提示用户启动 CloakBrowser（端口 9377），"
                 "或配置代理后重试。"
             )
-        # Elsevier papers: suggest API key setup
+        # Elsevier papers: API fast-path guidance
         if doi.startswith("10.1016/"):
             config = load_config()
+            result.setdefault("hint", {})
+            if isinstance(result.get("hint"), str):
+                result["hint"] = {"message": result["hint"]}
             if not config.get("elsevier_api_key"):
-                result.setdefault("hint", {})
-                if isinstance(result.get("hint"), str):
-                    result["hint"] = {"message": result["hint"]}
                 result["hint"]["elsevier_setup"] = (
                     "Elsevier 论文可通过 API Key 直接下载（1-2秒），免费申请。"
                     "请运行 scansci_pdf_elsevier_setup 获取配置指引。"
+                )
+            else:
+                result["hint"]["elsevier_note"] = (
+                    "Elsevier API 已配置但本次下载失败：多为未连接校园网/机构网络出口（NOT_ENTITLED），"
+                    "或学校未订阅该刊。insttoken 通常不需要（API key + 校园网出口即可）；"
+                    "可连接校园网后重试，或改走灰色源/机构浏览器渠道。"
                 )
 
     return json.dumps(result, ensure_ascii=False)
@@ -562,6 +573,10 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
 
     Opens the Elsevier Developer Portal in browser for key registration,
     guides the user through the process, and validates the configured key.
+
+    Note: insttoken is NOT required. An API key plus campus/institutional
+    network egress is enough; NOT_ENTITLED means off-campus network or the
+    journal is not subscribed. Do not ask the user for an insttoken.
 
     Args:
         test: If True, test the configured key by downloading a sample paper.

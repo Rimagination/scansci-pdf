@@ -312,6 +312,7 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 | 现象 | 先做 |
 |---|---|
 | 下载失败 | `scansci-pdf check`，会话问题再跑 `scansci-pdf session-doctor` |
+| Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
 | 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_network_diagnose`，给出针对性修复建议 |
 | 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`scansci-pdf browser-doctor` 会标出 outdated） |
 | WebVPN / CARSI 登录失败 | `pip install "scansci-pdf[cloakbrowser,instsci]"`，在可见浏览器完成登录后重试 |
