@@ -59,7 +59,7 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 
 | 用户说 | 动作 |
 |---|---|
-| "下载这篇 <DOI/arXiv/文章页URL>" | `get <标识符>`;URL 直接喂,自动抽 DOI/arXiv;要补充材料加 `--si` |
+| "下载这篇 <DOI/arXiv/文章页URL>" | `get <标识符>`;URL 直接喂,自动抽 DOI/arXiv;要补充材料加 `--si`,要 AI 可读全文加 `--md`(PDF 仍是默认交付物) |
 | "某人的全部/近年论文" | `search --author "Name" --out queue.txt` → `batch queue.txt --lanes` |
 | "某主题/关键词 + 年份/被引过滤" | `search "kw" --year-from 2023 --sort cited_by_count [--out queue.txt]` |
 | "给一份清单(xlsx/csv/txt/bib/APA)" | `batch 文件 --lanes`(表格/队列自动识别;渠道按 DOI 前缀自动预测) |

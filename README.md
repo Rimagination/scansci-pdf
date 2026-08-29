@@ -194,6 +194,30 @@ scansci-pdf check                             # 依赖与环境体检
 
 付费墙论文优先走这四条机构通道。登录都在你自己的浏览器里完成，密码不经过本工具。
 
+<!-- publisher-table:start -->
+| 策略 | DOI 前缀 | 域名 |
+|---|---|---|
+| ACM | `10.1145/` | `dl.acm.org`, `acm.org` |
+| ACS | `10.1021/` | `pubs.acs.org` |
+| AIP | `10.1063/` | `pubs.aip.org`, `aip.org` |
+| APS | `10.1103/` | `journals.aps.org`, `aps.org` |
+| ASCE | `10.1061/` | `ascelibrary.org` |
+| Copernicus | `10.5194/` | `copernicus.org` |
+| Elsevier | `10.1016/`, `10.1016/j.`, `10.1016/j.cell`, `10.1016/j.oneear`, `10.1016/j.cels`, `10.1016/j.cub`, `10.1016/j.neuron`, `10.1016/j.molcel`, `10.1016/j.devcel`, `10.1016/j.immuni`, `10.1016/j.chom`, `10.1016/j.cmet`, `10.1016/j.stem`, `10.1016/j.celrep`, `10.1016/j.isci`, `10.1016/j.xcr`, `10.1016/j.heliyon`, `10.1016/j.ajhg` | `sciencedirect.com`, `linkinghub.elsevier.com` |
+| Generic | — | — |
+| IEEE | `10.1109/` | `ieeexplore.ieee.org`, `ieee.org` |
+| IOP | `10.1088/` | `iopscience.iop.org`, `iop.org` |
+| Nature | `10.1038/` | `nature.com` |
+| Oxford | `10.1093/` | `academic.oup.com`, `oup.com` |
+| Royal Society | `10.1098/` | `royalsocietypublishing.org` |
+| RSC | `10.1039/` | `pubs.rsc.org`, `rsc.org` |
+| SAGE | `10.1177/` | `journals.sagepub.com`, `sagepub.com` |
+| Science | `10.1126/` | `science.org`, `sciencemag.org` |
+| Springer | `10.1007/`, `10.1023/` | `link.springer.com`, `springer.com` |
+| Tandfonline | `10.1080/` | `tandfonline.com` |
+| Wiley | `10.1002/`, `10.1111/` | `onlinelibrary.wiley.com`, `wiley.com` |
+<!-- publisher-table:end -->
+
 ### Elsevier API（推荐，无需浏览器）
 
 ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 15–30 秒降到 1–2 秒。Key 申请免费、个人邮箱即可：

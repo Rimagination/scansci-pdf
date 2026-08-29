@@ -88,6 +88,7 @@ def scansci_pdf_download(
     bibtex: bool = False,
     strategy: str | None = None,
     download_si: bool = False,
+    markdown: bool = False,
 ) -> str:
     """Download a single academic paper by DOI or arXiv ID.
 
@@ -100,6 +101,7 @@ def scansci_pdf_download(
         bibtex: Also return BibTeX citation for this paper
         strategy: Override download strategy: fastest, scihub_only, scihub_first, oa_first, legal_only
         download_si: Also try to fetch Supplementary Information attachments next to the main PDF
+        markdown: Also export the PDF as agent-ready markdown (.md next to the PDF); PDF remains the default deliverable
     """
     result = download(identifier, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, bibtex=bibtex, strategy=strategy)
 
@@ -149,6 +151,14 @@ def scansci_pdf_download(
                 )
         except Exception as exc:
             result["supplementary_error"] = str(exc)
+
+    if result.get("success") and markdown:
+        try:
+            from .md_export import pdf_to_markdown
+
+            result["markdown"] = str(pdf_to_markdown(result["file"]))
+        except Exception as exc:
+            result["markdown_error"] = str(exc)
 
     return json.dumps(result, ensure_ascii=False)
 

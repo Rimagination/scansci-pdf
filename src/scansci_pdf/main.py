@@ -125,6 +125,7 @@ def get_paper(
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
     strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
     si: bool = typer.Option(False, "--si", help="Also fetch Supplementary Information attachments"),
+    md: bool = typer.Option(False, "--md", help="Also export the PDF as agent-ready markdown"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
     from .sources import download
@@ -139,6 +140,11 @@ def get_paper(
     if result.get("success"):
         print(f"  OK: {result.get('file', '')}")
         print(f"  Source: {result.get('source', '?')}")
+        if md:
+            from .md_export import pdf_to_markdown
+
+            md_path = pdf_to_markdown(result["file"])
+            print(f"  Markdown: {md_path}")
         if si:
             from .supplementary import fetch_supplementary
 
