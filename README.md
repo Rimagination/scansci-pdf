@@ -397,9 +397,13 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 ## Star History
 
 <p align="center">
-  <a href="https://www.star-history.com/?repos=Rimagination%2Fscansci-pdf&type=date&legend=top-left">
-    <img alt="Star History Chart" src="scansci-pdf-star-history-crop.png" width="860" />
+  <a href="https://star-history.com/#Rimagination/scansci-pdf&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Rimagination/scansci-pdf&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Rimagination/scansci-pdf&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Rimagination/scansci-pdf&type=Date" width="860" />
+    </picture>
   </a>
 </p>
 
-> Interactive/live chart: [Star History](https://www.star-history.com/?repos=Rimagination%2Fscansci-pdf&type=date&legend=top-left)
+> 图表实时更新，星数变化无需手动截图。
