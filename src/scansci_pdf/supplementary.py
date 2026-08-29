@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 
 _LINK_RE = re.compile(r"""href=["']([^"']+)["']""", re.I)
 _EXT_RE = re.compile(r"\.(pdf|docx?|xlsx?|pptx?|zip|gz|csv|txt)(?:[?#]|$)", re.I)
-_MARKER_RE = re.compile(r"(suppl|supp_|supporting|_si\d|/cms/|attachment|mmc\d)", re.I)
+_MARKER_RE = re.compile(r"(suppl|supp_|supporting|_si\d|/cms/|attachment|mmc\d|moesm)", re.I)
 _MAIN_PDF_RE = re.compile(r"(?:^|/)(?:main|mainext|article)\.pdf(?:[?#]|$)", re.I)
 
 
