@@ -70,3 +70,7 @@ cas_login*.png
 
 # Test download artifacts (downloaded PDFs, run records)
 test_downloads/
+
+# Agent scratch dirs (session-local)
+tmp/
+segmentation_platform/

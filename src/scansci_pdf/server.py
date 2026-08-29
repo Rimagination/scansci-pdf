@@ -10,7 +10,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from .cache import cache_clear, cache_get
-from .config import get_config_safe, load_config, update_config
+from .config import get_config_safe, load_config, mask_config_value, update_config
 from .network import fetch_json
 from .paperlist import PaperEntry, parse_paper_list
 from .resolver import batch_resolve
@@ -654,7 +654,7 @@ def scansci_pdf_config_set(key: str, value: str) -> str:
     """
     try:
         update_config(key, value)
-        return json.dumps({"success": True, "key": key, "value": value})
+        return json.dumps({"success": True, "key": key, "value": mask_config_value(key, value)})
     except Exception as exc:
         return json.dumps({"success": False, "key": key, "error": str(exc)})
 

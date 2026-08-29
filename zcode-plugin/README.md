@@ -11,7 +11,7 @@ ScanSci 学术文献全家桶 plugin:大清单嗅探分类 + 全场景下载检�
 | Skill | 场景 |
 |---|---|
 | `scansci-sort` | 大清单(数百篇+)分类摸底:OA / Sci-Hub / 需机构,嗅探优先不下载,产出分桶队列 |
-| `scansci-pdf` | 其余一切:单篇/批量下载、检索引文、机构渠道(Elsevier API/WebVPN/CARSI)、排障(随 `~/.agents/skills/scansci-pdf` 分发,用户目录优先) |
+| `scansci-pdf` | 其余一切:单篇/批量下载、检索引文、机构渠道(Elsevier API/WebVPN/CARSI)、排障(本插件已内置;用户目录若有同名 skill 则优先) |
 
 **Commands(4 个,快捷入口,不占上下文):**
 
@@ -24,7 +24,7 @@ ScanSci 学术文献全家桶 plugin:大清单嗅探分类 + 全场景下载检�
 
 ## 依赖
 
-- `scansci-pdf` CLI 在 PATH(`pip install -e <scansci-pdf 源码目录>`)
+- `scansci-pdf` CLI 在 PATH(`pip install -e <本仓库>` 或 `uv pip install -e .`;插件清单不负责安装 Python CLI,此为前置条件)
 - MCP server 由 plugin 自动注册:`scansci-pdf run`(stdio),无需手动配置
 
 ## 安装
@@ -33,4 +33,4 @@ Settings → Plugin Management → Discover → 添加本地目录(本目录)→
 
 ## 跨 agent 共享
 
-Claude Code / Codex 等不支持 ZCode plugin,用 shared-skill-installer 把 `skills/scansci-sort/` 同步到 `~/.agents/skills/`(scansci-pdf 主 skill 已在用户目录);commands 与 MCP 为 ZCode 专属。
+Claude Code / Codex 等不支持 ZCode plugin,用 shared-skill-installer 把 `skills/` 下两个 skill 同步到 `~/.agents/skills/`(本插件已内置,同名单以用户目录优先);commands 与 MCP 为 ZCode 专属。

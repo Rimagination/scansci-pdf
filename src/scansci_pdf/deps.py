@@ -16,6 +16,8 @@ CORE_DEPS = {
     "mcp": "MCP protocol",
     "typer": "CLI framework",
     "uvicorn": "ASGI server",
+    "fastapi": "Web UI / HTTP transport",
+    "jinja2": "Web UI templates",
 }
 
 # Optional dependencies

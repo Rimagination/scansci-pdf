@@ -21,7 +21,7 @@ class ServerMode(str, Enum):
 @app.command("run")
 def run_server(
     mode: ServerMode = typer.Option(ServerMode.STDIO, help="Transport mode"),
-    host: str = typer.Option("0.0.0.0", help="HTTP host"),
+    host: str = typer.Option("127.0.0.1", help="HTTP host (default localhost; bind 0.0.0.0 only behind auth)"),
     port: int = typer.Option(8000, help="HTTP port"),
 ) -> None:
     """Start the ScanSci PDF server."""
@@ -170,16 +170,6 @@ def browser_status() -> None:
         print(f"  browser kernel: {info['binary']} (version {info.get('version') or '?'})")
     else:
         print(f"  browser kernel: {info.get('binary') or '?'}")
-
-
-@app.command("browser-doctor")
-def browser_doctor_cmd() -> None:
-    """Report reusable shared browser runtime options without installing anything."""
-    import json as _json
-
-    from .browser_discovery import doctor
-
-    print(_json.dumps(doctor(), ensure_ascii=False))
 
 
 @app.command("browser-doctor")

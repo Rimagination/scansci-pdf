@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -196,13 +197,36 @@ def update_config(key: str, value: str) -> dict[str, Any]:
     return config
 
 
+SENSITIVE_KEYS = [
+    "core_api_key",
+    "vpnsci_cookie_file",
+    "zotero_api_key",
+    "zotero_library_id",
+    "elsevier_api_key",
+    "elsevier_insttoken",
+]
+
+_PROXY_URL_CREDS_RE = re.compile(r"(//[^/@\s]+:)[^@\s]+@")
+
+
+def mask_config_value(key: str, value: Any) -> Any:
+    """Return a display-safe copy of a config value.
+
+    Secrets (API keys, tokens, cookie files) are fully masked; proxy URLs keep
+    host/port but hide the password (``http://user:***@host:port``).
+    """
+    if value is None:
+        return value
+    if key in SENSITIVE_KEYS:
+        return "***"
+    if "proxy" in key.lower() and isinstance(value, str) and "@" in value:
+        return _PROXY_URL_CREDS_RE.sub(r"\1***@", value)
+    return value
+
+
 def get_config_safe() -> dict[str, Any]:
     config = load_config()
-    sensitive_keys = ["core_api_key", "vpnsci_cookie_file", "zotero_api_key", "zotero_library_id", "elsevier_api_key", "elsevier_insttoken"]
-    for key in sensitive_keys:
-        if config.get(key):
-            config[key] = "***"
-    return config
+    return {key: mask_config_value(key, value) for key, value in config.items()}
 
 
 def parse_proxy_pool(value: str | None) -> list[str]:
