@@ -140,9 +140,11 @@ def test_extract_supplementary_links_filters_and_resolves():
     <a href="/cms/attachment/99999/main.pdf">main</a>
     <a href="https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-021-03819-2/MediaObjects/41586_2021_3819_MOESM1_ESM.pdf">SI PDF</a>
     <a href="/articles/s41586-021-03819-2#MOESM1">anchor, not a file</a>
+    <a href="https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0065432.s001&type=supplementary-file">PLOS SI (no extension)</a>
     """
     links = extract_supplementary_links(html, "https://www.sciencedirect.com/science/article/pii/S12345678")
-    assert len(links) == 3
+    assert len(links) == 4
+    assert links[3] == "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0065432.s001&type=supplementary-file"
     assert links[0].startswith("https://www.sciencedirect.com/cms/")
     assert links[1] == "https://example.com/supplementary/data.xlsx"
     assert "MOESM1_ESM.pdf" in links[2]

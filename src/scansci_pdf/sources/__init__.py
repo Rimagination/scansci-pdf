@@ -72,6 +72,37 @@ _BROWSER_SOURCE_LABELS = frozenset({
     "Sci-Hub",
 })
 
+# ponytail: negative cache — (source, publisher) -> expiry. A challenge/block
+# on one paper skips that source for the whole publisher prefix for 15 min,
+# saving the doomed timeout on every later paper. Broaden the key or raise
+# the TTL if false-skip reports come in.
+_NEG_TTL = 900.0
+_NEG_CACHE: dict[tuple[str, str], float] = {}
+_NEG_LOCK = threading.Lock()
+_NEG_KEYWORDS = ("cloudflare", "challenge", "captcha", "blocked", "forbidden", "403", "429")
+
+
+def _publisher_of(doi: str) -> str:
+    return doi.split("/")[0].lower() if doi.lower().startswith("10.") else "*"
+
+
+def _neg_record(label: str, doi: str, result: dict[str, Any]) -> None:
+    reason = (str(result.get("error_type", "")) + " " + str(result.get("error", ""))).lower()
+    if not any(k in reason for k in _NEG_KEYWORDS):
+        return  # one-off failures (404, paywall) must not poison the source
+    with _NEG_LOCK:
+        _NEG_CACHE[(label, _publisher_of(doi))] = time.time() + _NEG_TTL
+
+
+def _neg_blocked(label: str, doi: str) -> bool:
+    now = time.time()
+    with _NEG_LOCK:
+        expired = [k for k, exp in _NEG_CACHE.items() if exp <= now]
+        for k in expired:
+            _NEG_CACHE.pop(k, None)
+        pub = _publisher_of(doi)
+        return (label, pub) in _NEG_CACHE or (label, "*") in _NEG_CACHE
+
 
 
 def _any_institutional_path(config: dict[str, Any]) -> bool:
@@ -432,6 +463,11 @@ def _run_tiers_parallel(
         if cancel_event.is_set():
             return None
         result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
+        if result and not result.get("success"):
+            # ponytail: (source, publisher) negative cache — a Cloudflare block
+            # on one paper must not burn every later paper's timeout; raise TTL
+            # or key by full DOI if false-skip reports come in.
+            _neg_record(label, doi, result)
         if result and result.get("success"):
             with result_lock:
                 if shared_result["result"] is None:
@@ -445,6 +481,9 @@ def _run_tiers_parallel(
     futures = {}
     try:
         for fn, label, tier_label, tier_timeout in all_sources:
+            if _neg_blocked(label, doi):
+                log.info(f"   SKIP {label} (negative cache: recently failed for this publisher)")
+                continue
             src_output = target_dir / f"{safe_filename(doi)}_{label}.pdf"
             futures[pool.submit(_try_and_publish, fn, label, src_output)] = (label, src_output)
 
