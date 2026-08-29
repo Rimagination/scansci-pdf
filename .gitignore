@@ -46,6 +46,22 @@ GrShaderCache/
 GraphiteDawnCache/
 BrowserMetrics-spare.pma
 
+# Browser cache/profile leftovers (recurring junk; keep out of git forever)
+ShaderCache/
+old_GrShaderCache*/
+BrowserMetrics/
+component_crx_cache/
+extensions_crx_cache/
+Local State
+Variations
+Last Browser
+Last Session
+Last Tabs
+Last Version
+Default/
+downloads/
+.zcode/
+
 # Downloaded papers / login screenshots / cookie test leftovers
 guan_dabo_papers/
 cas_login*.png
