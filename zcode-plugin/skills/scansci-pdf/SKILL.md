@@ -1,6 +1,6 @@
 ---
 name: scansci-pdf
-description: 下载学术论文。支持 DOI、arXiv ID、关键词搜索、批量下载、Elsevier API、WebVPN/CARSI 机构访问、下载失败排障。当用户要求下载论文(单篇或批量)、搜索文献、获取引文、配置 Elsevier/ScienceDirect API、或下载遇到 Cloudflare/验证页/代理问题时使用。
+description: 下载学术论文。支持 DOI、arXiv ID、关键词搜索、批量下载、Elsevier API、WebVPN/CARSI 机构访问、下载失败排障。当用户要求下载论文(单篇或批量)、搜索文献、获取引文、配置 Elsevier/ScienceDirect API、或下载遇到 Cloudflare/验证页/代理问题时使用。用户仅讨论 PDF 解析/转换工具的对比或选型(如 pymupdf4llm vs MinerU)而无需检索文献证据时不要使用;只有确实要检索或下载文献时才加载本 skill。
 ---
 
 # ScanSci PDF — 学术论文下载与检索
