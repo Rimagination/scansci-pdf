@@ -1690,7 +1690,7 @@ web = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12" },
-    { name = "cloakbrowser", marker = "extra == 'cloakbrowser'", specifier = ">=0.4.11" },
+    { name = "cloakbrowser", marker = "extra == 'cloakbrowser'", specifier = ">=0.5.9" },
     { name = "cython", marker = "extra == 'compile'", specifier = ">=3.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115" },
