@@ -93,7 +93,7 @@ def _installed_package_version(name: str) -> str:
         return ""
 
 
-CLOAKBROWSER_RECOMMENDED_MIN = "0.4.11"
+CLOAKBROWSER_RECOMMENDED_MIN = "0.5.9"
 
 
 def _parse_version_tuple(v: str) -> tuple[int, ...]:

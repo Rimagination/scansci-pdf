@@ -314,6 +314,49 @@ def _launch_patchright_persistent(
     return context
 
 
+CLOAKBROWSER_REQUIRED_MIN = (0, 5, 9)  # keep in sync with the pyproject extra floor
+
+
+def _cloakbrowser_dist_version() -> tuple[int, ...] | None:
+    try:
+        from importlib.metadata import version as _dist_version
+
+        raw = _dist_version("cloakbrowser")
+    except Exception:
+        return None
+    parts: list[int] = []
+    for token in raw.split("."):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def _enforce_cloakbrowser_floor() -> None:
+    """Hard gate: stale stealth kernels get flagged by publishers, so browser
+    launches refuse to run on an outdated cloakbrowser. Escape hatch for
+    offline/emergency use: SCANSCI_ALLOW_OLD_CLOAKBROWSER=1."""
+    import os
+
+    if os.environ.get("SCANSCI_ALLOW_OLD_CLOAKBROWSER"):
+        return
+    raw = None
+    try:
+        from importlib.metadata import version as _dist_version
+
+        raw = _dist_version("cloakbrowser")
+    except Exception:
+        pass
+    v = _cloakbrowser_dist_version()
+    if v is None or v >= CLOAKBROWSER_REQUIRED_MIN:
+        return
+    required = ".".join(str(x) for x in CLOAKBROWSER_REQUIRED_MIN)
+    raise RuntimeError(
+        f"cloakbrowser {raw} is below the required minimum {required} — stale stealth "
+        "kernels get flagged by publishers. Run: pip install -U cloakbrowser "
+        "(escape hatch: set SCANSCI_ALLOW_OLD_CLOAKBROWSER=1)"
+    )
+
+
 def _launch_cloakbrowser(
     headless: bool,
     proxy: Any,
@@ -321,6 +364,7 @@ def _launch_cloakbrowser(
     humanize: bool,
     **kwargs: Any,
 ) -> Any:
+    _enforce_cloakbrowser_floor()
     from cloakbrowser import launch
 
     return launch(headless=headless, humanize=humanize, args=args, proxy=proxy, **kwargs)
@@ -334,6 +378,7 @@ def _launch_cloakbrowser_persistent(
     humanize: bool,
     **kwargs: Any,
 ) -> Any:
+    _enforce_cloakbrowser_floor()
     from cloakbrowser import launch_persistent_context
 
     return launch_persistent_context(

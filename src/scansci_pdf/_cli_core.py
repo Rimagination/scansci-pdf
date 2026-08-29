@@ -109,7 +109,7 @@ def _installed_package_version(name: str) -> str:
 # soft floor surfaced by `doctor`/`check`/`browser-doctor` (offline, no network),
 # not a hard install requirement. Bump it whenever you pin a new floor in
 # pyproject.toml.
-CLOAKBROWSER_RECOMMENDED_MIN = "0.4.11"
+CLOAKBROWSER_RECOMMENDED_MIN = "0.5.9"
 
 
 def _parse_version_tuple(v: str) -> tuple[int, ...]:
