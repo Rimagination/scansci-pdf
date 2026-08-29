@@ -5,6 +5,7 @@ param(
     [string]$Repo = 'https://github.com/Rimagination/scansci-pdf.git',
     [string]$Branch = 'main',
     [switch]$SkipPull,
+    [switch]$SkipInstall,
     [switch]$SkipCodexAdd
 )
 
@@ -43,16 +44,16 @@ function Invoke-Native {
 
     & $Command @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "命令失败（$LASTEXITCODE）：$Command $($Arguments -join ' ')"
+        throw "Command failed (exit code $LASTEXITCODE): $Command $($Arguments -join ' ')"
     }
 }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    throw '未找到 git，请先安装 Git。'
+    throw 'git was not found. Please install Git first.'
 }
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    throw '未找到 python，请先安装 Python 3。'
+    throw 'python was not found. Please install Python 3 first.'
 }
 
 $resolvedPluginDir = [System.IO.Path]::GetFullPath($PluginDir)
@@ -60,11 +61,11 @@ $gitDir = Join-Path $resolvedPluginDir '.git'
 
 if (Test-Path -LiteralPath $resolvedPluginDir) {
     if (-not (Test-Path -LiteralPath $gitDir)) {
-        throw "插件目录已存在但不是 Git 仓库：$resolvedPluginDir"
+        throw "The plugin directory exists but is not a Git repository: $resolvedPluginDir"
     }
 
     if (-not $SkipPull) {
-        Write-Step "更新仓库：$resolvedPluginDir"
+        Write-Step "Updating repository: $resolvedPluginDir"
         Push-Location $resolvedPluginDir
         try {
             Invoke-Native 'git' @('fetch', 'origin', $Branch)
@@ -77,18 +78,23 @@ if (Test-Path -LiteralPath $resolvedPluginDir) {
     }
 }
 else {
-    Write-Step "克隆仓库：$Repo"
+    Write-Step "Cloning repository: $Repo"
     Ensure-Parent $resolvedPluginDir
     Invoke-Native 'git' @('clone', '--branch', $Branch, '--single-branch', $Repo, $resolvedPluginDir)
 }
 
 $manifestPath = Join-Path $resolvedPluginDir '.codex-plugin\plugin.json'
 if (-not (Test-Path -LiteralPath $manifestPath)) {
-    throw "未找到 Codex 插件清单：$manifestPath"
+    throw "Codex plugin manifest was not found: $manifestPath"
 }
 
-Write-Step '以 editable 模式安装 scansci-pdf CLI'
-Invoke-Native 'python' @('-m', 'pip', 'install', '-e', $resolvedPluginDir)
+if (-not $SkipInstall) {
+    Write-Step 'Installing the scansci-pdf CLI in editable mode for the current user'
+    Invoke-Native 'python' @('-m', 'pip', 'install', '--user', '-e', $resolvedPluginDir)
+}
+else {
+    Write-Step 'Skipping CLI installation because it is already installed'
+}
 
 if (Test-Path -LiteralPath $MarketplacePath) {
     $marketplaceText = [System.IO.File]::ReadAllText($MarketplacePath)
@@ -127,23 +133,29 @@ else {
     $marketplace.plugins = $marketplacePlugins
 }
 
-Write-Step "更新个人 marketplace：$MarketplacePath"
+Write-Step "Updating personal marketplace: $MarketplacePath"
 Save-Json $MarketplacePath $marketplace
 
 if (-not $SkipCodexAdd) {
     $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
     if ($null -eq $codexCommand) {
-        Write-Warning '未找到 codex CLI；请在 Codex App 的插件管理页刷新个人 marketplace。'
+        Write-Warning 'codex CLI was not found. Refresh the personal marketplace in Codex App.'
     }
     else {
-        Write-Step "注册插件：scansci-pdf@$($marketplace.name)"
-        & $codexCommand.Source plugin add "scansci-pdf@$($marketplace.name)"
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning 'codex plugin add 未成功；请在 Codex App 的插件管理页刷新个人 marketplace。'
+        Write-Step "Registering plugin: scansci-pdf@$($marketplace.name)"
+        try {
+            & $codexCommand.Source plugin add "scansci-pdf@$($marketplace.name)"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning 'codex plugin add failed. Refresh the personal marketplace in Codex App.'
+            }
+        }
+        catch {
+            Write-Warning ('Could not execute codex CLI: ' + $_.Exception.Message)
+            Write-Warning 'Refresh the personal marketplace in Codex App.'
         }
     }
 }
 
 Write-Host ''
-Write-Host 'ScanSci PDF Codex 插件已准备完成。' -ForegroundColor Green
-Write-Host "插件目录：$resolvedPluginDir"
+Write-Host 'ScanSci PDF Codex plugin is ready.' -ForegroundColor Green
+Write-Host "Plugin directory: $resolvedPluginDir"
