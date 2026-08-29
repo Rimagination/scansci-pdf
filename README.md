@@ -118,77 +118,32 @@ scansci-pdf search "carbon cycle" --out q.txt  # 检索结果落成队列文件�
 scansci-pdf check                             # 依赖与环境体检
 ```
 
+<!-- mcp-tools:start -->
 <details>
-<summary><strong>MCP 工具全表</strong>（45 个，按场景分组）</summary>
+<summary><strong>MCP 工具全表</strong>（17 个）</summary>
 
-### 论文下载
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_smart_download` | **推荐** 零配置下载，自动尝试所有源 + Tor |
-| `scansci_pdf_download` | 下载单篇论文（完整参数控制） |
-| `scansci_pdf_batch_download` | 批量下载多篇论文 |
-| `scansci_pdf_resolve_and_download` | 解析列表 → 补全 DOI → 批量下载 |
-
-### 付费墙登录
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_login` | **推荐** 统一登录：输入 DOI 自动识别出版商并打开浏览器 SSO |
-| `scansci_pdf_camofox_login` | camofox 持久化浏览器登录 |
-| `scansci_pdf_camofox_status` | 检查 camofox-browser 状态 |
-| `scansci_pdf_camofox_import_cookies` | 导入 Netscape cookie 到 camofox |
-| `scansci_pdf_import_browser_cookies` | 打开浏览器捕获登录 cookie |
-
-### 搜索与解析
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_search` | 按关键词搜索论文（OpenAlex） |
-| `scansci_pdf_parse_list` | 解析 APA/BibTeX/DOI 列表文件 |
-
-### 引文管理
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_citation` | 获取论文引文（BibTeX/RIS/EndNote） |
-| `scansci_pdf_import_bib` | 导入 .bib 文件并下载全部论文 |
-
-### 机构代理（WebVPN / CARSI / EZProxy）
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_vpnsci_set_school` | 设置 WebVPN 学校 |
-| `scansci_pdf_vpnsci_login` | WebVPN 浏览器 CAS 认证 |
-| `scansci_pdf_vpnsci_status` | WebVPN 登录状态 |
-| `scansci_pdf_vpnsci_schools` | 搜索支持的大学 |
-| `scansci_pdf_vpnsci_test` | 测试 WebVPN 连接性 |
-| `scansci_pdf_carsi_login` | CARSI 出版商机构登录 |
-| `scansci_pdf_carsi_status` | CARSI 状态与 cookie 检查 |
-| `scansci_pdf_ezproxy_login` | EZProxy 图书馆代理登录 |
-| `scansci_pdf_ezproxy_status` | EZProxy 状态检查 |
-
-### 系统管理
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_auto_setup` | 一键环境检测与自动配置 |
-| `scansci_pdf_setup_check` | 检测系统环境并给出安装建议 |
-| `scansci_pdf_health_check` | 检查所有数据源可用性与延迟 |
-| `scansci_pdf_network_diagnose` | 网络诊断 + 修复建议 |
-| `scansci_pdf_source_scores` | 各数据源历史成功率排名 |
-| `scansci_pdf_config_get` / `config_set` | 查看/修改配置（敏感值自动脱敏） |
-| `scansci_pdf_cache_clear` | 清除下载缓存 |
-
-### Tor 管理
-
-| 工具 | 描述 |
-|------|------|
-| `scansci_pdf_tor_install` | 自动下载安装 Tor Expert Bundle |
-| `scansci_pdf_tor_start` | 启动内嵌 Tor SOCKS5 代理（可加 obfs4 桥接） |
-| `scansci_pdf_tor_stop` | 停止 Tor 代理 |
+| 工具 | 用途 |
+|---|---|
+| `scansci_pdf_batch_download` | Download multiple papers: pass identifier list, or one file (txt/DOI list, csv/xlsx table, BibTeX, APA) with auto DOI resolution and resumable batches. |
+| `scansci_pdf_cache_clear` | Clear paper download cache. |
+| `scansci_pdf_channel_status` | Status of an institutional channel, the browser backend, or a WebVPN connectivity test. |
+| `scansci_pdf_citation` | Citation (bibtex/ris/endnote) or structured metadata for a paper. |
+| `scansci_pdf_config` | Get (sensitive values masked) or set scansci-pdf configuration. |
+| `scansci_pdf_diagnostics` | Diagnostics: source health, network fixes, adaptive scores, environment, one-click setup. |
+| `scansci_pdf_download` | Download a single academic paper by DOI or arXiv ID. |
+| `scansci_pdf_elsevier_setup` | Setup Elsevier API key for ScienceDirect fast-track access. |
+| `scansci_pdf_expand_citations` | Search plus backward/forward citation chasing (Semantic Scholar / OpenCitations). |
+| `scansci_pdf_find` | ScanSci Find discovery engine: plan, estimate, smoke-test, or calibrate a search. |
+| `scansci_pdf_login` | Unified institutional login — paywalled PDFs need this once; cookies are reused. |
+| `scansci_pdf_parse_list` | Parse a paper list file (APA references, BibTeX, or DOI list) and extract metadata. |
+| `scansci_pdf_prepare_queue` | Prepare a download queue: verify identifiers, resolve OA locations, or build from a search. |
+| `scansci_pdf_schools` | Search or set supported WebVPN universities (100+ Chinese universities). |
+| `scansci_pdf_search` | Search for academic papers by keyword or author using OpenAlex API. |
+| `scansci_pdf_tor` | Embedded Tor SOCKS5 proxy: install, start, or stop. |
+| `scansci_pdf_zotero_push` | Push a downloaded paper to Zotero. |
 
 </details>
+<!-- mcp-tools:end -->
 
 ## 机构通道
 
@@ -223,15 +178,15 @@ scansci-pdf check                             # 依赖与环境体检
 ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 15–30 秒降到 1–2 秒。Key 申请免费、个人邮箱即可：
 
 1. 访问 [Elsevier Developer Portal](https://dev.elsevier.com/) 创建应用，勾选 **ScienceDirect Article Retrieval**
-2. 配置 Key：`scansci_pdf_elsevier_setup`（MCP 会打开浏览器引导）或 `scansci_pdf_config_set(key="elsevier_api_key", value="...")`
+2. 配置 Key：`scansci_pdf_elsevier_setup`（MCP 会打开浏览器引导）或 `scansci_pdf_config(key="elsevier_api_key", value="...")`
 
 ### WebVPN（高校代理）
 
 ```text
-1. scansci_pdf_vpnsci_schools(query="北京")      → 搜你的学校
-2. scansci_pdf_vpnsci_set_school(school="你的学校")
-3. scansci_pdf_vpnsci_login                     → 浏览器完成 CAS 认证
-4. scansci_pdf_vpnsci_test                      → 确认连接正常
+1. scansci_pdf_schools(action="search", query="北京")  → 搜你的学校
+2. scansci_pdf_schools(action="set", school="你的学校")
+3. scansci_pdf_login(kind="webvpn")                    → 浏览器完成 CAS 认证
+4. scansci_pdf_channel_status(kind="webvpn_test")      → 确认连接正常
 ```
 
 支持 100+ 所中国高校，命令行等价：`scansci-pdf schools 北京` / `scansci-pdf setup 北京航空航天大学`。
@@ -239,9 +194,9 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 ### CARSI（出版商联邦认证）
 
 ```text
-1. scansci_pdf_config_set(key="carsi_enabled", value="true")
-2. scansci_pdf_config_set(key="carsi_idp_name", value="你的学校名称")
-3. scansci_pdf_carsi_login(publisher="sciencedirect")
+1. scansci_pdf_config(key="carsi_enabled", value="true")
+2. scansci_pdf_config(key="carsi_idp_name", value="你的学校名称")
+3. scansci_pdf_login(kind="carsi", publisher="sciencedirect")
 ```
 
 支持 sciencedirect、springer、wiley、ieee、tandfonline、nature 等。
@@ -249,9 +204,9 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 ### EZProxy（图书馆代理）
 
 ```text
-1. scansci_pdf_config_set(key="ezproxy_enabled", value="true")
-2. scansci_pdf_config_set(key="ezproxy_login_url", value="https://libproxy.你的学校.edu.cn/login?url={url}")
-3. scansci_pdf_ezproxy_login
+1. scansci_pdf_config(key="ezproxy_enabled", value="true")
+2. scansci_pdf_config(key="ezproxy_login_url", value="https://libproxy.你的学校.edu.cn/login?url={url}")
+3. scansci_pdf_login(kind="ezproxy")
 ```
 
 ## 配置与策略
@@ -259,7 +214,7 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 <details>
 <summary><strong>配置参考</strong>（完整表）</summary>
 
-通过 `scansci_pdf_config_set` 或 `scansci-pdf config-cmd` 修改：
+通过 `scansci_pdf_config` 或 `scansci-pdf config-cmd` 修改：
 
 | 配置项 | 默认值 | 说明 |
 |---|---:|---|
@@ -337,11 +292,11 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 |---|---|
 | 下载失败 | `scansci-pdf check`，会话问题再跑 `scansci-pdf session-doctor` |
 | Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
-| 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_network_diagnose`，给出针对性修复建议 |
+| 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_diagnostics(check="network")`，给出针对性修复建议 |
 | 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`scansci-pdf browser-doctor` 会标出 outdated） |
 | WebVPN / CARSI 登录失败 | `pip install "scansci-pdf[cloakbrowser,instsci]"`，在可见浏览器完成登录后重试 |
-| Sci-Hub 连不上 | 内嵌 Tor：`scansci_pdf_tor_start`（被封锁时 `use_bridges=true`），或配置 `network_proxy` |
-| 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；数据源延迟用 MCP `scansci_pdf_health_check` 查看 |
+| Sci-Hub 连不上 | 内嵌 Tor：`scansci_pdf_tor(action="start", use_bridges=true)`，或配置 `network_proxy` |
+| 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；数据源延迟用 `scansci_pdf_diagnostics(check="health")` 查看 |
 
 <details>
 <summary><strong>ACS 提示 IP Address Blocked 怎么办</strong></summary>
