@@ -9,7 +9,7 @@
   <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-17%20tools-111827?style=flat-square" /></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square" />
 
-  让 Agent 替你下载学术论文 —— 13+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
+  让 Agent 替你下载学术论文 —— 20+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
 
   [能力](#能力) · [快速开始](#快速开始) · [怎么用](#怎么用) · [机构通道](#机构通道) · [社区](#交流群--community) · [致谢](#致谢)
 </div>

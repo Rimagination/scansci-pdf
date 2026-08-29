@@ -40,6 +40,7 @@ from .publishers import get_publisher_fast_sources
 from .scibban import try_scibban
 from .scihub import try_scihub
 from .semantic_scholar import try_semanticscholar
+from .openaire import try_openaire
 from .unpaywall import try_unpaywall
 from .vpnsci import try_vpnsci
 from .ezproxy import try_ezproxy
@@ -340,6 +341,7 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
         (try_unpaywall, "Unpaywall"),
         (try_openalex_oa, "OpenAlexOA"),
         (try_semanticscholar, "SemanticScholar"),
+        (try_openaire, "OpenAIRE"),
     ]:
         if label not in _fast_names:
             extra_fast.append((fn, label))

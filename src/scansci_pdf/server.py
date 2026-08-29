@@ -24,7 +24,7 @@ from .tor import check_tor_circuit
 mcp_app = FastMCP(
     name="scansci-pdf",
     instructions=(
-        "Academic paper downloader with 13+ sources, multi-university WebVPN, Tor, and Sci-Hub support. "
+        "Academic paper downloader with 20+ sources, multi-university WebVPN, Tor, and Sci-Hub support. "
         "Supports DOI, arXiv ID, keyword search, and resumable batch downloads. "
         "Elsevier/ScienceDirect needs NO insttoken: an API key plus campus/institutional network egress is enough; "
         "NOT_ENTITLED means off-campus network or the journal is not subscribed."

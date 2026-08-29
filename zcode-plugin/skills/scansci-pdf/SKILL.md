@@ -5,7 +5,7 @@ description: 下载学术论文。支持 DOI、arXiv ID、关键词搜索、批�
 
 # ScanSci PDF — 学术论文下载与检索
 
-13+ 数据源并行竞速,首个成功立即返回。数百篇以上的清单需要先分类摸底(OA/Sci-Hub/需机构)时,转用 `scansci-sort` skill。
+20+ 数据源并行竞速,首个成功立即返回。数百篇以上的清单需要先分类摸底(OA/Sci-Hub/需机构)时,转用 `scansci-sort` skill。
 
 ## 环境检查
 
