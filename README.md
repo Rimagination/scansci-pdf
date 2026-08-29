@@ -292,12 +292,12 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 
 | 现象 | 先做 |
 |---|---|
-| 下载失败 | `scansci-pdf check`，再 `scansci-pdf doctor` |
-| 数据源全红 / 打不开 | `scansci-pdf network-diagnose` 给出针对性修复建议 |
-| 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`doctor` 会标黄） |
+| 下载失败 | `scansci-pdf check`，会话问题再跑 `scansci-pdf session-doctor` |
+| 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_network_diagnose`，给出针对性修复建议 |
+| 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`scansci-pdf browser-doctor` 会标出 outdated） |
 | WebVPN / CARSI 登录失败 | `pip install "scansci-pdf[cloakbrowser,instsci]"`，在可见浏览器完成登录后重试 |
 | Sci-Hub 连不上 | 内嵌 Tor：`scansci_pdf_tor_start`（被封锁时 `use_bridges=true`），或配置 `network_proxy` |
-| 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；`scansci-pdf health-check` 看数据源延迟 |
+| 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；数据源延迟用 MCP `scansci_pdf_health_check` 查看 |
 
 <details>
 <summary><strong>ACS 提示 IP Address Blocked 怎么办</strong></summary>
