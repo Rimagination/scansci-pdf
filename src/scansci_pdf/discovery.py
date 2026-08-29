@@ -42,8 +42,9 @@ def _cli_path() -> str:
     path = shutil.which(CLI_NAME)
     if not path:
         raise DiscoveryUnavailableError(
-            f"'{CLI_NAME}' not found on PATH. Install ScanSci Find, e.g.: "
-            r"pip install -e D:\Projects\active\scansci-find"
+            f"'{CLI_NAME}' not found on PATH. Install ScanSci Find: "
+            "pip install scansci-find (https://github.com/Rimagination/scansci-find). "
+            "Alternatively use the local fallbacks: search / verify / resolve-oa / build-queue."
         )
     return path
 

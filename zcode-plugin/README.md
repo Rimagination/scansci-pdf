@@ -26,6 +26,7 @@ ScanSci 学术文献全家桶 plugin:大清单嗅探分类 + 全场景下载检�
 
 - `scansci-pdf` CLI 在 PATH(`pip install -e <本仓库>` 或 `uv pip install -e .`;插件清单不负责安装 Python CLI,此为前置条件)
 - MCP server 由 plugin 自动注册:`scansci-pdf run`(stdio),无需手动配置
+- 可选:`scansci-find` CLI(`pip install scansci-find`)——Find 系深度检索工具(plan/estimate/find/smoke/calibrate 等)依赖它;未安装时主 skill 会自动降级到本地工具链
 
 ## 安装
 

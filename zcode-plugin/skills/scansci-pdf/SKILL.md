@@ -65,6 +65,7 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 | "给一份清单(xlsx/csv/txt/bib/APA)" | `batch 文件 --lanes`(表格/队列自动识别;渠道按 DOI 前缀自动预测) |
 | "上次有失败的,补齐" | `batch --retry <output>/batch_results.json`(自动读失败清单重跑) |
 | "模糊引用('Wang 2023 CRISPR 那篇')" | 先 `search "Wang 2023 CRISPR"` 拿候选让用户确认,别硬猜 DOI |
+| 系统性文献发现(PRSIMA/引文追链/高召回多源检索) | 装了 `scansci-find` skill/CLI → 用它;没装 → 本地降级链 `search → verify → resolve-oa → build-queue → batch --lanes`(Find 系 MCP 工具需要可选的 scansci-find CLI) |
 | "只要合法来源" | `legal_only` 策略或 `--scihub` 反选 |
 
 队列文件格式(机器可读,人也能手编):`identifier<TAB>channel<TAB>oa_url`,channel ∈ oa/elsevier/grey/institution/auto;`search --out` 与 csv/xlsx 解析自动打标(10.1016→elsevier)。`batch --lanes` 按车道调度:Elsevier API/OA 快车道并行 HTTP → 灰色源竞速 → 机构级联串行,失败逐级溢流。
