@@ -129,27 +129,19 @@ scansci-pdf check                             # 依赖与环境体检
 
 <!-- mcp-tools:start -->
 <details>
-<summary><strong>MCP 工具全表</strong>（17 个）</summary>
+<summary><strong>MCP 工具全表</strong>（17 个，按意图分组）</summary>
 
-| 工具 | 用途 |
+| 想做什么 | 工具 |
 |---|---|
-| `scansci_pdf_batch_download` | Download multiple papers: pass identifier list, or one file (txt/DOI list, csv/xlsx table, BibTeX, APA) with auto DOI resolution and resumable batches. |
-| `scansci_pdf_cache_clear` | Clear paper download cache. |
-| `scansci_pdf_channel_status` | Status of an institutional channel, the browser backend, or a WebVPN connectivity test. |
-| `scansci_pdf_citation` | Citation (bibtex/ris/endnote) or structured metadata for a paper. |
-| `scansci_pdf_config` | Get (sensitive values masked) or set scansci-pdf configuration. |
-| `scansci_pdf_diagnostics` | Diagnostics: source health, network fixes, adaptive scores, environment, one-click setup. |
-| `scansci_pdf_download` | Download a single academic paper by DOI or arXiv ID. |
-| `scansci_pdf_elsevier_setup` | Setup Elsevier API key for ScienceDirect fast-track access. |
-| `scansci_pdf_expand_citations` | Search plus backward/forward citation chasing (Semantic Scholar / OpenCitations). |
-| `scansci_pdf_find` | ScanSci Find discovery engine: plan, estimate, smoke-test, or calibrate a search. |
-| `scansci_pdf_login` | Unified institutional login — paywalled PDFs need this once; cookies are reused. |
-| `scansci_pdf_parse_list` | Parse a paper list file (APA references, BibTeX, or DOI list) and extract metadata. |
-| `scansci_pdf_prepare_queue` | Prepare a download queue: verify identifiers, resolve OA locations, or build from a search. |
-| `scansci_pdf_schools` | Search or set supported WebVPN universities (100+ Chinese universities). |
-| `scansci_pdf_search` | Search for academic papers by keyword or author using OpenAlex API. |
-| `scansci_pdf_tor` | Embedded Tor SOCKS5 proxy: install, start, or stop. |
-| `scansci_pdf_zotero_push` | Push a downloaded paper to Zotero. |
+| 下载单篇（可拉附件、转 Markdown） | `scansci_pdf_download` |
+| 批量下载（列表 / xlsx·csv·bib·APA 文件） | `scansci_pdf_batch_download` |
+| 检索、作者检索、系统性发现 | `scansci_pdf_search` · `scansci_pdf_find` · `scansci_pdf_expand_citations` |
+| 准备队列（校验 / OA 定位 / 构建） | `scansci_pdf_prepare_queue` |
+| 机构登录与状态（WebVPN / CARSI / EZProxy / 出版商 SSO） | `scansci_pdf_login` · `scansci_pdf_channel_status` · `scansci_pdf_schools` |
+| 引文 / 元数据 / Zotero | `scansci_pdf_citation` · `scansci_pdf_zotero_push` |
+| 配置 / 诊断 / Tor / 缓存 / Elsevier Key | `scansci_pdf_config` · `scansci_pdf_diagnostics` · `scansci_pdf_tor` · `scansci_pdf_cache_clear` · `scansci_pdf_elsevier_setup` |
+
+每个工具的参数与说明由 MCP `tools/list` 自带，Agent 会自动看到。
 
 </details>
 <!-- mcp-tools:end -->
@@ -157,30 +149,6 @@ scansci-pdf check                             # 依赖与环境体检
 ## 机构通道
 
 付费墙论文优先走这四条机构通道。登录都在你自己的浏览器里完成，密码不经过本工具。
-
-<!-- publisher-table:start -->
-| 策略 | DOI 前缀 | 域名 |
-|---|---|---|
-| ACM | `10.1145/` | `dl.acm.org`, `acm.org` |
-| ACS | `10.1021/` | `pubs.acs.org` |
-| AIP | `10.1063/` | `pubs.aip.org`, `aip.org` |
-| APS | `10.1103/` | `journals.aps.org`, `aps.org` |
-| ASCE | `10.1061/` | `ascelibrary.org` |
-| Copernicus | `10.5194/` | `copernicus.org` |
-| Elsevier | `10.1016/`, `10.1016/j.`, `10.1016/j.cell`, `10.1016/j.oneear`, `10.1016/j.cels`, `10.1016/j.cub`, `10.1016/j.neuron`, `10.1016/j.molcel`, `10.1016/j.devcel`, `10.1016/j.immuni`, `10.1016/j.chom`, `10.1016/j.cmet`, `10.1016/j.stem`, `10.1016/j.celrep`, `10.1016/j.isci`, `10.1016/j.xcr`, `10.1016/j.heliyon`, `10.1016/j.ajhg` | `sciencedirect.com`, `linkinghub.elsevier.com` |
-| Generic | — | — |
-| IEEE | `10.1109/` | `ieeexplore.ieee.org`, `ieee.org` |
-| IOP | `10.1088/` | `iopscience.iop.org`, `iop.org` |
-| Nature | `10.1038/` | `nature.com` |
-| Oxford | `10.1093/` | `academic.oup.com`, `oup.com` |
-| Royal Society | `10.1098/` | `royalsocietypublishing.org` |
-| RSC | `10.1039/` | `pubs.rsc.org`, `rsc.org` |
-| SAGE | `10.1177/` | `journals.sagepub.com`, `sagepub.com` |
-| Science | `10.1126/` | `science.org`, `sciencemag.org` |
-| Springer | `10.1007/`, `10.1023/` | `link.springer.com`, `springer.com` |
-| Tandfonline | `10.1080/` | `tandfonline.com` |
-| Wiley | `10.1002/`, `10.1111/` | `onlinelibrary.wiley.com`, `wiley.com` |
-<!-- publisher-table:end -->
 
 ### Elsevier API（推荐，无需浏览器）
 
@@ -217,6 +185,35 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 2. scansci_pdf_config(key="ezproxy_login_url", value="https://libproxy.你的学校.edu.cn/login?url={url}")
 3. scansci_pdf_login(kind="ezproxy")
 ```
+
+<details>
+<summary><strong>支持的出版商路由表</strong>（19 家，自动生成）</summary>
+
+<!-- publisher-table:start -->
+| 策略 | DOI 前缀 | 域名 |
+|---|---|---|
+| ACM | `10.1145/` | `dl.acm.org` |
+| ACS | `10.1021/` | `pubs.acs.org` |
+| AIP | `10.1063/` | `pubs.aip.org` |
+| APS | `10.1103/` | `journals.aps.org` |
+| ASCE | `10.1061/` | `ascelibrary.org` |
+| Copernicus | `10.5194/` | `copernicus.org` |
+| Elsevier | `10.1016/`, `10.1016/j.` 等 18 个 | `sciencedirect.com` |
+| Generic | — | `—` |
+| IEEE | `10.1109/` | `ieeexplore.ieee.org` |
+| IOP | `10.1088/` | `iopscience.iop.org` |
+| Nature | `10.1038/` | `nature.com` |
+| Oxford | `10.1093/` | `academic.oup.com` |
+| Royal Society | `10.1098/` | `royalsocietypublishing.org` |
+| RSC | `10.1039/` | `pubs.rsc.org` |
+| SAGE | `10.1177/` | `journals.sagepub.com` |
+| Science | `10.1126/` | `science.org` |
+| Springer | `10.1007/`, `10.1023/` | `link.springer.com` |
+| Tandfonline | `10.1080/` | `tandfonline.com` |
+| Wiley | `10.1002/`, `10.1111/` | `onlinelibrary.wiley.com` |
+<!-- publisher-table:end -->
+
+</details>
 
 ## 配置与策略
 

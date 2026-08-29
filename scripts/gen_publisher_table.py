@@ -25,9 +25,12 @@ def build_table() -> str:
         "|---|---|---|",
     ]
     for s in sorted(StrategyRegistry.list_all(), key=lambda x: x.name.lower()):
-        prefixes = ", ".join(f"`{p}`" for p in (s.doi_prefixes or ())) or "—"
-        domains = ", ".join(f"`{d}`" for d in (s.base_domains or ())[:2]) or "—"
-        lines.append(f"| {s.name} | {prefixes} | {domains} |")
+        prefixes = s.doi_prefixes or ()
+        shown = ", ".join(f"`{p}`" for p in prefixes[:2])
+        if len(prefixes) > 2:
+            shown += f" 等 {len(prefixes)} 个"
+        domain = next(iter(s.base_domains or ()), "—")
+        lines.append(f"| {s.name} | {shown or '—'} | `{domain}` |")
     return "\n".join(lines)
 
 
