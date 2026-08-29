@@ -120,6 +120,16 @@ def test_collect_failures_handles_both_result_shapes():
     assert collect_failures(cascade) == ["10.4/d"]
 
 
+def test_collect_failures_handles_racing_summary_dict():
+    summary = {
+        "total": 2,
+        "succeeded": 1,
+        "entries": [{"success": True, "doi": "10.1/a"}, {"success": False, "doi": "10.2/b"}],
+        "failed_dois": ["10.2/b", "10.9/zzz"],
+    }
+    assert collect_failures(summary) == ["10.2/b"]
+
+
 # --- supplementary link extraction --------------------------------------------
 
 def test_extract_supplementary_links_filters_and_resolves():

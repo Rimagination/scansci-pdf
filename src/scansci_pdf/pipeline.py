@@ -253,7 +253,8 @@ def run_lanes(
     grey_ids = grey + fast_failures if allow_grey else list(grey)
     if grey_ids and allow_grey:
         from .sources import batch_download
-        results += batch_download(grey_ids, str(out), scihub_enabled=True)
+        raw = batch_download(grey_ids, str(out), scihub_enabled=True)
+        results += _normalize_engine_results(raw)
 
     if inst and allow_institution:
         from .institutional.config_adapter import ConfigAdapter
@@ -359,11 +360,35 @@ def _user_agent() -> str:
         return "Mozilla/5.0 (compatible; scansci-pdf)"
 
 
-def collect_failures(results: list[dict[str, Any]]) -> list[str]:
-    """Extract failed identifiers from a results list (racing or cascade shape)."""
+def _normalize_engine_results(raw: Any) -> list[dict[str, Any]]:
+    """Engine outputs come in two shapes: a result list, or a summary dict
+    ({"entries"/"results": [...], "total", "succeeded", ...}). Keep dicts only.
+    """
+    if isinstance(raw, dict):
+        for key in ("entries", "results"):
+            v = raw.get(key)
+            if isinstance(v, list):
+                return [r for r in v if isinstance(r, dict)]
+        return []
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    return []
+
+
+def collect_failures(results: Any) -> list[str]:
+    """Extract failed identifiers from any results shape (racing summary dict,
+    cascade list, or plain entries)."""
+    if isinstance(results, dict):
+        for key in ("entries", "results"):
+            v = results.get(key)
+            if isinstance(v, list):
+                return collect_failures(v)
+        return [f for f in (results.get("failed_dois") or []) if isinstance(f, str)]
+    if not isinstance(results, list):
+        return []
     failed = []
     for r in results:
-        if r.get("success") or r.get("status") == "success":
+        if not isinstance(r, dict) or r.get("success") or r.get("status") == "success":
             continue
         ident = r.get("doi") or r.get("identifier") or ""
         if ident and ident not in failed:

@@ -431,8 +431,7 @@ def batch_fetch_cmd(
         from .pipeline import collect_failures
 
         prev = _json.loads(Path(retry).read_text(encoding="utf-8"))
-        rows = prev.get("results", prev) if isinstance(prev, dict) else prev
-        dois = collect_failures(rows if isinstance(rows, list) else [])
+        dois = collect_failures(prev)
         print(f"  Retrying {len(dois)} failed identifiers from {retry}")
     elif runs_dir:
         from .discovery import build_download_queue, build_preprint_fallbacks
