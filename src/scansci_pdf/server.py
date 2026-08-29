@@ -7,7 +7,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP  # mcp 1.x
+except ModuleNotFoundError:  # mcp >= 2.0 renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 from .cache import cache_clear, cache_get
 from .config import get_config_safe, load_config, mask_config_value, update_config

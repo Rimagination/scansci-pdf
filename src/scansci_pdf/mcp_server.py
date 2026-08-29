@@ -3,7 +3,10 @@
 import logging
 import sys
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP  # mcp 1.x
+except ModuleNotFoundError:  # mcp >= 2.0 renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 from .config import load_config, save_config
 from .institutional.config_adapter import ConfigAdapter

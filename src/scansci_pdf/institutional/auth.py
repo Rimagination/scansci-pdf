@@ -166,6 +166,13 @@ class WebVPNAuth:
             logger.error("Failed to start CloakBrowser: %s", e)
             return False
 
+        if not self._webvpn_base:
+            logger.error(
+                "WebVPN base URL is empty — school gateway unknown. "
+                "Run `scansci-pdf setup <学校全名>` first and check `scansci-pdf schools`."
+            )
+            return False
+
         self._page.goto(self._webvpn_base, wait_until="networkidle", timeout=30000)
         current_url = self._page.url
         logger.info("Session test: navigated to campus gateway, landed on %s", current_url[:80])

@@ -18,6 +18,7 @@ CORE_DEPS = {
     "uvicorn": "ASGI server",
     "fastapi": "Web UI / HTTP transport",
     "jinja2": "Web UI templates",
+    "pymupdf": "PDF text extraction (PyMuPDF)",
 }
 
 # Optional dependencies
