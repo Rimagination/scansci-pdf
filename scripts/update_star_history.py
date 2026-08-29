@@ -27,6 +27,18 @@ DATA_PATH = "stars.json"
 W, H = 860, 420
 MARGIN = {"l": 66, "r": 26, "t": 26, "b": 54}
 FONT = "'Comic Sans MS','Comic Neue','Segoe Print',cursive"
+CURVE_COLOR = "#ef4444"  # star-history-style red
+
+
+def _smooth_path(pts: list[tuple[float, float]]) -> str:
+    """Quadratic midpoint smoothing: keeps the shape but drops polyline kinks."""
+    d = f"M{pts[0][0]:.1f} {pts[0][1]:.1f}"
+    for i in range(1, len(pts) - 1):
+        mx = (pts[i][0] + pts[i + 1][0]) / 2
+        my = (pts[i][1] + pts[i + 1][1]) / 2
+        d += f" Q{pts[i][0]:.1f} {pts[i][1]:.1f} {mx:.1f} {my:.1f}"
+    d += f" L{pts[-1][0]:.1f} {pts[-1][1]:.1f}"
+    return d
 
 
 def fetch_stargazers(repo: str, token: str) -> list[str]:
@@ -117,16 +129,28 @@ def render_svg(series: list[tuple[str, int]]) -> str:
         return x, y
 
     curve = [xy(d, c) for d, c in series]
+    jittered = [(x + RNG.uniform(-1.0, 1.0), y + RNG.uniform(-1.0, 1.0)) for x, y in curve]
     parts: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
         f'font-family="{FONT}" font-size="17">',
-        # axes with slight xkcd overshoot
-        f'<path d="{_wobble_path([(MARGIN["l"] - 8, MARGIN["t"] - 6), (MARGIN["l"], MARGIN["t"] + plot_h + 8)])}" '
-        'stroke="currentColor" fill="none" stroke-width="2"/>',
-        f'<path d="{_wobble_path([(MARGIN["l"] - 10, MARGIN["t"] + plot_h), (MARGIN["l"] + plot_w + 10, MARGIN["t"] + plot_h)])}" '
-        'stroke="currentColor" fill="none" stroke-width="2"/>',
-        # the star curve
-        f'<path d="{_wobble_path(curve, amp=2.6, step=14)}" stroke="currentColor" fill="none" stroke-width="2.6"/>',
+        # straight axes
+        f'<line x1="{MARGIN["l"]}" y1="{MARGIN["t"] - 6}" x2="{MARGIN["l"]}" y2="{MARGIN["t"] + plot_h + 8}" '
+        'stroke="currentColor" stroke-width="2"/>',
+        f'<line x1="{MARGIN["l"] - 10}" y1="{MARGIN["t"] + plot_h}" x2="{MARGIN["l"] + plot_w + 10}" y2="{MARGIN["t"] + plot_h}" '
+        'stroke="currentColor" stroke-width="2"/>',
+        # the star curve: lightly jittered, smoothed with quadratic midpoints
+        f'<path d="{_smooth_path(jittered)}" stroke="{CURVE_COLOR}" fill="none" stroke-width="2.6"/>',
+    ]
+    # key nodes on the curve: first star, first of each month, latest
+    key_pts = [curve[0]]
+    seen_months: set[str] = set()
+    for (d, _), (x, y) in zip(series, curve):
+        if d[:7] not in seen_months:
+            seen_months.add(d[:7])
+            key_pts.append((x, y))
+    key_pts.append(curve[-1])
+    parts += [
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.2" fill="{CURVE_COLOR}"/>' for x, y in dict.fromkeys(key_pts)
     ]
     # y ticks
     for i in range(1, 4):
