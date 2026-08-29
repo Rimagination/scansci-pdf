@@ -55,6 +55,20 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 
 搜作者优先用 `--author "Dabo Guan"` 或 OpenAlex `--author-id`,别把人名放 query(全文匹配会混入同名/被引提及)。引文格式(citation: bibtex/ris/endnote)仅 MCP 支持。发现层:CLI `plan → estimate → find --out <dir>`,再 `build-queue <dir> --out queue.txt` 接 batch。OpenAlex 配额按 IP 每日计(429 就降级 Unpaywall 单点并发);Unpaywall 批量端点常 500,自写单点并发脚本更稳。
 
+## 场景 → 工具链(常见意图直接对号入座)
+
+| 用户说 | 动作 |
+|---|---|
+| "下载这篇 <DOI/arXiv/文章页URL>" | `get <标识符>`;URL 直接喂,自动抽 DOI/arXiv;要补充材料加 `--si` |
+| "某人的全部/近年论文" | `search --author "Name" --out queue.txt` → `batch queue.txt --lanes` |
+| "某主题/关键词 + 年份/被引过滤" | `search "kw" --year-from 2023 --sort cited_by_count [--out queue.txt]` |
+| "给一份清单(xlsx/csv/txt/bib/APA)" | `batch 文件 --lanes`(表格/队列自动识别;渠道按 DOI 前缀自动预测) |
+| "上次有失败的,补齐" | `batch --retry <output>/batch_results.json`(自动读失败清单重跑) |
+| "模糊引用('Wang 2023 CRISPR 那篇')" | 先 `search "Wang 2023 CRISPR"` 拿候选让用户确认,别硬猜 DOI |
+| "只要合法来源" | `legal_only` 策略或 `--scihub` 反选 |
+
+队列文件格式(机器可读,人也能手编):`identifier<TAB>channel<TAB>oa_url`,channel ∈ oa/elsevier/grey/institution/auto;`search --out` 与 csv/xlsx 解析自动打标(10.1016→elsevier)。`batch --lanes` 按车道调度:Elsevier API/OA 快车道并行 HTTP → 灰色源竞速 → 机构级联串行,失败逐级溢流。
+
 ## 机构渠道(按 DOI 前缀路由,先快后慢)
 
 1. **`10.1016`(Elsevier)→ Elsevier API**:key + 校园网 IP 即可,**无需 insttoken**,1–2 s/篇(需机构桶里常占一半以上)。

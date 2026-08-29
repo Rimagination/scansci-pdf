@@ -26,12 +26,17 @@ def parse_paper_list(file_path: str | Path) -> list[PaperEntry]:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
+    suffix = path.suffix.lower()
+    if suffix in (".csv", ".xlsx", ".tsv", ".tab"):
+        from .pipeline import entries_from_table, read_table
+
+        return _entries_from_queue(entries_from_table(read_table(path)))
+
     try:
         content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         content = path.read_text(encoding="latin-1")
 
-    suffix = path.suffix.lower()
     if suffix == ".bib":
         return _parse_bib_to_entries(content)
     if suffix in (".txt", ".md"):
@@ -45,6 +50,16 @@ def parse_paper_list(file_path: str | Path) -> list[PaperEntry]:
     if re.search(r"[A-Z][a-z\u00C0-\u024F]+,\s+[A-Z]\.", content):
         return parse_apa_references(content)
     return _parse_doi_list(content)
+
+
+def _entries_from_queue(queue_entries) -> list[PaperEntry]:
+    """Convert pipeline QueueEntry objects to PaperEntry (skipping unresolved)."""
+    out = []
+    for e in queue_entries:
+        if e.unresolved or not e.identifier:
+            continue
+        out.append(PaperEntry(title=e.title, doi=e.identifier, raw=e.raw or e.identifier))
+    return out
 
 
 def parse_apa_references(text: str) -> list[PaperEntry]:

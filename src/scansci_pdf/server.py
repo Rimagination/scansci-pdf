@@ -87,6 +87,7 @@ def scansci_pdf_download(
     use_vpnsci: bool = False,
     bibtex: bool = False,
     strategy: str | None = None,
+    download_si: bool = False,
 ) -> str:
     """Download a single academic paper by DOI or arXiv ID.
 
@@ -98,6 +99,7 @@ def scansci_pdf_download(
         use_vpnsci: Try WebVPN institutional proxy as last resort (requires prior login via scansci_pdf_vpnsci_login)
         bibtex: Also return BibTeX citation for this paper
         strategy: Override download strategy: fastest, scihub_only, scihub_first, oa_first, legal_only
+        download_si: Also try to fetch Supplementary Information attachments next to the main PDF
     """
     result = download(identifier, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, bibtex=bibtex, strategy=strategy)
 
@@ -133,6 +135,20 @@ def scansci_pdf_download(
                     "或学校未订阅该刊。insttoken 通常不需要（API key + 校园网出口即可）；"
                     "可连接校园网后重试，或改走灰色源/机构浏览器渠道。"
                 )
+
+    if result.get("success") and download_si:
+        try:
+            from pathlib import Path as _P
+
+            from .supplementary import fetch_supplementary
+
+            out_dir = str(_P(result["file"]).parent) if result.get("file") else (output_dir or "")
+            if out_dir:
+                result["supplementary"] = fetch_supplementary(
+                    result.get("doi", identifier), out_dir, load_config()
+                )
+        except Exception as exc:
+            result["supplementary_error"] = str(exc)
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -203,6 +219,7 @@ def scansci_pdf_search(
     sort: str | None = None,
     author: str | None = None,
     author_id: str | None = None,
+    out_file: str | None = None,
 ) -> str:
     """Search for academic papers by keyword or author using OpenAlex API.
 
@@ -214,6 +231,7 @@ def scansci_pdf_search(
         sort: Sort order - "cited_by_count" (most cited first), "publication_date" (newest first), or omit for relevance
         author: Search by author name — resolves to OpenAlex author ID automatically (e.g. "Fang Jingyun")
         author_id: Search by OpenAlex author ID directly (e.g. "A5102961214")
+        out_file: Optional path — write results as a channel-annotated queue file (feed to scansci_pdf_batch_download or CLI batch --lanes)
     """
     results = search_papers(
         query,
@@ -224,6 +242,23 @@ def scansci_pdf_search(
         author=author,
         author_id=author_id,
     )
+    if out_file and results:
+        from .pipeline import QueueEntry, predict_channel, write_queue
+
+        qe = [
+            QueueEntry(
+                identifier=r.get("doi") or r.get("arxiv_id") or "",
+                channel=predict_channel(r.get("doi") or ""),
+                title=str(r.get("title", "")),
+            )
+            for r in results
+            if r.get("doi") or r.get("arxiv_id")
+        ]
+        path = write_queue(qe, out_file)
+        return json.dumps(
+            {"results": results, "queue_file": str(path), "queued": len(qe)},
+            ensure_ascii=False,
+        )
     return json.dumps({"results": results}, ensure_ascii=False)
 
 

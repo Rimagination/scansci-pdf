@@ -6,6 +6,7 @@ import json
 import sys
 from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -123,6 +124,7 @@ def get_paper(
     output: str = typer.Option(".", help="Output directory (default: current directory)"),
     no_bibtex: bool = typer.Option(False, help="Skip BibTeX citation"),
     strategy: str = typer.Option("", help="Override download strategy: fastest, grey_only(all 3 grey sources), scihub_only(Sci-Hub only), scihub_first, oa_first, legal_only"),
+    si: bool = typer.Option(False, "--si", help="Also fetch Supplementary Information attachments"),
 ) -> None:
     """Download a paper with zero configuration. Just give a DOI."""
     from .sources import download
@@ -137,6 +139,14 @@ def get_paper(
     if result.get("success"):
         print(f"  OK: {result.get('file', '')}")
         print(f"  Source: {result.get('source', '?')}")
+        if si:
+            from .supplementary import fetch_supplementary
+
+            out_dir = str(Path(result.get("file", output)).parent) if result.get("file") else output
+            si_files = fetch_supplementary(identifier, out_dir, load_config())
+            print(f"  SI files: {len(si_files)}")
+            for f in si_files:
+                print(f"    {f}")
     else:
         print(f"  FAILED: {result.get('error', 'unknown')}")
         hint = result.get('agent_hint', '')
@@ -387,20 +397,44 @@ def fetch_paper_cmd(
     fetcher.close()
 
 
+def _write_retry_file(output: str, results: list) -> None:
+    """Persist failed identifiers as retry.txt so 'batch --retry' can pick them up."""
+    try:
+        from .pipeline import collect_failures
+
+        failed = collect_failures(results)
+        if failed:
+            p = Path(output) / "retry.txt"
+            p.write_text("\n".join(failed) + "\n", encoding="utf-8")
+            print(f"  {len(failed)} failed → retry list: {p}")
+    except Exception:
+        pass
+
+
 @app.command("batch")
 def batch_fetch_cmd(
-    input_file: str = typer.Argument(help="File with one DOI/URL per line"),
+    input_file: str = typer.Argument(help="File with one DOI/URL per line, a queue TSV, a csv/xlsx table, APA or BibTeX"),
     output: str = typer.Option(".", help="Output directory (default: current directory)"),
     format: str = typer.Option("json", help="Output format: json, text"),
     scihub: bool = typer.Option(False, "--scihub", help="Use Sci-Hub racing engine (includes grey sources) instead of institutional cascade"),
     runs_dir: str = typer.Option("", "--runs-dir", help="ScanSci Find run directory: use its download queue as input and its preprint arXiv IDs as fallbacks for failed DOIs"),
+    lanes: bool = typer.Option(False, "--lanes", help="Channel-lane scheduling: Elsevier API/OA fast lane (parallel HTTP), grey racing, institutional cascade"),
+    retry: str = typer.Option("", "--retry", help="Retry failed identifiers from a previous batch_results.json"),
 ) -> None:
     """Batch fetch papers. Default: institutional cascade. Use --scihub for grey-source racing."""
     import json as _json
     from .config import load_config as _load_config
 
     fallbacks: dict[str, list[str]] | None = None
-    if runs_dir:
+    entries = None
+    if retry:
+        from .pipeline import collect_failures
+
+        prev = _json.loads(Path(retry).read_text(encoding="utf-8"))
+        rows = prev.get("results", prev) if isinstance(prev, dict) else prev
+        dois = collect_failures(rows if isinstance(rows, list) else [])
+        print(f"  Retrying {len(dois)} failed identifiers from {retry}")
+    elif runs_dir:
         from .discovery import build_download_queue, build_preprint_fallbacks
         run_identifiers = build_download_queue(runs_dir)
         fallbacks = build_preprint_fallbacks(runs_dir) or None
@@ -410,12 +444,30 @@ def batch_fetch_cmd(
         dois = run_identifiers
         print(f"  Using ScanSci Find queue from {runs_dir}: {len(dois)} identifiers")
     else:
-        dois = [
-            line.strip() for line in Path(input_file).read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.startswith("#")
-        ]
+        from .pipeline import load_job
+
+        entries = load_job(input_file)
+        dois = [e.identifier for e in entries if e.identifier and not e.unresolved]
+        unresolved = sum(1 for e in entries if e.unresolved)
+        if unresolved:
+            print(f"  {unresolved} 行无法识别为 DOI/arXiv，已跳过（可用标题检索补全后重试）")
     if not dois:
         print("  No DOIs/URLs found in input file.")
+        return
+
+    # Channel-lane scheduling (opt-in, or automatic for table inputs)
+    from .pipeline import collect_failures, run_lanes
+
+    use_lanes = lanes and entries is not None
+    if use_lanes:
+        results = run_lanes(entries, output, config=_load_config(), allow_grey=True)
+        ok = sum(1 for r in results if r.get("success"))
+        print(f"\n  Lane results: {ok}/{len(results)} succeeded")
+        if format == "json":
+            _write_retry_file(output, results)
+            out_path = Path(output) / "batch_results.json"
+            out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"  Results saved to: {out_path}")
         return
 
     # Auto-detect: if download_strategy is grey/scihub-oriented, switch to racing engine
@@ -432,6 +484,7 @@ def batch_fetch_cmd(
         # Verify file existence for each "success" result before writing report
         _verify_batch_results(results, output)
         if format == "json":
+            _write_retry_file(output, results)
             out_path = Path(output) / "batch_results.json"
             out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"\n  Results saved to: {out_path}")
@@ -624,6 +677,7 @@ def search_cmd(
     json_output: bool = typer.Option(True, help="Output as JSON (default)"),
     author: str = typer.Option("", "--author", help="Search by author name (resolves to OpenAlex author ID)"),
     author_id: str = typer.Option("", "--author-id", help="Search by OpenAlex author ID directly"),
+    out: Annotated[str, typer.Option("--out", help="Write results to a channel-annotated queue file (feed to 'batch --lanes')")] = "",
 ) -> None:
     """Search academic papers via OpenAlex, Semantic Scholar, and Crossref.
 
@@ -654,6 +708,21 @@ def search_cmd(
         sort_key = sort if sort else None
         results = search_papers(query, limit=limit, year_from=year_from, year_to=year_to, sort=sort_key)
         author_match = None
+
+    if out:
+        from .pipeline import QueueEntry, predict_channel, write_queue
+
+        qe = [
+            QueueEntry(
+                identifier=r.get("doi") or r.get("arxiv_id") or "",
+                channel=predict_channel(r.get("doi") or ""),
+                title=str(r.get("title", "")),
+            )
+            for r in results
+            if r.get("doi") or r.get("arxiv_id")
+        ]
+        p = write_queue(qe, out)
+        print(f"  Queue written: {p} ({len(qe)} entries)")
 
     if json_output:
         payload = {"results": results}

@@ -113,8 +113,8 @@ docker compose up -d
 
 ```bash
 scansci-pdf get 10.1038/nature12373            # 单篇下载
-scansci-pdf batch 文献清单.txt --scihub         # 批量下载（自动分批 + 预印本兜底）
-scansci-pdf search "carbon cycle" --limit 10   # 搜索论文
+scansci-pdf batch 文献清单.xlsx --lanes        # 批量下载（xlsx/csv/队列通用，四车道调度）
+scansci-pdf search "carbon cycle" --out q.txt  # 检索结果落成队列文件，直接接 batch
 scansci-pdf check                             # 依赖与环境体检
 ```
 
