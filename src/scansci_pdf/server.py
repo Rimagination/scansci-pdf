@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # mcp >= 2.0 renamed FastMCP to MCPServer
 from .cache import cache_clear, cache_get
 from .config import get_config_safe, load_config, mask_config_value, update_config
 from .network import fetch_json
-from .paperlist import PaperEntry, parse_paper_list
+from .paperlist import parse_paper_list
 from .resolver import batch_resolve
 from .search import search_papers_v2 as search_papers
 from .sources import batch_download, download

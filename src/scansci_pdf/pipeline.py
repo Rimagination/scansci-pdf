@@ -23,7 +23,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 from .identifiers import normalize_doi, normalize_arxiv_id
 
