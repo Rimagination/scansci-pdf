@@ -401,7 +401,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 
 <p align="center">
   <a href="https://www.star-history.com/?repos=Rimagination%2Fscansci-pdf&type=date&legend=top-left">
-    <img alt="Star History Chart" src="scansci-pdf-star-history-crop.png" width="600" />
+    <img alt="Star History Chart" src="scansci-pdf-star-history-crop.png" width="860" />
   </a>
 </p>
 
