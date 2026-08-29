@@ -6,7 +6,7 @@
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-0F766E?style=flat-square" /></a>
   <a href="./.codex-plugin/plugin.json"><img alt="Plugin" src="https://img.shields.io/badge/plugin-Codex%20%7C%20ZCode-2563EB?style=flat-square" /></a>
   <a href="./.mcp.json"><img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-111827?style=flat-square" /></a>
-  <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-45%20tools-111827?style=flat-square" /></a>
+  <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-17%20tools-111827?style=flat-square" /></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square" />
 
   让 Agent 替你下载学术论文 —— 13+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
@@ -22,25 +22,34 @@
 - **清单，整批拿下** — APA / BibTeX / DOI 列表直接喂，自动补全缺失 DOI；上千篇先分「OA / 灰色源 / 需机构」三桶再分批下载，不瞎跑不浪费。
 - **付费墙，走你的学校** — 100+ 高校 WebVPN、CARSI 联邦认证、EZProxy、Elsevier API 快速通道（1–2 秒/篇）；登录在你自己的浏览器完成，密码不经过工具。
 - **对抗与自愈全自动** — Cloudflare / CAPTCHA / SSO 分层处理；出版商封 IP 自动停损；机构会话过期自动重登，登录一次全程复用。
-- **Agent 原生** — 标准 MCP 服务器、45 个工具即装即用；Codex App、ZCode、Claude Code 都有现成的插件或配置。
+- **Agent 原生** — 标准 MCP 服务器、17 个工具即装即用；Codex App、ZCode、Claude Code 都有现成的插件或配置。
+
+### 近期更新
+
+- **统一任务管线** — 任意输入（xlsx/csv 表格、文献清单、检索结果、文章页 URL）自动归一成带渠道预测的下载队列；`batch --lanes` 四车道调度：Elsevier API / OA 快车道并行，灰色源竞速与机构级联接续，失败逐级溢流。
+- **SI 附件下载** — `get <DOI> --si` 把补充材料一并拉下来；被 Cloudflare 挡住的 Elsevier 自动切隐身浏览器通道。
+- **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
+- **MCP 工具面瘦身** — 45 → 17 个工具，每次会话的 schema token 开销降约 60%，能力零损失。
+- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；cloakbrowser 强制 0.5.9+（Chromium 151 内核）；每周出版商金丝雀巡检。
 
 ## 快速开始
 
-### 安装：按你的 Agent 选一条
+安装和更新是同一句话——对 Codex、ZCode、Claude Code 都这么说：
 
-**Codex App / Codex CLI**（Windows 一键：克隆 + 装环境 + 注册插件）：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command '$p=Join-Path $HOME "plugins\scansci-pdf"; if(Test-Path $p){ git -C $p pull --ff-only } else { git clone --branch main --single-branch https://github.com/Rimagination/scansci-pdf.git $p }; & (Join-Path $p "scripts\install-scansci-pdf.ps1")'
+```text
+帮我安装或更新这个插件：https://github.com/Rimagination/scansci-pdf
 ```
 
-**ZCode** — 插件市场搜 `scansci-pdf` 一键安装，MCP、skills、快捷命令一次带齐。
+Agent 会克隆（或原地更新）仓库、装好依赖并注册插件，然后你就能直接让它下论文了——例子见下一节[怎么用](#怎么用)。
 
-**其他 MCP 客户端**（Claude Desktop / Claude Code / Cursor / Windsurf / Cline / Cherry Studio…）：
+<details>
+<summary><strong>手动安装 / pip / MCP 配置</strong>（不走对话流程时）</summary>
 
 ```bash
 pip install scansci-pdf
 ```
+
+标准 MCP 配置（Claude Desktop / Cursor / Windsurf / Cline / Cherry Studio…）：
 
 ```json
 {
@@ -53,18 +62,17 @@ pip install scansci-pdf
 }
 ```
 
-<details>
-<summary><strong>插件里有什么 / 手动安装</strong></summary>
+Codex App / Codex CLI（Windows 一键：克隆 + 装环境 + 注册插件）：
 
-仓库为各家 Agent 提供了现成的插件化入口，装完即被自动识别：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command '$p=Join-Path $HOME "plugins\scansci-pdf"; if(Test-Path $p){ git -C $p pull --ff-only } else { git clone --branch main --single-branch https://github.com/Rimagination/scansci-pdf.git $p }; & (Join-Path $p "scripts\install-scansci-pdf.ps1")'
+```
 
-| Agent | 入口 |
-|---|---|
-| Codex App / CLI | `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/` |
-| ZCode | [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令） |
-| Claude Code | `.claude/skills/` + 上面的标准 MCP 配置 |
+ZCode：插件市场搜 `scansci-pdf` 一键安装，MCP、skills、快捷命令一次带齐。
 
-手动安装（Codex）：把仓库放到 `%USERPROFILE%\plugins\scansci-pdf` → `python -m pip install -e .` → 在插件管理页刷新个人 marketplace；Codex CLI 可用时执行 `codex plugin add scansci-pdf@local-plugins`。
+**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置。
+
+手动安装（Codex）：仓库放到 `%USERPROFILE%\plugins\scansci-pdf` → `python -m pip install -e .` → 插件管理页刷新个人 marketplace；Codex CLI 可用时执行 `codex plugin add scansci-pdf@local-plugins`。
 
 </details>
 
