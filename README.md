@@ -297,10 +297,15 @@ scansci-pdf config --proxy-pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080,socks
 
 <table>
   <tr>
-    <td width="280" align="center">
-      <img src="assets/brand/wechat-group-qr.jpg" alt="微信群二维码" width="220">
+    <td width="250" align="center">
+      <img src="assets/brand/wechat-group-qr.jpg" alt="微信群二维码" width="200">
       <br>
-      <sub>微信群 / WeChat Group</sub>
+      <sub><strong>微信交流群</strong> / WeChat Group<br>群码 7 天有效，过期会更新</sub>
+    </td>
+    <td width="250" align="center">
+      <img src="assets/brand/wechat-contact-qr.jpg" alt="群主微信" width="200">
+      <br>
+      <sub><strong>加群主微信</strong> / Contact<br>群码失效？扫码备注 <em>scansci</em> 拉你进群</sub>
     </td>
     <td valign="middle">
       <p><strong>群聊方向</strong></p>
@@ -309,7 +314,7 @@ scansci-pdf config --proxy-pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080,socks
         <li>论文检索、下载、阅读、整理的工作流</li>
         <li>ScanSci PDF 使用问题与改进建议</li>
       </ul>
-      <p><sub>二维码过期会更新，若扫码失效请在 issue 区留言。</sub></p>
+      <p><sub>二维码过期会更新；着急进群可直接加群主微信。</sub></p>
     </td>
   </tr>
 </table>
