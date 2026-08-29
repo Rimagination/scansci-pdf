@@ -394,9 +394,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 ## Star History
 
 <p align="center">
-  <a href="https://www.star-history.com/?repos=Rimagination%2Fscansci-pdf&type=date&legend=top-left">
-    <img alt="Star History Chart" src="scansci-pdf-star-history-crop.png" width="860" />
-  </a>
+  <img alt="Star History Chart" src="star-history.svg" width="860" />
 </p>
 
-> 想看可交互的实时图表：[Star History](https://www.star-history.com/?repos=Rimagination%2Fscansci-pdf&type=date&legend=top-left)。GitHub 已限制第三方拉取星标数据，实时嵌入需按 star-history 官方指引配置仓库只读 token。
+> 手绘星标曲线，每日由仓库自建的 Action 自动更新——数据与图表都在本仓库内，不依赖任何第三方服务。

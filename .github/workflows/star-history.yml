@@ -1,0 +1,36 @@
+name: star history
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: star-history
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Fetch stargazers and render hand-drawn chart
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # github.token works for the repo's own stargazers; if it ever
+          # doesn't, add a fine-grained read-only PAT as STAR_HISTORY_TOKEN.
+          GITHUB_TOKEN: ${{ secrets.STAR_HISTORY_TOKEN || github.token }}
+        run: python scripts/update_star_history.py
+      - name: Commit updated chart
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add star-history.svg stars.json
+          git diff --cached --quiet || git commit -m "chore: update star history"
+          git push
