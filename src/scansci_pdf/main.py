@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from enum import Enum
 from pathlib import Path
 
@@ -652,17 +653,24 @@ def search_cmd(
             author=author if author else None,
             author_id=author_id if author_id else None,
         )
-        # Show author match info
+        # Keep the resolved author match for the JSON payload; the human
+        # readable line is only shown in non-JSON mode.
+        author_match = None
         if results and results[0].get("_author_match"):
-            match = results[0].pop("_author_match")
-            print(f"  Author: {match['name']} (ID:{match['id']}, works:{match['works_count']}, cited:{match['cited_by_count']})")
+            author_match = results[0].pop("_author_match")
     else:
         sort_key = sort if sort else None
         results = search_papers(query, limit=limit, year_from=year_from, year_to=year_to, sort=sort_key)
+        author_match = None
 
     if json_output:
-        print(_json.dumps({"results": results}, indent=2, ensure_ascii=False))
+        payload = {"results": results}
+        if author_match is not None:
+            payload["author_match"] = author_match
+        print(_json.dumps(payload, indent=2, ensure_ascii=True))
     else:
+        if author_match is not None:
+            print(f"  Author: {author_match['name']} (ID:{author_match['id']}, works:{author_match['works_count']}, cited:{author_match['cited_by_count']})")
         for i, r in enumerate(results, 1):
             authors = ", ".join(r.get("authors", [])[:3] or [])
             cited = r.get("cited_by_count", 0)
@@ -946,6 +954,14 @@ def config_show(
 
 
 def main() -> None:
+    # Console-safe printing: replace characters the target encoding cannot
+    # represent (e.g. GBK consoles with non-ASCII author names) instead of
+    # crashing on UnicodeEncodeError.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except Exception:
+            pass
     app()
 
 

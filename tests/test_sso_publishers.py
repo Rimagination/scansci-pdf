@@ -104,7 +104,7 @@ def _log(msg: str) -> None:
     print(f"[{ts}] {msg}")
 
 
-def test_publisher(
+def run_publisher_test(
     publisher: str,
     idp_name: str,
     timeout_per_publisher: int = 300,
@@ -413,7 +413,7 @@ def main() -> None:
         print(f"\n{'='*60}")
         print(f"[{i}/{len(publishers)}] Testing {pub}")
         print(f"{'='*60}")
-        r = test_publisher(pub, idp_name, timeout_per_publisher=args.timeout)
+        r = run_publisher_test(pub, idp_name, timeout_per_publisher=args.timeout)
         results.append(r)
         status = "PASS" if r["passed"] else "FAIL"
         err = f" — {r['error']}" if r.get("error") else ""
