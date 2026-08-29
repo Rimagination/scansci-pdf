@@ -33,4 +33,6 @@ Settings → Plugin Management → Discover → 添加本地目录(本目录)→
 
 ## 跨 agent 共享
 
-Claude Code / Codex 等不支持 ZCode plugin,用 shared-skill-installer 把 `skills/` 下两个 skill 同步到 `~/.agents/skills/`(本插件已内置,同名单以用户目录优先);commands 与 MCP 为 ZCode 专属。
+- **Codex App**：使用仓库根目录的 `.codex-plugin/plugin.json`、`.mcp.json` 和 `skills/`；本目录保留为 ZCode 专属适配层。
+- **Claude Code**：使用仓库内 `.claude/skills/` 与标准 MCP 配置；也可以用 shared-skill-installer 同步 `skills/` 下两个 skill。
+- **ZCode**：继续使用本目录的 `.zcode-plugin/`、commands、skills 和 marketplace 配置。

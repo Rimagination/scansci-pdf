@@ -1,0 +1,44 @@
+{
+  "name": "scansci-pdf",
+  "version": "1.10.0",
+  "description": "ScanSci PDF turns academic paper search, citation export, open-access discovery, and authorized institutional access into a reusable agent workflow.",
+  "author": {
+    "name": "Rimagination",
+    "url": "https://github.com/Rimagination"
+  },
+  "homepage": "https://github.com/Rimagination/scansci-pdf",
+  "repository": "https://github.com/Rimagination/scansci-pdf",
+  "license": "Apache-2.0",
+  "keywords": [
+    "academic papers",
+    "literature search",
+    "citation",
+    "open access",
+    "MCP",
+    "Codex"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ScanSci PDF",
+    "shortDescription": "Search, organize, cite, and retrieve academic papers with MCP.",
+    "longDescription": "ScanSci PDF gives Codex a research-paper workflow built around DOI and arXiv discovery, citation export, batch queues, metadata checks, open-access resolution, and user-authorized institutional access. It reports the source and result for each retrieval and keeps the full workflow available through a local MCP server.",
+    "developerName": "Rimagination",
+    "category": "Science",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Rimagination/scansci-pdf",
+    "defaultPrompt": [
+      "Search for papers and return verified DOI records",
+      "Organize my paper list and export citations",
+      "Check ScanSci PDF access and download readiness"
+    ],
+    "brandColor": "#D71920",
+    "composerIcon": "./assets/brand/scansci-pdf-icon.png",
+    "logo": "./assets/brand/scansci-pdf-icon.png",
+    "logoDark": "./assets/brand/scansci-pdf-icon.png"
+  }
+}

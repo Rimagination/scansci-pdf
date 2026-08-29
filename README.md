@@ -4,12 +4,14 @@
 
   <a href="https://pypi.org/project/scansci-pdf/"><img alt="PyPI" src="https://img.shields.io/badge/PyPI-scansci--pdf-2563EB?style=flat-square" /></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-0F766E?style=flat-square" /></a>
+  <a href="./.codex-plugin/plugin.json"><img alt="Plugin" src="https://img.shields.io/badge/plugin-Codex%20App-2563EB?style=flat-square" /></a>
+  <a href="./.mcp.json"><img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-111827?style=flat-square" /></a>
   <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-45%20tools-111827?style=flat-square" /></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square" />
 
   让 Agent 替你下载学术论文 —— 13+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
 
-  [能力](#能力) · [快速开始](#快速开始) · [怎么用](#怎么用) · [机构通道](#机构通道) · [社区](#交流群--community) · [致谢](#致谢)
+  [能力](#能力) · [快速开始](#快速开始) · [Codex App 插件](#codex-app-插件) · [怎么用](#怎么用) · [机构通道](#机构通道) · [社区](#交流群--community) · [致谢](#致谢)
 </div>
 
 ## 能力
@@ -20,7 +22,7 @@ ScanSci PDF 是一个面向 Agent 与研究者的学术下载工作台。给出 
 - **大清单批量处理** — APA / BibTeX / DOI 列表直接喂进来，自动补全缺失 DOI；上千篇的清单约半小时完成「OA / 灰色源 / 需机构」三桶分类嗅探，再按桶分批下载。
 - **机构通道全家桶** — 100+ 高校 WebVPN（CAS 认证，密码不经过工具）、CARSI 联邦认证、EZProxy 图书馆代理、Elsevier API 快速通道（1–2 秒/篇）。
 - **反爬对抗自动化** — Cloudflare / CAPTCHA / SSO 由 CloakBrowser、curl_cffi TLS 指纹、FlareSolverr 分层处理；批量任务检测到出版商封 IP 会自动停损，不越踩越深。
-- **Agent 原生** — 标准 MCP 服务器，45 个工具即装即用；ZCode 用户可从插件市场一键安装（自带 skills 与快捷命令）。
+- **Agent 原生** — 标准 MCP 服务器，45 个工具即装即用；Codex App 可从仓库根目录加载插件，ZCode 用户可从插件市场一键安装（自带 skills 与快捷命令）。
 - **会话自愈** — 机构会话过期自动检测、自动重登，登录一次 cookie 全程复用。
 - **网络诊断** — DNS 封锁、代理、Tor、数据源延迟，一条命令给出针对性的修复建议。
 
@@ -48,6 +50,27 @@ pip install scansci-pdf
 ```
 
 ZCode 用户更简单 —— 插件市场直接安装 `scansci-pdf`，MCP、skills、快捷命令一次性带齐。
+
+## Codex App 插件
+
+仓库根目录已经包含 Codex App 可识别的插件结构：
+
+- `.codex-plugin/plugin.json`：插件元数据、界面信息和 ScanSci PDF logo
+- `.mcp.json`：自动注册本地 `scansci-pdf run` MCP server
+- `skills/`：Codex 可加载的 `scansci-pdf` 与 `scansci-sort` skills
+- `scripts/install-scansci-pdf.ps1`：克隆、安装 CLI、更新个人 marketplace 的 Windows 安装脚本
+
+### 安装到 Codex App
+
+Windows 用户可以在 PowerShell 中运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-scansci-pdf.ps1
+```
+
+脚本默认将仓库放在 `%USERPROFILE%\plugins\scansci-pdf`，执行 `pip install -e .`，然后把插件加入个人 marketplace。Codex CLI 可用时会自动执行 `codex plugin add scansci-pdf@local-plugins`；CLI 不可用时，在 Codex App 的插件管理页刷新个人 marketplace 即可。
+
+手动安装时，将仓库放到 `%USERPROFILE%\plugins\scansci-pdf`，执行 `python -m pip install -e .`，再在 Codex App 中选择该目录。ZCode 的独立适配层仍位于 [`zcode-plugin/`](./zcode-plugin/)，Claude Code 可继续使用仓库内的 `.claude/skills/` 与标准 MCP 配置。
 
 <details>
 <summary><strong>其他部署方式</strong>（HTTP 远程 / Docker / Web UI）</summary>
