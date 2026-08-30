@@ -1,90 +1,87 @@
-"""Reaper fallback: kill the driver process when graceful close is impossible.
+"""Reaper fallback: tree-kill the driver when graceful close is impossible.
 
 At interpreter exit the ThreadPoolExecutor hook has already taken the worker
 threads, so a pooled browser's close() fails cross-thread (Playwright sync
-objects are thread-affine). The reaper must then kill the node driver
-process — or the whole chrome tree outlives the batch (issue #19 orphans,
-observed live after a 200-paper batch: 2 browsers / 10 chrome processes).
+objects are thread-affine). Worse, on Windows killing the node driver alone
+leaves its chrome children alive - the reaper must tree-kill. Observed live
+after a 200-paper batch: 2 browsers / 10 chrome processes survived.
 """
 
-import subprocess
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scansci_pdf import browser_engine as be
 
 
-class _FakeProc:
-    def __init__(self):
-        self.killed = False
-
-    def poll(self):
-        return None  # still running
-
-    def kill(self):
-        self.killed = True
-
-
-class _BrokenBrowser:
-    """A pooled browser whose owner thread is gone: close() fails."""
-
-    def __init__(self, proc):
-        self._proc = proc
-
-    def close(self):
-        raise RuntimeError("cannot switch to another thread")
-
-    class _impl_obj:
-        class _connection:
-            class _transport:
-                _proc = None  # patched per test
-
-
 def _make_broken(proc):
-    b = _BrokenBrowser(proc)
-    b._impl_obj = type("impl", (), {})()
-    b._impl_obj._connection = type("conn", (), {})()
-    b._impl_obj._connection._transport = type("tr", (), {})()
+    """A pooled browser whose owner thread is gone: close() fails, but the
+    driver process handle is reachable (what the reaper needs)."""
+    b = Mock()
+    b.close.side_effect = RuntimeError("cannot switch to another thread")
     b._impl_obj._connection._transport._proc = proc
     return b
+
+
+class TreeKillTests(unittest.TestCase):
+    def test_skips_dead_driver(self):
+        proc = Mock()
+        proc.poll.return_value = 1  # already exited
+        be._tree_kill(proc)
+        proc.kill.assert_not_called()
+
+    def test_windows_uses_taskkill_tree(self):
+        proc = Mock()
+        proc.poll.return_value = None
+        proc.pid = 4242
+        with patch("scansci_pdf.browser_engine.subprocess.run") as run:
+            be._tree_kill(proc)
+        args = run.call_args[0][0]
+        self.assertEqual(args[:3], ["taskkill", "/F", "/T"])
+        self.assertEqual(args[3:], ["/PID", "4242"])
+
+    def test_posix_uses_proc_kill(self):
+        proc = Mock()
+        proc.poll.return_value = None
+        with patch("scansci_pdf.browser_engine.os") as mock_os, \
+             patch("scansci_pdf.browser_engine.subprocess.run") as run:
+            mock_os.name = "posix"
+            be._tree_kill(proc)
+        proc.kill.assert_called_once()
+        run.assert_not_called()
 
 
 class ReaperTests(unittest.TestCase):
     def setUp(self):
         be._LIVE_BROWSERS.clear()
-
-    def tearDown(self):
-        be._LIVE_BROWSERS.clear()
-
-    def test_kill_fallback_when_close_fails(self):
-        proc = _FakeProc()
-        b = _make_broken(proc)
-        be._LIVE_BROWSERS.add(b)
-        be._reap_browsers_at_exit()
-        self.assertTrue(proc.killed, "driver process must be killed on failed close")
-        self.assertNotIn(b, be._LIVE_BROWSERS)
+        self.addCleanup(be._LIVE_BROWSERS.clear)
 
     def test_graceful_close_no_kill(self):
-        proc = _FakeProc()
         b = Mock()
-        b.close.return_value = None
         be._LIVE_BROWSERS.add(b)
-        be._reap_browsers_at_exit()
+        with patch("scansci_pdf.browser_engine._tree_kill") as tk:
+            be._reap_browsers_at_exit()
         b.close.assert_called_once()
-        self.assertFalse(proc.killed)
+        tk.assert_called_once()  # verify-then-kill backstop still checks
 
-    def test_dead_driver_not_touched(self):
-        proc = _FakeProc()
-        proc.poll = lambda: 0  # already exited
+    def test_close_failure_still_tree_kills(self):
+        proc = Mock()
+        proc.poll.return_value = None
         b = _make_broken(proc)
         be._LIVE_BROWSERS.add(b)
-        be._reap_browsers_at_exit()
-        self.assertFalse(proc.killed, "a dead driver must not be killed again")
+        with patch("scansci_pdf.browser_engine._tree_kill") as tk:
+            be._reap_browsers_at_exit()
+        tk.assert_called_once_with(proc)
 
-    def test_real_browser_lifecycle_end_to_end(self):
-        """Real patchright launch: registry captures the browser, graceful
-        close via the reaper works while the owning thread is alive."""
+    def test_registry_cleared(self):
+        b = Mock()
+        be._LIVE_BROWSERS.add(b)
+        be._reap_browsers_at_exit()
+        self.assertEqual(be._LIVE_BROWSERS, set())
+
+
+class RealBrowserTests(unittest.TestCase):
+    def test_real_browser_reaped(self):
+        """Real patchright launch: after reaping, the browser is disconnected."""
         if not be.is_available({}):
             self.skipTest("no browser backend installed")
         cfg = {"browser_backend": "patchright", "browser_headless": True}
@@ -92,7 +89,7 @@ class ReaperTests(unittest.TestCase):
         self.assertIn(b, be._LIVE_BROWSERS)
         be._reap_browsers_at_exit()
         self.assertNotIn(b, be._LIVE_BROWSERS)
-        self.assertFalse(b.is_connected(), "browser must be closed after reaping")
+        self.assertFalse(b.is_connected())
 
 
 if __name__ == "__main__":

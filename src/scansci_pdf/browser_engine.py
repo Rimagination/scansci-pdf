@@ -96,6 +96,19 @@ def _unregister_browser(browser: Any) -> None:
         _LIVE_BROWSERS.discard(browser)
 
 
+def _tree_kill(proc: Any) -> None:
+    """Force-kill a driver process and its whole child tree (Windows-safe)."""
+    if proc is None or proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True, timeout=15,
+        )
+    else:
+        proc.kill()
+
+
 def _reap_browsers_at_exit() -> None:
     """Close every live browser when the process exits.
 
@@ -104,25 +117,25 @@ def _reap_browsers_at_exit() -> None:
     processes (issue #19).
     """
     for browser in list(_LIVE_BROWSERS):
-        closed = False
+        _unregister_browser(browser)
+        proc = None
+        try:
+            proc = browser._impl_obj._connection._transport._proc  # type: ignore[attr-defined]
+        except Exception:
+            proc = None
         try:
             browser.close()
-            closed = True
         except Exception:
             pass
-        _unregister_browser(browser)
-        if not closed:
-            # Graceful close is impossible once the owning thread is gone
-            # (Playwright sync objects are thread-affine, and at interpreter
-            # exit the ThreadPoolExecutor hook has already taken the workers).
-            # Kill the node driver process — the whole chrome tree dies with
-            # it. Skipping this is exactly how issue #19 orphans happen.
-            try:
-                proc = browser._impl_obj._connection._transport._proc  # type: ignore[attr-defined]
-                if proc is not None and proc.poll() is None:
-                    proc.kill()
-            except Exception:
-                pass
+        # Verify the driver process actually died. A "successful" close can
+        # still leave the node/chromium tree alive (Windows propagates no
+        # signal to children), and a failed close means the owning thread is
+        # gone. Either way, tree-kill is the definitive backstop — without it
+        # every batch leaks its pooled browsers (issue #19).
+        try:
+            _tree_kill(proc)
+        except Exception:
+            pass
 
 
 import atexit as _atexit
