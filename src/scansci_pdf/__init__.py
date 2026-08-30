@@ -45,7 +45,7 @@ def _fix_ssl_cert_file() -> None:
 
 _fix_ssl_cert_file()
 
-__version__ = "1.12.2"
+__version__ = "1.12.3"
 
 __all__ = [
     "__version__",

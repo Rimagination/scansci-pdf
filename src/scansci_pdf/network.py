@@ -79,6 +79,24 @@ def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False
             return tor_proxy
         log.warning("Tor requested but unavailable — falling back to direct connection")
 
+    # Some hosts rate-limit by egress IP, and every proxy user shares ONE exit
+    # — so proxied requests get walled quickly (measured live on sci-hub.ru,
+    # 2026-08-30: proxied = standing verification wall, direct = clean). These
+    # hosts route DIRECT by default; ``direct_domains`` extends the set,
+    # ``scihub_direct: false`` disables the behavior.
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    direct_hosts = {"sci-hub.ru"}
+    direct_hosts |= {str(d).lower().lstrip(".") for d in (config.get("direct_domains") or [])}
+    if config.get("scihub_direct", True) and any(
+        host == h or host.endswith("." + h) for h in direct_hosts if h
+    ):
+        return None
+
     explicit = os.environ.get("SCANSCI_PDF_PROXY") or config.get("network_proxy")
     if explicit:
         return explicit

@@ -331,6 +331,9 @@ def _solve_altcha_and_reload(
         # Check for a PERSISTENT wall: if the reloaded page is still the
         # "你是机器人吗" verification, solving again would only deepen the
         # rate limit — record it and let the cooldown skip this domain.
+        from ..pdf_utils import is_pdf_file, success, extract_pdf_url_from_html
+        from ..browser_engine import download_pdf_via_browser
+
         lower = html.lower()
         if "你是机器人吗" in html or "altcha" in lower and "iframe" not in lower:
             _note_wall(domain)
