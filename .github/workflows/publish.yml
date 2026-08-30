@@ -31,7 +31,9 @@ jobs:
         run: pip install build twine
 
       - name: Check release consistency
-        run: python scripts/check_release_consistency.py --expect "${{ inputs.version }}"
+        run: |
+          pip install .
+          python scripts/check_release_consistency.py --expect "${{ inputs.version }}"
 
       - name: Verify compiled extensions exist
         run: |
