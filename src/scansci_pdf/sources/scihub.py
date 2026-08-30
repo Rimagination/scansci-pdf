@@ -102,6 +102,64 @@ def _shutdown_scihub_pool() -> None:
 
 atexit.register(_shutdown_scihub_pool)
 
+# ---------------------------------------------------------------------------
+# Verification-wall pacing (ALTCHA gates, e.g. sci-hub.ru)
+# ---------------------------------------------------------------------------
+# Empirically (2026-08-30 live tests): the gate escalates with request
+# VELOCITY, not per session — solving works once, then rapid repeat
+# verifications earn a standing "你是机器人吗" wall on every request. So the
+# winning strategy is pacing (space verifications out) plus exponential
+# cooldown when a wall persists after a solve, instead of hammering.
+
+_WALL_MIN_SPACING_SEC = 25.0     # min gap between verification solves
+_WALL_COOLDOWN_BASE_SEC = 90.0   # first persistent-wall cooldown
+_WALL_COOLDOWN_CAP_SEC = 900.0   # never cool down longer than this
+
+_WALL_STATE: dict[str, dict[str, float]] = {}
+_WALL_STATE_LOCK = threading.Lock()
+
+
+def _wall_state(domain: str) -> dict[str, float]:
+    with _WALL_STATE_LOCK:
+        return _WALL_STATE.setdefault(domain, {"last_solve": 0.0, "walls": 0.0, "cooldown_until": 0.0})
+
+
+def _wall_guard(domain: str) -> bool:
+    """True while a domain is cooling down after persistent walls — skip it."""
+    st = _wall_state(domain)
+    return time.time() < st["cooldown_until"]
+
+
+def _wall_pace(domain: str) -> None:
+    """Sleep so consecutive verification solves stay spaced out."""
+    st = _wall_state(domain)
+    wait = _WALL_MIN_SPACING_SEC - (time.time() - st["last_solve"])
+    if wait > 0:
+        time.sleep(min(wait, _WALL_MIN_SPACING_SEC))
+
+
+def _note_wall(domain: str) -> None:
+    """A wall persisted after a solve attempt — escalate the cooldown."""
+    st = _wall_state(domain)
+    with _WALL_STATE_LOCK:
+        st["walls"] = st.get("walls", 0) + 1
+        st["cooldown_until"] = time.time() + min(
+            _WALL_COOLDOWN_BASE_SEC * (3 ** (st["walls"] - 1)), _WALL_COOLDOWN_CAP_SEC
+        )
+        st["last_solve"] = time.time()
+    log.info(f"   Sci-Hub: {domain} verification wall persists — cooling down "
+             f"{st['cooldown_until'] - time.time():.0f}s")
+
+
+def _note_wall_success(domain: str) -> None:
+    """A solve cleared the wall — reset escalations, record the solve time."""
+    st = _wall_state(domain)
+    with _WALL_STATE_LOCK:
+        st["walls"] = 0
+        st["cooldown_until"] = 0.0
+        st["last_solve"] = time.time()
+
+
 _PROBE_TTL_HOURS = 4
 _SCIHUB_PROBE_WORKERS = 8
 
@@ -195,6 +253,12 @@ def _solve_altcha_and_reload(
         log.info("   [altcha] browser engine not available for ALTCHA bypass")
         return None
 
+    domain = urllib.parse.urlparse(landing_url).netloc
+    if _wall_guard(domain):
+        log.info(f"   [altcha] {domain} in wall cooldown — skipping this attempt")
+        return None
+    _wall_pace(domain)
+
     page = None
     try:
         page = get_browser_page(config)
@@ -264,11 +328,15 @@ def _solve_altcha_and_reload(
             log.info("   [altcha] failed to get page content after reload")
             return None
 
-        from ..pdf_utils import is_pdf_file, success, extract_pdf_url_from_html
-        from ..browser_engine import download_pdf_via_browser
-
-        # Check for article not found
+        # Check for a PERSISTENT wall: if the reloaded page is still the
+        # "你是机器人吗" verification, solving again would only deepen the
+        # rate limit — record it and let the cooldown skip this domain.
         lower = html.lower()
+        if "你是机器人吗" in html or "altcha" in lower and "iframe" not in lower:
+            _note_wall(domain)
+            log.info("   [altcha] verification wall persists after solve")
+            return None
+
         if any(sig in lower for sig in ["article not found", "статья не найдена", "не найден"]):
             log.info("   [altcha] article not found after verification")
             return None
@@ -279,6 +347,7 @@ def _solve_altcha_and_reload(
             log.info(f"   [altcha] found PDF: {pdf_url[:80]}")
             if download_pdf_via_browser(pdf_url, output_path, config):
                 if is_pdf_file(output_path):
+                    _note_wall_success(domain)
                     return success(doi, output_path, "Sci-Hub(altcha)")
 
         log.info("   [altcha] no PDF found after verification")
@@ -673,7 +742,9 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
     # or as a Cloudflare/ALTCHA challenge fallback.
     if config.get("scihub_browser_first_enabled", False) and _is_browser_available(config):
         configured_domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
-        browser_domains = configured_domains[:5]
+        browser_domains = [d for d in configured_domains[:5] if not _wall_guard(d)]
+        if not browser_domains:
+            browser_domains = [d for d in configured_domains[:5]]  # all cooling down — try anyway, paced
         max_workers = min(config.get("scihub_browser_workers", 3), len(browser_domains))
 
         pool = _race_pool(config)
@@ -710,6 +781,8 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         now = time.time()
         cooldown_domains = []
         for d in all_domains:
+            if _wall_guard(d):
+                continue  # persistent verification wall — pacing cooldown
             d_stats = stats.get(d, {})
             last_fail = d_stats.get("last_fail_time", 0)
             fail_streak = d_stats.get("fail_streak", 0)
