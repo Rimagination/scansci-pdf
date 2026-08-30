@@ -579,6 +579,9 @@ def download_pdf_via_browser(
     """
     page = None
     try:
+        # Fragments (#view=FitH...) are never sent to servers but they break
+        # .pdf suffix checks and _is_pdf_url — strip before anything else.
+        pdf_url = str(pdf_url).split("#", 1)[0]
         _, context = _get_shared_browser(config)
         page = context.new_page()
 
@@ -806,7 +809,7 @@ download_pdf_via_camofox = download_pdf_via_browser
 
 def _is_pdf_url(url: str) -> bool:
     """Check if a URL looks like a direct PDF link."""
-    lower = url.lower()
+    lower = str(url).split("#", 1)[0].lower()
     return (
         lower.endswith(".pdf")
         or "/pdf/" in lower
