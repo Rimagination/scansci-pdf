@@ -104,11 +104,25 @@ def _reap_browsers_at_exit() -> None:
     processes (issue #19).
     """
     for browser in list(_LIVE_BROWSERS):
+        closed = False
         try:
             browser.close()
+            closed = True
         except Exception:
             pass
         _unregister_browser(browser)
+        if not closed:
+            # Graceful close is impossible once the owning thread is gone
+            # (Playwright sync objects are thread-affine, and at interpreter
+            # exit the ThreadPoolExecutor hook has already taken the workers).
+            # Kill the node driver process — the whole chrome tree dies with
+            # it. Skipping this is exactly how issue #19 orphans happen.
+            try:
+                proc = browser._impl_obj._connection._transport._proc  # type: ignore[attr-defined]
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
 
 
 import atexit as _atexit
