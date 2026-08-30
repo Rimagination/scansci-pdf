@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from scansci_pdf.camofox_login import (
-    _save_cookies_json, _save_cookies_netscape, _import_to_camofox_browser,
+from scansci_pdf.browser_login import (
+    _save_cookies_json, _save_cookies_netscape, _import_to_browser as _import_to_camofox_browser,
 )
 from scansci_pdf.config import load_config, DATA_DIR
 

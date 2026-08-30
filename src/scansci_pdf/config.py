@@ -71,6 +71,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 浏览器后端：patchright（默认，Apache-2.0 开源 playwright fork，内核随本机 Chrome 自动更新）
     # 或 cloakbrowser（免费版内核卡 Chromium 146，作为可选回退）
     "browser_backend": "patchright",
+    # 批量下载时每 N 篇回收一次浏览器上下文（cookie 内存交接，登录态不丢）。
+    # 0 = 关闭。长批次（上千篇）建议 100-200，避免 Chrome 长会话内存漂移。
+    "browser_restart_every": 0,
+    # 灰色源竞速浏览器的独立无头开关（只影响 sci-hub 竞速，机构登录仍有可见窗口）。
+    # true = 竞速全程零窗口、零任务栏闪烁；指纹安全性由 UA 清洗保证。
+    "scihub_browser_headless": False,
     # 浏览器内核选择（CloakBrowser 免费版内置 Chromium 146 已过老，遇 Cloudflare Turnstile 会反复验证）：
     #   browser_executable: 显式指定浏览器二进制路径（本机 Chrome/Edge）；留空=自动探测
     #   browser_auto_upgrade: True 时自动探测本机 Chrome/Edge（版本 > 146 优先于内置 stealth Chromium）

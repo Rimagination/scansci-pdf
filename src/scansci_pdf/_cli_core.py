@@ -781,6 +781,7 @@ def session_broker_run(
     """Run the long-lived broker loop. Internal command."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
     from .publisher_profiles import get_publisher_profile
+    from . import progress_reporter
     from .session_broker import BrokerState, broker_dir, broker_stop_path, write_broker_state
 
     cfg = load_config()
@@ -833,9 +834,16 @@ def session_broker_run(
                         post_run_hold_sec=int(job.get("post_run_hold") or 0),
                     )
                     records = [PaperRecord(**record) for record in job.get("records", [])]
+                    progress_reporter.start_task(
+                        f"出版商下载 · {profile.name}", total=len(records),
+                    )
                     results = []
                     for record in records:
-                        results.append(job_downloader.fetch_one(context, record, primary_dir))
+                        result = job_downloader.fetch_one(context, record, primary_dir)
+                        results.append(result)
+                        progress_reporter.advance(
+                            result.ok, current=result.doi, phase="浏览器下载",
+                        )
                         job_downloader._write_results(primary_dir / "summary_partial.json", results)
                     job_downloader._write_results(primary_dir / "summary.json", results)
                     summary = job_downloader._write_complete_artifacts(records, results, run_dir)
@@ -855,6 +863,7 @@ def session_broker_run(
                     done_name = f"{job_path.stem}.done.json"
                     (queue_dir / done_name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
                 finally:
+                    progress_reporter.finish()
                     job_path.unlink(missing_ok=True)
             time.sleep(2)
     finally:

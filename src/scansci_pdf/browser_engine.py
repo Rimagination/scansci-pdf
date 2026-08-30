@@ -79,6 +79,42 @@ import threading as _threading
 
 _tls = _threading.local()
 
+# All live browsers across threads. Playwright sync objects are thread-affine
+# (greenlets), so a graceful cross-thread close at process exit may fail —
+# the reaper is best-effort and the driver's own EOF kill is the last resort.
+_LIVE_BROWSERS: set = set()
+_LIVE_BROWSERS_LOCK = _threading.Lock()
+
+
+def _register_browser(browser: Any) -> None:
+    with _LIVE_BROWSERS_LOCK:
+        _LIVE_BROWSERS.add(browser)
+
+
+def _unregister_browser(browser: Any) -> None:
+    with _LIVE_BROWSERS_LOCK:
+        _LIVE_BROWSERS.discard(browser)
+
+
+def _reap_browsers_at_exit() -> None:
+    """Close every live browser when the process exits.
+
+    This is what allows callers to keep a browser alive across an entire
+    batch (no per-paper close churn) without leaking orphan Chromium
+    processes (issue #19).
+    """
+    for browser in list(_LIVE_BROWSERS):
+        try:
+            browser.close()
+        except Exception:
+            pass
+        _unregister_browser(browser)
+
+
+import atexit as _atexit
+
+_atexit.register(_reap_browsers_at_exit)
+
 
 def _build_browser_args(config: dict[str, Any] | None = None) -> list[str]:
     """Build Chromium launch args from config (proxy, flags, etc.)."""
@@ -95,24 +131,39 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
     browser = getattr(_tls, "browser", None)
     context = getattr(_tls, "context", None)
     if browser is not None:
-        return browser, context
+        # The browser lives as long as the thread — possibly a whole batch.
+        # Replace a crashed one instead of failing every remaining paper.
+        try:
+            connected = browser.is_connected()
+        except Exception:
+            connected = False
+        if connected:
+            return browser, context
+        # Full teardown: browser.close() also stops the Playwright driver and
+        # its asyncio loop. A half-alive driver would otherwise break the
+        # fresh launch below ("Sync API inside an asyncio event loop").
+        try:
+            browser.close()
+        except Exception:
+            pass
+        _unregister_browser(browser)
+        _tls.browser = None
+        _tls.context = None
 
-    # Playwright's Sync API cannot run inside a running asyncio event loop.
-    # Detect that case and bail out early with a clear message instead of
-    # hitting a confusing "asyncio.run() cannot be called from a running
-    # event loop" deep inside the browser backend.
+    # Playwright's Sync API cannot serve a *user* asyncio loop, but the loop
+    # the sync API itself leaves running in our worker threads is fine — see
+    # is_playwright_owned_loop(). Bail out only for foreign loops.
     try:
         import asyncio
-        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and not is_playwright_owned_loop(loop):
         raise RuntimeError(
             "Browser (Playwright Sync API) cannot run inside an asyncio "
             "event loop. Use the HTTP download sources instead, or call from "
             "a synchronous context."
         )
-    except RuntimeError as e:
-        if "cannot run inside" in str(e):
-            raise
-        # No running loop — safe to proceed.
 
     if not _check_browser_backend(config):
         raise RuntimeError(
@@ -136,15 +187,33 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
         if binary:
             os.environ["CLOAKBROWSER_BINARY_PATH"] = binary
 
+    # scihub_browser_headless overrides browser_headless for THIS shared
+    # browser (the grey-source racing engine). It exists because the racing
+    # window otherwise flashes popup/redirect attempts from sci-hub mirrors
+    # at the taskbar; institutional logins keep their own visible windows
+    # via get_persistent_context / auth.py, which still honor browser_headless.
     headless = False
     humanize = True
     if config:
-        headless = config.get("browser_headless", False)
+        headless = bool(
+            config.get("scihub_browser_headless", config.get("browser_headless", False))
+        )
         humanize = config.get("browser_humanize", True)
 
     args = _build_browser_args(config)
     browser = launch(headless=headless, humanize=humanize, args=args, config=config)
+    _register_browser(browser)
     context = browser.new_context()
+
+    # Launching the sync API leaves its dispatcher event loop "running" in
+    # this thread (asyncio.get_running_loop() now succeeds here). Register it
+    # so is_playwright_owned_loop() can tell OUR worker-thread loop apart from
+    # a user's asyncio loop — the latter is the only case sync API can't serve.
+    try:
+        import asyncio as _asyncio
+        _tls.owned_loop = _asyncio.get_running_loop()
+    except RuntimeError:
+        _tls.owned_loop = None
     _tls.browser = browser
     _tls.context = context
     logger.info(f"browser_engine: browser ready for thread {_threading.current_thread().name}")
@@ -218,6 +287,16 @@ def get_browser_page(config: dict[str, Any] | None = None):
         return None
 
 
+def is_playwright_owned_loop(loop: Any) -> bool:
+    """True when `loop` is the sync-API dispatcher loop of THIS thread's browser.
+
+    A running asyncio loop normally means "user asyncio code — sync Playwright
+    forbidden". Exception: our persistent worker threads, where the loop was
+    created by the sync API itself and must not disqualify the thread.
+    """
+    return getattr(_tls, "owned_loop", None) is loop and loop is not None
+
+
 def shutdown_shared_browser():
     """Shut down the current thread's browser. Call on thread exit or process exit."""
     browser = getattr(_tls, "browser", None)
@@ -226,6 +305,7 @@ def shutdown_shared_browser():
             browser.close()
         except Exception:
             pass
+        _unregister_browser(browser)
         _tls.browser = None
         _tls.context = None
         logger.info("browser_engine: browser shut down")

@@ -1,4 +1,12 @@
-"""Camofox-browser integration: stealth headless browser for Cloudflare bypass and institutional login."""
+"""CamoFox cloud-API client — NOT the local camoufox browser backend.
+
+``camofox_*`` config keys (``camofox_enabled``, ``camofox_url``,
+``camofox_api_key``, ``camofox_access_key``) belong to THIS module: a
+remote stealth-browser service for Cloudflare bypass. The local
+anti-detect browser backend is ``camoufox`` (one "u") — see
+``browser_backend.py`` and the ``browser_backend`` config key. The two
+names are unfortunately close; they share no code.
+"""
 
 from __future__ import annotations
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -224,9 +225,15 @@ def download_pdf(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = output_path.with_suffix(output_path.suffix + ".part")
         try:
+            # requests' timeout tuple only guards connect + each socket read;
+            # a peer that drips bytes forever would hold the race open, so
+            # bound the whole stream with a wall-clock deadline too.
+            deadline = time.monotonic() + float(config.get("download_deadline_seconds", 60))
             with tmp_path.open("wb") as fh:
                 fh.write(first_chunk)
                 for chunk in iterator:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("stream deadline exceeded")
                     if chunk:
                         fh.write(chunk)
             tmp_path.replace(output_path)

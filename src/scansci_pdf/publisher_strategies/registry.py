@@ -40,11 +40,16 @@ class StrategyRegistry:
 
     @classmethod
     def get_for_doi(cls, doi: str) -> "BasePublisherStrategy | None":
-        """Find the strategy whose DOI prefix matches *doi*."""
+        """Find the strategy whose DOI prefix matches *doi*.
+
+        Falls back to the Generic strategy (doi.org landing page) when no
+        publisher-specific prefix matches, so unknown prefixes still get an
+        article URL instead of being dropped before any network I/O.
+        """
         for prefix, strategy in cls._by_doi_prefix.items():
             if doi.startswith(prefix):
                 return strategy
-        return None
+        return cls._by_name.get("generic")
 
     @classmethod
     def get_by_name(cls, name: str) -> "BasePublisherStrategy | None":

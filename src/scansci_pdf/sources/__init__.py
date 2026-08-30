@@ -401,6 +401,20 @@ def _build_institutional_sources(doi: str, config: dict[str, Any], *, use_vpnsci
     return sort_sources(sources)
 
 
+def _wait_any(events: tuple[threading.Event, threading.Event], timeout: float) -> bool:
+    """Wait for any event to be set, polling at a fine grain (no wait-any API).
+
+    Used by the racing engine to react to either the first success or the
+    completion of every submitted source, whichever comes first.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(e.is_set() for e in events):
+            return True
+        time.sleep(0.05)
+    return any(e.is_set() for e in events)
+
+
 def _run_tiers_parallel(
     tiers: list[tuple[list[tuple[Any, str]], str, int]],
     doi: str,
@@ -458,6 +472,9 @@ def _run_tiers_parallel(
     result_lock = threading.Lock()
     success_event = threading.Event()
     cancel_event = threading.Event()
+    all_done_event = threading.Event()   # set when every submitted future returned
+    done_counter: list[int] = [0]
+    done_counter_lock = threading.Lock()
     shared_result: dict[str, Any] = {"result": None}
 
     def _try_and_publish(fn, label, src_output):
@@ -478,6 +495,12 @@ def _run_tiers_parallel(
                     success_event.set()
         return result
 
+    def _on_future_done(fut) -> None:
+        with done_counter_lock:
+            done_counter[0] += 1
+            if done_counter[0] >= len(futures):
+                all_done_event.set()
+
     log.info(f"   Racing {len(all_sources)} sources across {len(tiers)} tiers (parallel)...")
     pool = ThreadPoolExecutor(max_workers=len(all_sources))
     futures = {}
@@ -487,10 +510,15 @@ def _run_tiers_parallel(
                 log.info(f"   SKIP {label} (negative cache: recently failed for this publisher)")
                 continue
             src_output = target_dir / f"{safe_filename(doi)}_{label}.pdf"
-            futures[pool.submit(_try_and_publish, fn, label, src_output)] = (label, src_output)
+            fut = pool.submit(_try_and_publish, fn, label, src_output)
+            futures[fut] = (label, src_output)
+        for fut in futures:
+            fut.add_done_callback(_on_future_done)
 
-        # Wait for first success or overall timeout - instant notification via Event
-        success_event.wait(timeout=overall_timeout + 5)
+        # Wait for first success, all sources done, or the overall timeout.
+        # all_done lets a full fast-failure return immediately instead of
+        # burning the whole timeout + grace period.
+        _wait_any((success_event, all_done_event), overall_timeout + 5)
 
         if shared_result["result"] is not None:
             result, label, src_output = shared_result["result"]
@@ -503,6 +531,9 @@ def _run_tiers_parallel(
                 result["file"] = str(output_path)
             log.info(f"   OK {label}")
             return result
+        if all_done_event.is_set():
+            log.info("   All sources failed")
+            return None
 
         # Timeout reached — give late-finishing threads a grace period.
         # Visible browser login can take 60-300s (browser launch + SSO + redirect),
@@ -516,7 +547,7 @@ def _run_tiers_parallel(
         else:
             grace = 15
         log.info(f"   Racing timed out after {overall_timeout + 5}s, waiting up to {grace}s for late results...")
-        success_event.wait(timeout=grace)
+        _wait_any((success_event, all_done_event), grace)
         if shared_result["result"] is not None:
             result, label, src_output = shared_result["result"]
             final_path = Path(result.get("file", ""))
@@ -528,6 +559,9 @@ def _run_tiers_parallel(
                 result["file"] = str(output_path)
             log.info(f"   OK {label} (late)")
             return result
+        if all_done_event.is_set():
+            log.info("   All sources failed")
+            return None
 
         # Final scan: check if any source wrote a valid PDF file despite timeout
         from ..pdf_utils import is_pdf_file, is_suspicious_pdf, suspicious_pdf
@@ -546,7 +580,14 @@ def _run_tiers_parallel(
 
         log.info(f"   All sources failed")
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+        # Never block termination on sources that refuse to return: cancel
+        # pending futures and waive stragglers. Their own I/O deadlines
+        # (connect/read timeouts, stream deadline in pdf_utils) bound how long
+        # an abandoned worker thread can outlive the race.
+        alive = [f for f in futures if not f.done()]
+        if alive:
+            log.info(f"   Racing finished with {len(alive)} source(s) still running (waived)")
+        pool.shutdown(wait=False, cancel_futures=True)
         # Cleanup temp files
         for _, other_path in futures.values():
             if other_path != output_path and other_path.exists():
@@ -1219,7 +1260,10 @@ def _write_download_results(results: list[dict[str, Any]], output_dir: str | Pat
             ],
         }
         report.update(extra)
-        (out / "download_results.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        target = out / "download_results.json"
+        tmp = out / "download_results.json.tmp"
+        tmp.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
     except Exception:
         pass
 
@@ -1385,33 +1429,41 @@ def batch_download(
         return download(ident, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, _institutional=False)
 
     results: list[dict[str, Any] | None] = [None] * total
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_idx = {pool.submit(_staggered_download, ident): i for i, ident in enumerate(pending_identifiers)}
-        try:
-            for future in as_completed(future_to_idx, timeout=600):
-                idx = future_to_idx[future]
+    total_budget = float(config.get("batch_total_timeout", 600))
+    pool = ThreadPoolExecutor(max_workers=workers)
+    future_to_idx = {pool.submit(_staggered_download, ident): i for i, ident in enumerate(pending_identifiers)}
+    try:
+        for future in as_completed(future_to_idx, timeout=total_budget):
+            idx = future_to_idx[future]
+            try:
+                result = future.result()
+            except Exception:
+                result = fail(pending_identifiers[idx], "download exception")
+            results[idx] = result
+
+            # Save progress immediately
+            _save_progress(batch_id, pending_identifiers[idx], result)
+
+            completed_count[0] += 1
+            if progress_callback:
                 try:
-                    result = future.result()
+                    progress_callback(
+                        completed_count[0] + skipped_completed + num_invalid,
+                        len(unique_identifiers),
+                        pending_identifiers[idx],
+                        result,
+                    )
                 except Exception:
-                    result = fail(pending_identifiers[idx], "download exception")
-                results[idx] = result
-
-                # Save progress immediately
-                _save_progress(batch_id, pending_identifiers[idx], result)
-
-                completed_count[0] += 1
-                if progress_callback:
-                    try:
-                        progress_callback(
-                            completed_count[0] + skipped_completed + num_invalid,
-                            len(unique_identifiers),
-                            pending_identifiers[idx],
-                            result,
-                        )
-                    except Exception:
-                        pass
-        except TimeoutError:
-            log.info(f"Batch {batch_id}: timeout after 600s")
+                    pass
+    except TimeoutError:
+        log.info(f"Batch {batch_id}: timeout after {int(total_budget)}s")
+    finally:
+        # Waive stragglers so the batch report always lands within budget;
+        # per-source I/O deadlines bound the lifetime of abandoned workers.
+        alive = [f for f in future_to_idx if not f.done()]
+        if alive:
+            log.info(f"Batch {batch_id}: {len(alive)} source(s) still running (waived)")
+        pool.shutdown(wait=False, cancel_futures=True)
 
     for i, r in enumerate(results):
         if r is None:

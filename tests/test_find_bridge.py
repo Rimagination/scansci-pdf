@@ -1,7 +1,9 @@
 """Tests for the ScanSci Find <-> scansci-pdf bridge: download result
-write-back, preprint fallback retries, and fallback-map building."""
+write-back, preprint fallback retries, fallback-map building, and the
+discovery gate (light budgets, email precheck, structured timeouts)."""
 
 import json
+import subprocess
 
 import pytest
 
@@ -95,3 +97,63 @@ class TestBuildPreprintFallbacks:
 
     def test_returns_empty_map_without_queue(self, tmp_path):
         assert build_preprint_fallbacks(tmp_path) == {}
+
+
+class TestDiscoveryGate:
+    """DISCOVERY-01: light budgets, Unpaywall email precheck, structured errors."""
+
+    def test_resolve_oa_blocked_without_email(self, monkeypatch):
+        from scansci_pdf import discovery
+
+        monkeypatch.setattr(discovery, "_build_env", lambda: {"OPENALEX_API_KEY": "x"})
+        payload = discovery.resolve_oa([{"doi": "10.1000/x"}])
+        assert payload["status"] == "blocked_configuration"
+        assert payload["provider"] == "unpaywall"
+        assert payload["stage"] == "resolve_oa"
+        assert "hint" in payload
+
+    def test_resolve_oa_proceeds_with_email(self, monkeypatch):
+        from scansci_pdf import discovery
+
+        monkeypatch.setattr(discovery, "_build_env", lambda: {"UNPAYWALL_EMAIL": "a@b.com"})
+        monkeypatch.setattr(
+            discovery, "_identify_pipeline",
+            lambda command, candidates, **kw: {"status": "ok", "command": command},
+        )
+        payload = discovery.resolve_oa([{"doi": "10.1000/x"}])
+        assert payload["status"] == "ok"  # did not short-circuit at the email gate
+
+    def test_light_timeout_is_shorter_than_systematic_budget(self):
+        from scansci_pdf import discovery
+
+        assert discovery.LIGHT_TIMEOUT < discovery.DEFAULT_TIMEOUT
+        assert discovery.LIGHT_TIMEOUT == 45
+
+    def test_timeout_raises_structured_discovery_timeout_error(self, monkeypatch):
+        from scansci_pdf import discovery
+        from scansci_pdf.discovery import DiscoveryTimeoutError
+
+        def slow_run(cmd, *a, **kw):
+            raise subprocess.TimeoutExpired(cmd, timeout=kw.get("timeout", 45))
+
+        monkeypatch.setattr(discovery.subprocess, "run", slow_run)
+        with pytest.raises(DiscoveryTimeoutError) as excinfo:
+            discovery.verify([{"doi": "10.1000/x"}])
+        err = excinfo.value
+        assert err.timeout_seconds == discovery.LIGHT_TIMEOUT
+        assert err.retryable is True
+        assert "verify" in err.command
+
+    def test_timeout_error_fields_survive_server_wrapper(self, monkeypatch):
+        """server.py maps DiscoveryTimeoutError to a structured payload."""
+        from scansci_pdf import discovery, server
+
+        def slow_run(cmd, *a, **kw):
+            raise subprocess.TimeoutExpired(cmd, timeout=kw.get("timeout", 45))
+
+        monkeypatch.setattr(discovery.subprocess, "run", slow_run)
+        payload = json.loads(server.scansci_pdf_verify_identifiers('[{"doi": "10.1000/x"}]'))
+        assert payload.get("stage") == "discovery"
+        assert payload["timeout_seconds"] == discovery.LIGHT_TIMEOUT
+        assert payload["retryable"] is True
+        assert payload["fallback_used"] is False

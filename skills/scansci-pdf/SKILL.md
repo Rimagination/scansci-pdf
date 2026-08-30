@@ -16,15 +16,13 @@ tool routing or configuration guidance.
 ## Route by intent
 
 - Search or identify papers: `scansci_pdf_search`, `scansci_pdf_verify_identifiers`,
-  and `scansci_pdf_paper_metadata`.
-- Resolve open-access locations: `scansci_pdf_resolve_oa`.
+  and `scansci_pdf_parse_list` for list files.
+- Resolve open-access locations: `scansci_pdf_prepare_queue(action="resolve_oa")`.
 - Download one paper: `scansci_pdf_download` with an explicit strategy when the
   user has a source preference.
-- Process a list: `scansci_pdf_parse_list`, `scansci_pdf_resolve_and_download`, or
-  `scansci_pdf_batch_download`.
-- Export citations: `scansci_pdf_citation` or `scansci_pdf_import_bib`.
-- Diagnose setup or access: `scansci_pdf_setup_check`,
-  `scansci_pdf_health_check`, and `scansci_pdf_network_diagnose`.
+- Process a list: `scansci_pdf_parse_list` or `scansci_pdf_batch_download`.
+- Export citations: `scansci_pdf_citation`; push to Zotero via `scansci_pdf_zotero_push`.
+- Diagnose setup or access: `scansci_pdf_diagnostics` (check=health|network|sources|setup).
 
 ## Operating boundaries
 

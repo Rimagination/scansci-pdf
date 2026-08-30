@@ -10,8 +10,12 @@ from typing import Any
 
 try:
     from .browser_backend import launch
+    from .browser_backend import BACKEND_CAMOUFOX, BACKEND_CLOAKBROWSER, BACKEND_PATCHRIGHT
     from .browser_backend import is_available as _browser_backend_available
-    _HAS_CLOAKBROWSER = _browser_backend_available()
+    _HAS_CLOAKBROWSER = any(
+        _browser_backend_available(b)
+        for b in (BACKEND_PATCHRIGHT, BACKEND_CLOAKBROWSER, BACKEND_CAMOUFOX)
+    )
 except ImportError:
     launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False

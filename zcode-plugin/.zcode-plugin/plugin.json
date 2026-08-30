@@ -1,6 +1,6 @@
 {
   "name": "scansci-pdf",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "ScanSci 学术文献全家桶:大清单嗅探分类、单篇/批量下载、机构渠道(Elsevier API/WebVPN/CARSI)、检索发现、诊断排障。携带 scansci-pdf MCP server,即装即用。",
   "skills": "skills",
   "commands": "commands",

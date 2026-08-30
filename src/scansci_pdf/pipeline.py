@@ -56,6 +56,130 @@ def predict_channel(identifier: str) -> str:
     return "auto"
 
 
+_PDF_URL_HINT = re.compile(r"\.pdf($|[?#])|/pdf/|article-pdf|/epdf/", re.IGNORECASE)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+def _looks_like_pdf_url(url: str) -> bool:
+    return bool(url) and bool(_PDF_URL_HINT.search(url))
+
+
+def _fetch_oa_pdf(doi: str, config: dict[str, Any]) -> str:
+    """OpenAlex lookup: best OA direct-PDF URL for a DOI ('' when none/error).
+
+    Cached per DOI (including negative results) so repeated batches and the
+    retry pass don't re-query. All failures are silent — enrichment is an
+    optimization, never a hard dependency.
+    """
+    try:
+        from .cache import cache_get, cache_set
+        cached = cache_get(f"oa:{doi}", config) if config.get("cache_dir") else None
+        if cached is not None:
+            return str(cached.get("pdf_url") or "")
+    except Exception:
+        pass
+
+    import requests
+
+    proxy = config.get("network_proxy", "")
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    params: dict[str, str] = {"select": "open_access,best_oa_location"}
+    if config.get("email"):
+        params["mailto"] = str(config["email"])
+    if config.get("openalex_api_key"):
+        params["api_key"] = str(config["openalex_api_key"])
+    pdf = ""
+    lookup_ok = False
+    try:
+        resp = requests.get(
+            f"https://api.openalex.org/works/doi:{doi}",
+            params=params, timeout=(15, 20), proxies=proxies,
+            headers={"User-Agent": _user_agent()},
+        )
+        if resp.status_code == 200:
+            lookup_ok = True
+            work = resp.json()
+            oa = work.get("open_access") or {}
+            loc = work.get("best_oa_location") or {}
+            candidate = str(loc.get("pdf_url") or "") or str(oa.get("oa_url") or "")
+            if _looks_like_pdf_url(candidate):
+                pdf = candidate
+        elif resp.status_code not in _RETRYABLE_STATUS:
+            lookup_ok = True  # definitive negative (e.g. 404): cacheable
+    except Exception:
+        pass
+
+    if not lookup_ok:
+        # OpenAlex failed (timeout / 429 / 5xx) — Unpaywall mirrors the same
+        # OA data on a different host; a transient hiccup must not lose the
+        # enrichment.
+        try:
+            unpay_params = dict(params)
+            unpay_params.pop("api_key", None)
+            resp2 = requests.get(
+                f"https://api.unpaywall.org/v2/{doi}",
+                params=unpay_params, timeout=(15, 20), proxies=proxies,
+                headers={"User-Agent": _user_agent()},
+            )
+            if resp2.status_code == 200:
+                lookup_ok = True
+                loc = resp2.json().get("best_oa_location") or {}
+                candidate = str(loc.get("url_for_pdf") or "")
+                if _looks_like_pdf_url(candidate):
+                    pdf = candidate
+            elif resp2.status_code not in _RETRYABLE_STATUS:
+                lookup_ok = True
+        except Exception:
+            pass
+
+    # Cache only completed lookups: a timed-out proxy handshake must not
+    # poison the negative cache for cache_ttl_hours.
+    if lookup_ok:
+        try:
+            if config.get("cache_dir"):
+                from .cache import cache_set
+                cache_set(f"oa:{doi}", {"pdf_url": pdf}, config)
+        except Exception:
+            pass
+    return pdf
+
+
+def _enrich_oa_urls(entries: list[QueueEntry], config: dict[str, Any]) -> None:
+    """Route gold/hybrid OA papers into the fast lane before scheduling.
+
+    The prefix DB only knows Elsevier, so plain-DOI batches sent every other
+    publisher to the grey or institutional lanes — OA journals (NAR, PLoS,
+    Nat Commun, …) ended up at publisher bot-walls needing manual Turnstile
+    clicks. One parallel OpenAlex lookup per unknown DOI fills ``oa_url``;
+    the fast lane's own %PDF/10KB validation keeps junk from landing.
+    Failures and the kill switch (``lane_oa_enrich: false``) leave entries
+    exactly as they were.
+    """
+    if not config.get("lane_oa_enrich", True):
+        return
+    targets = [
+        e for e in entries
+        if e.identifier.lower().startswith("10.")
+        and not e.oa_url
+        and predict_channel(e.identifier) not in ("elsevier", "institution")
+    ]
+    if not targets:
+        return
+
+    def lookup(entry: QueueEntry) -> None:
+        try:
+            pdf = _fetch_oa_pdf(entry.identifier, config)
+        except Exception:
+            return  # enrichment must never break scheduling
+        if pdf:
+            entry.oa_url = pdf
+            if entry.channel == "auto":
+                entry.channel = "oa"
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(lookup, targets))
+
+
 def extract_identifier(text: str) -> str | None:
     """Extract a DOI or arXiv ID from a raw string, URL, or citation fragment."""
     raw = text.strip().rstrip(".,;)")
@@ -210,6 +334,19 @@ def write_queue(entries: list[QueueEntry], path: str | Path) -> Path:
 # Lane scheduler
 # ---------------------------------------------------------------------------
 
+def grey_allowed(config: dict[str, Any] | None) -> bool:
+    """Whether grey-source (Sci-Hub/LibGen/SciBban) authorization survives lane
+    scheduling. A user-explicit restriction is a veto: ``scihub_enabled=false``
+    or ``download_strategy=legal_only`` can never be widened by ``--lanes`` or
+    any other scheduling mode. Without an explicit restriction the product
+    default (grey sources participate in fastest / scihub_* strategies) holds.
+    """
+    cfg = config or {}
+    if not cfg.get("scihub_enabled", True):
+        return False
+    return cfg.get("download_strategy", "fastest") != "legal_only"
+
+
 def run_lanes(
     entries: list[QueueEntry],
     output_dir: str | Path,
@@ -226,6 +363,11 @@ def run_lanes(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     config = config or {}
+
+    _enrich_oa_urls(entries, config)
+
+    from . import progress_reporter as _progress
+    _progress.start_task("文献下载", total=len(entries))
 
     fast: list[QueueEntry] = []
     grey: list[str] = []
@@ -245,13 +387,16 @@ def run_lanes(
     fast_failures: list[str] = []
 
     if fast:
-        lane_results = _run_fast_lane(fast, out, config, workers=workers_fast)
+        lane_results = _run_fast_lane(fast, out, config, workers=workers_fast, progress=_progress)
         results += lane_results
         fast_failures = [r["doi"] for r in lane_results if not r.get("success")]
 
     grey_ids = grey + fast_failures if allow_grey else list(grey)
-    if grey_ids and allow_grey:
+    # Lane scheduling must not widen source authorization: if the user has
+    # disabled grey sources, overflow simply does not get a grey retry.
+    if grey_ids and allow_grey and grey_allowed(config):
         from .sources import batch_download
+        _progress.update(phase="灰色源竞速")
         raw = batch_download(grey_ids, str(out), scihub_enabled=True)
         results += _normalize_engine_results(raw)
 
@@ -263,6 +408,7 @@ def run_lanes(
         cfg._config["output_dir"] = str(out)
         fetcher = PaperFetcher(cfg)
         try:
+            _progress.update(phase="机构级联")
             for i, doi in enumerate(inst, 1):
                 print(f"  [institution {i}/{len(inst)}] {doi}")
                 try:
@@ -270,10 +416,12 @@ def run_lanes(
                     r.setdefault("doi", doi)
                 except Exception as exc:
                     r = {"doi": doi, "success": False, "error": str(exc)}
+                _progress.advance(bool(r.get("success")), current=doi)
                 results.append(r)
         finally:
             fetcher.close()
 
+    _progress.finish()
     return results
 
 
@@ -282,10 +430,12 @@ def _run_fast_lane(
     out: Path,
     config: dict[str, Any],
     workers: int = 8,
+    progress: Any = None,
 ) -> list[dict[str, Any]]:
     """HTTP fast lane: known OA URLs and the Elsevier API, in parallel."""
     import requests
 
+    from concurrent.futures import as_completed
     from .sources.elsevier_api import fetch_pdf
 
     api_key = config.get("elsevier_api_key", "")
@@ -310,8 +460,21 @@ def _run_fast_lane(
                 return {"success": True, "doi": e.identifier, "file": str(path), "source": "elsevier_api"}
         return {"success": False, "doi": e.identifier, "error": "fast lane failed (no OA url / API miss)"}
 
+    if progress is not None:
+        progress.update(phase="快车道")
+    results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        return list(ex.map(one, entries))
+        futures = {ex.submit(one, e): e for e in entries}
+        for fut in as_completed(futures):
+            entry = futures[fut]
+            try:
+                r = fut.result()
+            except Exception as exc:
+                r = {"success": False, "doi": entry.identifier, "error": str(exc)}
+            if progress is not None:
+                progress.advance(bool(r.get("success")), current=entry.identifier)
+            results.append(r)
+    return results
 
 
 def _download_url(

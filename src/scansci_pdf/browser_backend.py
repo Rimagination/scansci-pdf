@@ -1,4 +1,4 @@
-"""Unified browser backend: patchright (default) or CloakBrowser.
+"""Unified browser backend: patchright (default), CloakBrowser, or Camoufox.
 
 patchright is the Apache-2.0 open-source Playwright fork that patches the
 detectable automation fingerprints (``--enable-automation`` removal,
@@ -6,9 +6,11 @@ detectable automation fingerprints (``--enable-automation`` removal,
 practice is ``channel="chrome"`` + ``headless=False`` — i.e. driving the local
 Google Chrome, whose kernel auto-updates. CloakBrowser's free tier is pinned
 to Chromium 146 (newer 148/150 kernels are Pro-only), so it is kept as an
-opt-in fallback for headless and other edge cases.
+opt-in fallback. Camoufox is the last-resort fallback: an open-source
+anti-detect Firefox (kernel Firefox 152), with a clean headless UA — no
+``HeadlessChrome``/``HeadlessFirefox`` leak, verified at runtime.
 
-Both backends expose the same Playwright sync API surface (``launch``,
+All backends expose the same Playwright sync API surface (``launch``,
 ``launch_persistent_context``); the CloakBrowser-only ``humanize`` flag is
 accepted everywhere and ignored on patchright.
 """
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 BACKEND_PATCHRIGHT = "patchright"
 BACKEND_CLOAKBROWSER = "cloakbrowser"
+BACKEND_CAMOUFOX = "camoufox"
 DEFAULT_BACKEND = BACKEND_PATCHRIGHT
 
 
@@ -45,6 +48,9 @@ def is_available(name: str | None = None) -> bool:
         if name == BACKEND_CLOAKBROWSER:
             import cloakbrowser  # noqa: F401
             return True
+        if name == BACKEND_CAMOUFOX:
+            import camoufox  # noqa: F401
+            return True
     except ImportError:
         return False
     return False
@@ -54,12 +60,14 @@ def resolve_backend(config: dict[str, Any] | None = None) -> str:
     """Resolve the effective backend from config, falling back gracefully.
 
     ``browser_backend`` config key (default "patchright"); an unknown value
-    warns and resets to the default; a missing patchright install falls back
-    to CloakBrowser with a hint.
+    warns and resets to the default. Fallback chain:
+    patchright → cloakbrowser → camoufox (last resort). A missing patchright
+    falls to cloakbrowser; a missing — or below the kernel floor — cloakbrowser
+    falls to camoufox when that is installed.
     """
     cfg = config or {}
     requested = str(cfg.get("browser_backend", DEFAULT_BACKEND) or DEFAULT_BACKEND).strip().lower()
-    if requested not in (BACKEND_PATCHRIGHT, BACKEND_CLOAKBROWSER):
+    if requested not in (BACKEND_PATCHRIGHT, BACKEND_CLOAKBROWSER, BACKEND_CAMOUFOX):
         logger.warning("browser_backend: unknown backend '%s', using %s", requested, DEFAULT_BACKEND)
         requested = DEFAULT_BACKEND
     if requested == BACKEND_PATCHRIGHT and not is_available(BACKEND_PATCHRIGHT):
@@ -67,7 +75,29 @@ def resolve_backend(config: dict[str, Any] | None = None) -> str:
             "browser_backend: patchright not installed, falling back to cloakbrowser. "
             "Run: pip install patchright"
         )
-        return BACKEND_CLOAKBROWSER
+        requested = BACKEND_CLOAKBROWSER
+    if requested == BACKEND_CLOAKBROWSER and not is_available(BACKEND_CLOAKBROWSER):
+        logger.warning(
+            "browser_backend: cloakbrowser not installed, falling back to camoufox. "
+            "Run: pip install cloakbrowser (or pip install camoufox)"
+        )
+        requested = BACKEND_CAMOUFOX
+    if requested == BACKEND_CAMOUFOX and not is_available(BACKEND_CAMOUFOX):
+        logger.warning(
+            "browser_backend: camoufox not installed, falling back to cloakbrowser. "
+            "Run: pip install camoufox"
+        )
+        requested = BACKEND_CLOAKBROWSER if is_available(BACKEND_CLOAKBROWSER) else BACKEND_PATCHRIGHT
+    # A stale cloakbrowser kernel fails the hard gate at launch time; redirect
+    # to camoufox when available instead of erroring out (escape hatch kept).
+    if requested == BACKEND_CLOAKBROWSER and is_available(BACKEND_CAMOUFOX):
+        v = _cloakbrowser_dist_version()
+        if v is not None and v < CLOAKBROWSER_REQUIRED_MIN and not os.environ.get("SCANSCI_ALLOW_OLD_CLOAKBROWSER"):
+            logger.warning(
+                "browser_backend: cloakbrowser %s below required floor %s, using camoufox",
+                ".".join(str(x) for x in v), ".".join(str(x) for x in CLOAKBROWSER_REQUIRED_MIN),
+            )
+            return BACKEND_CAMOUFOX
     return requested
 
 
@@ -212,6 +242,31 @@ def _patchright_browser_kwargs(config: dict[str, Any] | None) -> dict[str, Any]:
     return {"channel": "chrome"}
 
 
+_DESKTOP_UA_TEMPLATE = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+)
+
+
+def _clean_patchright_ua(browser: Any, headless: bool) -> str | None:
+    """Drop the ``HeadlessChrome/...`` UA prefix that headless Chrome sends.
+
+    Returns a desktop-UA string for the launched kernel's real major version
+    (so the UA always matches the actual binary), or None when the version
+    cannot be read. Only headless launches need this: non-headless Chrome
+    already sends the clean desktop UA.
+    """
+    if not headless:
+        return None
+    try:
+        major = str(browser.version).split(".")[0]
+        if not major.isdigit():
+            return None
+        return _DESKTOP_UA_TEMPLATE.format(major=major)
+    except Exception:
+        return None
+
+
 def _launch_patchright(
     config: dict[str, Any] | None,
     headless: bool,
@@ -248,6 +303,21 @@ def _launch_patchright(
             f"patchright could not launch any browser: {last_error}. "
             "Install Google Chrome or run: patchright install chromium"
         ) from last_error
+
+    # Headless Chrome's UA advertises ``HeadlessChrome``, a clear automation
+    # signal to anti-bot checks. Inject a clean desktop UA at the context level
+    # (renderer-level override — page-level JS UA spoofing is itself detected,
+    # verified via sannysoft: JS override trips HEADCHR_UA, context-level UA is
+    # "ok"). setdefault keeps an explicit caller-supplied user_agent.
+    clean_ua = _clean_patchright_ua(browser, headless)
+    if clean_ua:
+        _original_new_context = browser.new_context
+
+        def _new_context_with_clean_ua(*a: Any, **kw: Any) -> Any:
+            kw.setdefault("user_agent", clean_ua)
+            return _original_new_context(*a, **kw)
+
+        browser.new_context = _new_context_with_clean_ua  # type: ignore[method-assign]
 
     # Stop the Playwright driver when the browser closes (mirrors CloakBrowser).
     original_close = browser.close
@@ -391,6 +461,100 @@ def _launch_cloakbrowser_persistent(
     )
 
 
+def _launch_camoufox(
+    headless: bool,
+    proxy: Any,
+    args: list[str] | None,
+    humanize: bool,
+    **kwargs: Any,
+) -> Any:
+    """Launch via Camoufox (anti-detect Firefox, Playwright API).
+
+    Returns a vanilla ``playwright.sync_api.Browser`` so the rest of the stack
+    (contexts, cookies, close) works unchanged. Handles its own Playwright
+    driver lifecycle, mirroring the other backends.
+    """
+    from camoufox import DefaultAddons, NewBrowser
+    from playwright.sync_api import sync_playwright
+
+    opts = dict(kwargs)
+    # The bundled uBlock addon downloads at build time and fails (or is
+    # rate-limited) -> exclude it, it is not needed for download sessions.
+    opts.setdefault("exclude_addons", [DefaultAddons.UBO])
+    pw = sync_playwright().start()
+    try:
+        browser = NewBrowser(
+            pw,
+            headless=headless,
+            humanize=humanize,
+            args=args or [],
+            proxy=proxy,
+            **opts,
+        )
+    except Exception:
+        pw.stop()
+        raise
+
+    original_close = browser.close
+
+    def _close_with_cleanup() -> None:
+        try:
+            original_close()
+        finally:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+    browser.close = _close_with_cleanup  # type: ignore[method-assign]
+    return browser
+
+
+def _launch_camoufox_persistent(
+    user_data_dir: str,
+    headless: bool,
+    proxy: Any,
+    args: list[str] | None,
+    humanize: bool,
+    **kwargs: Any,
+) -> Any:
+    """Persistent context via Camoufox (returns a BrowserContext)."""
+    from camoufox import DefaultAddons, NewBrowser
+    from playwright.sync_api import sync_playwright
+
+    opts = dict(kwargs)
+    opts.setdefault("exclude_addons", [DefaultAddons.UBO])
+    pw = sync_playwright().start()
+    try:
+        context = NewBrowser(
+            pw,
+            persistent_context=True,
+            user_data_dir=user_data_dir,
+            headless=headless,
+            humanize=humanize,
+            args=args or [],
+            proxy=proxy,
+            **opts,
+        )
+    except Exception:
+        pw.stop()
+        raise
+
+    original_close = context.close
+
+    def _close_with_cleanup() -> None:
+        try:
+            original_close()
+        finally:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+    context.close = _close_with_cleanup  # type: ignore[method-assign]
+    return context
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
@@ -415,6 +579,8 @@ def launch(
         if humanize:
             logger.debug("browser_backend: humanize not supported by patchright, ignored")
         return _launch_patchright(config, headless=headless, proxy=proxy, args=args, **kwargs)
+    if backend == BACKEND_CAMOUFOX:
+        return _launch_camoufox(headless=headless, proxy=proxy, args=args, humanize=humanize, **kwargs)
     return _launch_cloakbrowser(headless=headless, proxy=proxy, args=args, humanize=humanize, **kwargs)
 
 
@@ -438,6 +604,10 @@ def launch_persistent_context(
             logger.debug("browser_backend: humanize not supported by patchright, ignored")
         return _launch_patchright_persistent(
             config, user_data_dir, headless=headless, proxy=proxy, args=args, **kwargs
+        )
+    if backend == BACKEND_CAMOUFOX:
+        return _launch_camoufox_persistent(
+            user_data_dir, headless=headless, proxy=proxy, args=args, humanize=humanize, **kwargs
         )
     return _launch_cloakbrowser_persistent(
         user_data_dir, headless=headless, proxy=proxy, args=args, humanize=humanize, **kwargs
@@ -466,6 +636,16 @@ def browser_info(config: dict[str, Any] | None = None) -> dict[str, Any]:
             else:
                 binary = "channel=chrome"
         info["binary"] = binary
+        return info
+    if backend == BACKEND_CAMOUFOX:
+        try:
+            from camoufox.pkgman import INSTALL_DIR, Version
+            installed = Version.from_path()
+            info["binary"] = str(INSTALL_DIR / "camoufox.exe") if os.name == "nt" else str(INSTALL_DIR)
+            info["version"] = installed.full_string if installed.is_supported() else "unsupported"
+        except Exception:
+            info["binary"] = "camoufox"
+            info["version"] = "?"
         return info
     # CloakBrowser backend
     binary = resolve_browser_binary(cfg)

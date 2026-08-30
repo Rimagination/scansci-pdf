@@ -30,6 +30,9 @@ jobs:
       - name: Install build tools
         run: pip install build twine
 
+      - name: Check release consistency
+        run: python scripts/check_release_consistency.py --expect "${{ inputs.version }}"
+
       - name: Verify compiled extensions exist
         run: |
           if ! ls src/scansci_pdf/_core/*.pyd 2>/dev/null && ! ls src/scansci_pdf/_core/*.so 2>/dev/null; then

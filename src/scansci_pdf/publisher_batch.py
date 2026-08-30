@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import inspect
 import json
+import logging
+import os
 import re
 import shutil
 import threading
@@ -20,6 +22,7 @@ import requests
 
 from .config import load_config, parse_proxy_pool
 from .extractors import pdf_extractor
+from . import progress_reporter
 from .publisher_pdf_router import (
     build_pdf_candidates,
     extract_elsevier_pii,
@@ -32,6 +35,24 @@ EST_ISSN = "1520-5851"
 MIN_PDF_BYTES = 5_000
 MAX_BROWSER_CONCURRENCY = 4
 PDF_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_profile_dir(config: dict[str, Any], explicit: str | Path | None = None) -> Path:
+    """Fixed browser profile dir; explicit/config wins, default is data-dir scoped.
+
+    Never fall back to the current working directory: in agent runs the cwd
+    changes per task, which would silently create a fresh profile — and force a
+    re-login — every time.
+    """
+    if explicit:
+        return Path(explicit)
+    configured = str(config.get("chrome_profile_dir", "") or "").strip()
+    if configured:
+        return Path(configured)
+    data_dir = Path(os.environ.get("SCANSCI_PDF_DATA_DIR", str(Path.home() / ".scansci-pdf")))
+    return data_dir / "browser_profiles" / "publisher"
 
 NON_ARTICLE_PDF_MARKERS = (
     "plain language summary",
@@ -277,6 +298,12 @@ class PublisherBatchDownloader:
         # Maps id(context) → proxy string so _fetch_pdf_url can look up the
         # egress proxy for a page's context and pass it to requests.get().
         self._context_proxy: dict[int, str] = {}
+        # Cookies exported from a closing browser context, re-injected into the
+        # next one when browser_restart_every segments a long run. Session
+        # cookies (no Expires) do not survive a persistent-context restart on
+        # disk, so the hand-off must go through memory.
+        self._handoff_cookies: list[dict[str, Any]] | None = None
+        self._progress_active = False
 
     def run_records(
         self,
@@ -292,6 +319,10 @@ class PublisherBatchDownloader:
         """Download all records and write summary/manifest artifacts."""
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
+        self._progress_active = True
+        progress_reporter.start_task(
+            f"出版商下载 · {self.profile.name}", total=len(records),
+        )
         target = target_verified if target_verified and target_verified > 0 else None
         worker_count = min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
         if target:
@@ -318,18 +349,47 @@ class PublisherBatchDownloader:
                     missing_reasons[record.doi.lower()] = "skipped_cached_attempt"
                 else:
                     records_to_run.append(record)
+            if cached_skipped:
+                progress_reporter.update(
+                    done=cached_skipped, phase="跳过已尝试",
+                )
 
         self._ip_block_stopped = False  # reset; set by _run_once(_parallel) on trip
         self._proxy_blocked = []         # reset; set by _run_once_parallel_rotating
 
-        results = self._run_once(
-            records_to_run,
-            run_path / "primary",
-            target_verified=target,
-            attempt_cache_path=attempt_cache_path,
-            phase="primary",
-            concurrency=worker_count,
-        )
+        restart_every = max(0, int(self.config.get("browser_restart_every", 0) or 0))
+        if restart_every and len(records_to_run) > restart_every:
+            segments = [
+                records_to_run[i : i + restart_every]
+                for i in range(0, len(records_to_run), restart_every)
+            ]
+            logger.info(
+                "browser_restart_every=%d: %d records in %d segments "
+                "(browser context recycled between segments, cookies handed over)",
+                restart_every,
+                len(records_to_run),
+                len(segments),
+            )
+        else:
+            segments = [records_to_run]
+
+        results: list[DownloadResult] = []
+        for seg_index, segment in enumerate(segments):
+            if target and self._count_verified(results) >= target:
+                break  # cumulative verified count already reached the target
+            if self._ip_block_stopped:
+                break  # a previous segment tripped the IP-block auto-stop
+            logger.info("Segment %d/%d: %d records", seg_index + 1, len(segments), len(segment))
+            results.extend(
+                self._run_once(
+                    segment,
+                    run_path / "primary",
+                    target_verified=target,
+                    attempt_cache_path=attempt_cache_path,
+                    phase="primary",
+                    concurrency=worker_count,
+                )
+            )
         primary_ip_blocked = self._ip_block_stopped
         primary_counts = self._count_results(results)
         target_reached = bool(target and self._count_verified(results) >= target)
@@ -376,7 +436,7 @@ class PublisherBatchDownloader:
         summary["cached_skipped"] = cached_skipped
         summary["attempt_cache"] = str(attempt_cache_path)
         summary["concurrency"] = worker_count
-        summary["browser_profile_dir"] = str(Path(self.config.get("chrome_profile_dir", "")))
+        summary["browser_profile_dir"] = str(_resolve_profile_dir(self.config))
         # Surface auto-stop so callers (CLI/MCP) can tell a halt from a clean
         # finish. ip_block_count is how many records came back ip_blocked in the
         # primary pass (the trip trigger).
@@ -391,7 +451,15 @@ class PublisherBatchDownloader:
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        progress_reporter.finish()
+        self._progress_active = False
         return summary
+
+    def _report_progress(self, result: DownloadResult, phase: str) -> None:
+        if getattr(self, "_progress_active", False) and phase == "primary":
+            progress_reporter.advance(
+                result.ok, current=result.doi, phase="浏览器下载",
+            )
 
     def _run_once(
         self,
@@ -419,10 +487,12 @@ class PublisherBatchDownloader:
         consecutive_ip_blocks = 0
 
         context = self._launch_context()
+        self._apply_handoff_cookies(context)
         try:
             for record in records:
                 result = self.fetch_one(context, record, run_dir)
                 results.append(result)
+                self._report_progress(result, phase)
                 if result.ok and result.verified_match:
                     verified_count += 1
                 self._append_attempt(attempt_cache_path, result, phase)
@@ -439,6 +509,7 @@ class PublisherBatchDownloader:
                 if target_verified and verified_count >= target_verified:
                     break
         finally:
+            self._export_handoff_cookies(context)
             try:
                 context.close()
             except Exception:
@@ -480,7 +551,7 @@ class PublisherBatchDownloader:
 
         run_dir.mkdir(parents=True, exist_ok=True)
         profile_root = run_dir / "worker-profiles"
-        source_profile = Path(self.config.get("chrome_profile_dir", ""))
+        source_profile = _resolve_profile_dir(self.config)
         profile_dir = self._prepare_worker_profile(source_profile, profile_root / f"{phase}-shared")
 
         results_by_index: dict[int, DownloadResult] = {}
@@ -501,6 +572,7 @@ class PublisherBatchDownloader:
                 self._write_results(run_dir / "summary_partial.json", partial)
             with attempt_lock:
                 self._append_attempt(attempt_cache_path, result, phase)
+            self._report_progress(result, phase)
             # Escalate to a hard stop after N consecutive IP blocks.
             if result.reason == "ip_blocked":
                 with count_lock:
@@ -517,6 +589,7 @@ class PublisherBatchDownloader:
 
         # Single shared context — login state fully preserved
         context = self._launch_context(profile_dir=profile_dir)
+        self._apply_handoff_cookies(context)
         page_pool = _PagePool(context, max_size=worker_count)
 
         def run_worker(items: list[tuple[int, PaperRecord]]) -> None:
@@ -538,6 +611,7 @@ class PublisherBatchDownloader:
                 future.result()
 
         page_pool.close_all()
+        self._export_handoff_cookies(context)
         try:
             context.close()
         except Exception:
@@ -566,7 +640,7 @@ class PublisherBatchDownloader:
         """
         run_dir.mkdir(parents=True, exist_ok=True)
         profile_root = run_dir / "worker-profiles"
-        source_profile = Path(self.config.get("chrome_profile_dir", ""))
+        source_profile = _resolve_profile_dir(self.config)
 
         # ── 1. shared cookies (login once, reuse across proxies) ──
         login_profile = profile_root / f"{phase}-login"
@@ -620,6 +694,7 @@ class PublisherBatchDownloader:
                 self._write_results(run_dir / "summary_partial.json", part)
             with attempt_lock:
                 self._append_attempt(attempt_cache_path, result, phase)
+            self._report_progress(result, phase)
 
             if result.reason == "ip_blocked":
                 if slot is not None:
@@ -824,7 +899,7 @@ class PublisherBatchDownloader:
     def _launch_context(self, profile_dir: str | Path | None = None, *, proxy: str | None = None):
         from .browser_engine import get_persistent_context
 
-        profile_path = Path(profile_dir) if profile_dir else Path(self.config.get("chrome_profile_dir", ""))
+        profile_path = _resolve_profile_dir(self.config, profile_dir)
         profile_path.mkdir(parents=True, exist_ok=True)
         # Overlay a per-launch proxy without mutating the shared config object.
         config = dict(self.config)
@@ -836,6 +911,30 @@ class PublisherBatchDownloader:
         if proxy:
             self._context_proxy[id(ctx)] = proxy
         return ctx
+
+    def _apply_handoff_cookies(self, context: Any) -> None:
+        """Inject cookies exported from the previous context (segment restarts).
+
+        Uses getattr defensively: unit tests build downloaders via ``__new__``
+        without running ``__init__``.
+        """
+        cookies = getattr(self, "_handoff_cookies", None)
+        if not cookies:
+            return
+        try:
+            context.add_cookies(cookies)
+            logger.info("Restored %d cookies from previous browser context", len(cookies))
+        except Exception as exc:
+            logger.warning("Cookie hand-off injection failed: %s", exc)
+        finally:
+            self._handoff_cookies = None
+
+    def _export_handoff_cookies(self, context: Any) -> None:
+        """Snapshot cookies before a context closes so the next one stays logged in."""
+        try:
+            self._handoff_cookies = context.cookies()
+        except Exception:
+            self._handoff_cookies = None
 
     def fetch_one(self, context_or_page: Any, record: PaperRecord, run_dir: Path) -> DownloadResult:
         # Support both context (creates new page) and pre-created page (from page pool)
@@ -2615,20 +2714,39 @@ class PublisherBatchDownloader:
         else:
             remaining = max(0.0, deadline - time.time())
             max_checks = max(1, int(max(remaining, wait_interval_sec) / wait_interval_sec))
-        waited = False
-        for index in range(max_checks):
-            if self._is_challenge_page(page):
-                if not waited:
-                    self._event(result, "challenge_manual_wait", "complete verification in visible browser")
-                waited = True
-                result.state = "challenge_or_viewer_timeout"
-                self._event(result, "challenge_wait", str(index + 1))
-                time.sleep(wait_interval_sec)
-                continue
-            if waited:
-                self._event(result, "challenge_resolved", getattr(page, "url", ""))
-            return True
-        return not self._is_challenge_page(page)
+        reporter = None
+        attention_key = f"publisher-challenge:{id(self)}:{result.doi}"
+        attention_open = False
+        try:
+            from . import progress_reporter as reporter
+        except Exception:
+            reporter = None
+        try:
+            waited = False
+            for index in range(max_checks):
+                if self._is_challenge_page(page):
+                    if not waited:
+                        self._event(result, "challenge_manual_wait", "complete verification in visible browser")
+                        if reporter is not None:
+                            reporter.set_attention(
+                                attention_key,
+                                "请在浏览器窗口完成安全验证",
+                                current=result.doi,
+                                phase="人工验证",
+                            )
+                            attention_open = True
+                    waited = True
+                    result.state = "challenge_or_viewer_timeout"
+                    self._event(result, "challenge_wait", str(index + 1))
+                    time.sleep(wait_interval_sec)
+                    continue
+                if waited:
+                    self._event(result, "challenge_resolved", getattr(page, "url", ""))
+                return True
+            return not self._is_challenge_page(page)
+        finally:
+            if attention_open and reporter is not None:
+                reporter.clear_attention(attention_key)
 
     def _is_challenge_page(self, page: Any) -> bool:
         haystack = f"{self._title(page)} {self._body_text(page, 1_200)}".lower()
@@ -2764,7 +2882,7 @@ class PublisherBatchDownloader:
         packet = {
             **asdict(result),
             "publisher": self.profile.name,
-            "browser_profile_dir": str(Path(self.config.get("chrome_profile_dir", ""))),
+            "browser_profile_dir": str(_resolve_profile_dir(self.config)),
             "body_excerpt": self._body_text(page, 2_000),
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }

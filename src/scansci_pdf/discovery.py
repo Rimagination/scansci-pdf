@@ -32,10 +32,25 @@ logger = logging.getLogger(__name__)
 
 CLI_NAME = "scansci-find"
 DEFAULT_TIMEOUT = 180  # seconds; citation chasing / systematic searches are slow
+# Single-identifier verify / OA resolve must never inherit the systematic-review
+# budget: a lightweight subprocess that is not back within this budget is a
+# dependency problem, not a slow search.
+LIGHT_TIMEOUT = 45
 
 
 class DiscoveryUnavailableError(RuntimeError):
     """Raised when the scansci-find CLI is missing or broken."""
+
+
+class DiscoveryTimeoutError(RuntimeError):
+    """scansci-find exceeded its budget; carries structured fields for MCP."""
+
+    def __init__(self, message: str, *, command: str, timeout_seconds: int,
+                 retryable: bool = True) -> None:
+        super().__init__(message)
+        self.command = command
+        self.timeout_seconds = timeout_seconds
+        self.retryable = retryable
 
 
 def _cli_path() -> str:
@@ -100,7 +115,10 @@ def _run(args: list[str], *, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
             env=_build_env(),
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"scansci-find {' '.join(args[:2])} timed out after {timeout}s") from None
+        raise DiscoveryTimeoutError(
+            f"scansci-find {' '.join(args[:2])} timed out after {timeout}s",
+            command=" ".join(args[:2]), timeout_seconds=timeout,
+        ) from None
     except OSError as exc:
         raise DiscoveryUnavailableError(f"Failed to run scansci-find: {exc}") from None
 
@@ -228,19 +246,40 @@ def expand_citations(query: str, out_dir: str | Path, *, rounds: int = 1,
 # ---------------------------------------------------------------------------
 
 def verify(candidates: list[dict[str, Any]] | str, *,
-           limit: int | None = None) -> dict[str, Any]:
+           limit: int | None = None, timeout: int = LIGHT_TIMEOUT) -> dict[str, Any]:
     """Verify DOI/PMID/arXiv identifiers against authoritative APIs."""
-    return _identify_pipeline("verify", candidates, limit=limit)
+    return _identify_pipeline("verify", candidates, limit=limit, timeout=timeout)
 
 
 def resolve_oa(candidates: list[dict[str, Any]] | str, *,
-               limit: int | None = None) -> dict[str, Any]:
+               limit: int | None = None, timeout: int = LIGHT_TIMEOUT) -> dict[str, Any]:
     """Resolve DOI open-access locations through Unpaywall."""
-    return _identify_pipeline("resolve-oa", candidates, limit=limit)
+    reason = _check_unpaywall_email()
+    if reason:
+        return {
+            "status": "blocked_configuration",
+            "provider": "unpaywall",
+            "stage": "resolve_oa",
+            "reason": reason,
+            "hint": "Unpaywall 免费 API 需要邮箱：scansci_pdf_config(key='email', value='you@example.com') 后重试",
+        }
+    return _identify_pipeline("resolve-oa", candidates, limit=limit, timeout=timeout)
+
+
+def _check_unpaywall_email() -> str | None:
+    """Return a reason string when Unpaywall email is missing, else None.
+
+    Checked before launching the subprocess so a misconfigured batch is
+    reported once, up front, instead of failing per-identifier downstream.
+    """
+    if _build_env().get("UNPAYWALL_EMAIL"):
+        return None
+    return "missing Unpaywall email (unpaywall API requires a contact email)"
 
 
 def _identify_pipeline(command: str, candidates: list[dict[str, Any]] | str,
-                       *, limit: int | None = None) -> dict[str, Any]:
+                       *, limit: int | None = None,
+                       timeout: int = LIGHT_TIMEOUT) -> dict[str, Any]:
     """Run verify/resolve-oa over a candidate list (path or inline JSON)."""
     temp_created = False
     if isinstance(candidates, str) and Path(candidates).exists():
@@ -259,7 +298,7 @@ def _identify_pipeline(command: str, candidates: list[dict[str, Any]] | str,
     if limit is not None:
         args += ["--limit", str(limit)]
     try:
-        return _run(args)
+        return _run(args, timeout=timeout)
     finally:
         if temp_created:
             try:

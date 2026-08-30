@@ -6,7 +6,7 @@ import json
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -301,6 +301,14 @@ def coverage_report(
 
 # ── Institutional access commands ─────────────────────────────────────────────
 
+@app.command("progress")
+def progress_cmd() -> None:
+    """Show the frosted-glass floating progress bar for running download tasks."""
+    from .progress_bar import main as _progress_bar_main
+
+    _progress_bar_main()
+
+
 @app.command("setup")
 def setup_school(
     school: str = typer.Argument("", help="School name to configure"),
@@ -403,6 +411,14 @@ def fetch_paper_cmd(
     fetcher.close()
 
 
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Write JSON atomically (temp file then replace) so a crash mid-write
+    never leaves a truncated batch report."""
+    tmp = path.with_suffix(str(path.suffix) + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _write_retry_file(output: str, results: list) -> None:
     """Persist failed identifiers as retry.txt so 'batch --retry' can pick them up."""
     try:
@@ -461,17 +477,31 @@ def batch_fetch_cmd(
         return
 
     # Channel-lane scheduling (opt-in, or automatic for table inputs)
-    from .pipeline import collect_failures, run_lanes
+    from .pipeline import collect_failures, grey_allowed, run_lanes
 
     use_lanes = lanes and entries is not None
     if use_lanes:
-        results = run_lanes(entries, output, config=_load_config(), allow_grey=True)
+        cfg = _load_config()
+        try:
+            # Lane scheduling only changes the schedule, never the source
+            # authorization: allow_grey is derived from the user's config.
+            results = run_lanes(entries, output, config=cfg, allow_grey=grey_allowed(cfg))
+        except Exception as exc:
+            print(f"\n  Lane scheduling error: {exc}")
+            results = [
+                {"doi": e.identifier, "success": False, "error": f"lane error: {exc}"}
+                for e in entries if not e.unresolved
+            ]
+            partial_path = Path(output) / "batch_results.partial.json"
+            _atomic_write_json(partial_path, results)
+            print(f"  Partial results saved to: {partial_path}")
+            return
         ok = sum(1 for r in results if r.get("success"))
         print(f"\n  Lane results: {ok}/{len(results)} succeeded")
         if format == "json":
             _write_retry_file(output, results)
             out_path = Path(output) / "batch_results.json"
-            out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+            _atomic_write_json(out_path, results)
             print(f"  Results saved to: {out_path}")
         return
 
@@ -491,7 +521,7 @@ def batch_fetch_cmd(
         if format == "json":
             _write_retry_file(output, results)
             out_path = Path(output) / "batch_results.json"
-            out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+            _atomic_write_json(out_path, results)
             print(f"\n  Results saved to: {out_path}")
         return
 
@@ -528,7 +558,7 @@ def batch_fetch_cmd(
 
     if format == "json":
         out_path = Path(output) / "batch_results.json"
-        out_path.write_text(_json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(out_path, results)
         print(f"\n  Results saved to: {out_path}")
 
 

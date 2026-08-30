@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -14,8 +15,12 @@ from .session_store import CookieStore
 
 try:
     from .browser_backend import launch
+    from .browser_backend import BACKEND_CAMOUFOX, BACKEND_CLOAKBROWSER, BACKEND_PATCHRIGHT
     from .browser_backend import is_available as _browser_backend_available
-    _HAS_CLOAKBROWSER = _browser_backend_available()
+    _HAS_CLOAKBROWSER = any(
+        _browser_backend_available(b)
+        for b in (BACKEND_PATCHRIGHT, BACKEND_CLOAKBROWSER, BACKEND_CAMOUFOX)
+    )
 except ImportError:
     launch = None  # type: ignore[assignment]
     _HAS_CLOAKBROWSER = False
@@ -44,6 +49,30 @@ def _get_profile_dir(config: dict) -> Path:
     return data_dir / "browser_profiles" / "webvpn"
 
 
+def _seed_saved_cookies(cookie_path: Path, context: Any) -> int:
+    """Restore cookies saved to disk into the freshly launched browser.
+
+    Gateway session cookies (no Expires) never survive a browser close
+    inside the persistent profile — Chrome keeps them in memory only —
+    so the profile itself cannot restore the session. CookieStore keeps
+    them as valid on disk; inject them before navigation so the gateway
+    accepts the restored session instead of forcing a manual re-login.
+    """
+    cookies = CookieStore(cookie_path).load()
+    if not cookies:
+        return 0
+    for cookie in cookies:
+        if cookie.get("expires", 0) <= 0:
+            cookie.pop("expires", None)  # Playwright treats 0 as already expired
+    try:
+        context.add_cookies(cookies)
+    except Exception as exc:
+        logger.warning("Failed to seed saved cookies into browser: %s", exc)
+        return 0
+    logger.info("Restored %d saved cookies into browser session", len(cookies))
+    return len(cookies)
+
+
 class WebVPNAuth:
     """Manages campus access authentication and URL conversion.
 
@@ -64,7 +93,7 @@ class WebVPNAuth:
         self._browser = None
         self._context = None
         self._page = None
-        base = config.get("instsci_base_url", "")
+        base = config.get("instsci_base_url", "") or config.get("vpnsci_base_url", "")
         self._webvpn_base = base.rstrip("/") if base else ""
 
     @property
@@ -187,6 +216,8 @@ class WebVPNAuth:
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
             return False
+
+        _seed_saved_cookies(_get_cookie_path(self.config), self._context)
 
         if not self._webvpn_base:
             logger.error(
@@ -410,6 +441,8 @@ class EZProxyAuth:
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
             return False
+
+        _seed_saved_cookies(_get_cookie_path(self.config), self._context)
 
         self._page.goto(self._proxy_base + TEST_URL, wait_until="domcontentloaded")
 

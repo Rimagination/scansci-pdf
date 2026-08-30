@@ -1,6 +1,6 @@
 [project]
 name = "scansci-pdf"
-version = "1.11.0"
+version = "1.12.0"
 description = "MCP server for academic paper downloading with Sci-Hub, OA sources, multi-university WebVPN, and Tor support"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -44,3 +44,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyd", "_core/*.so", "templates/*.html"]
+
+[tool.pytest.ini_options]
+# Manual network/browser scripts in the repo root (e.g. test_download_pnas.py)
+# must not be collected as tests.
+testpaths = ["tests"]

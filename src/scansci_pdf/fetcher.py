@@ -133,15 +133,34 @@ def _apply_pdf_bytes(paper: Paper, pdf_bytes: bytes, doi: str, source: str,
     paper.source = source
 
 
-def _wait_for_challenge(page, max_tries: int = 6) -> None:
-    """Wait for Cloudflare/bot-detection challenges to clear."""
-    for i in range(max_tries):
-        title = page.title().lower()
-        if any(sig in title for sig in _CHALLENGE_KEYWORDS):
-            logger.info("Challenge page detected, waiting... (%d/%d)", i + 1, max_tries)
-            time.sleep(5)
-        else:
-            break
+def _wait_for_challenge(page, max_tries: int = 6, *, current: str = "") -> None:
+    """Wait for a visible browser challenge and expose it in the progress bar."""
+    reporter = None
+    attention_key = f"browser-challenge:{id(page)}:{current}"
+    attention_open = False
+    try:
+        from . import progress_reporter as reporter
+    except Exception:
+        reporter = None
+    try:
+        for i in range(max_tries):
+            title = page.title().lower()
+            if any(sig in title for sig in _CHALLENGE_KEYWORDS):
+                if not attention_open and reporter is not None:
+                    reporter.set_attention(
+                        attention_key,
+                        "请在浏览器窗口完成安全验证",
+                        current=current,
+                        phase="人工验证",
+                    )
+                    attention_open = True
+                logger.info("Challenge page detected, waiting... (%d/%d)", i + 1, max_tries)
+                time.sleep(5)
+            else:
+                break
+    finally:
+        if attention_open and reporter is not None:
+            reporter.clear_attention(attention_key)
 
 
 class PaperFetcher:
@@ -152,6 +171,14 @@ class PaperFetcher:
         self.config = config or load_config()
         self._auth: WebVPNAuth | EZProxyAuth | None = None
         self._last_request_time = 0.0
+
+    def _challenge_max_tries(self) -> int:
+        """Keep a challenged DOI open long enough for a human to act."""
+        try:
+            seconds = int(self.config.get("challenge_wait_seconds", 900) or 900)
+        except (AttributeError, TypeError, ValueError):
+            seconds = 900
+        return max(6, (max(0, seconds) + 4) // 5)
 
     @property
     def auth(self) -> WebVPNAuth | EZProxyAuth:
@@ -323,6 +350,7 @@ class PaperFetcher:
         return bool(
             self.config.get("instsci_school")
             or self.config.get("instsci_base_url")
+            or self.config.get("vpnsci_base_url")
             or self.config.get("ezproxy_login_url")
             or self.config.get("network_proxy")
             or (self.config.get("carsi_enabled") and self.config.get("carsi_idp_name"))
@@ -448,7 +476,8 @@ class PaperFetcher:
         except Exception as e:
             logger.warning("Navigation failed: %s", e)
 
-        _wait_for_challenge(page, max_tries=6)
+        challenge_tries = self._challenge_max_tries()
+        _wait_for_challenge(page, max_tries=challenge_tries, current=doi)
 
         current_url = page.url
         logger.info("Browser article page: url=%s, title=%s", current_url[:60], page.title()[:40])
@@ -475,7 +504,7 @@ class PaperFetcher:
                         time.sleep(3)
                     except Exception:
                         pass
-                    _wait_for_challenge(page, max_tries=6)
+                    _wait_for_challenge(page, max_tries=challenge_tries, current=doi)
                     current_url = page.url
 
         try:
@@ -545,7 +574,7 @@ class PaperFetcher:
                 logger.debug("Navigation to %s failed: %s", pdf_url[:60], e)
                 continue
 
-            _wait_for_challenge(page, max_tries=4)
+            _wait_for_challenge(page, max_tries=challenge_tries, current=doi)
 
             if not captured_pdf["bytes"]:
                 try:

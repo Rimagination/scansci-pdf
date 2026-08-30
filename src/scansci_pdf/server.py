@@ -96,9 +96,12 @@ def scansci_pdf_download(
 
     if result.get("success") and markdown:
         try:
-            from .md_export import pdf_to_markdown
+            from .md_export import pdf_to_markdown_detailed
 
-            result["markdown"] = str(pdf_to_markdown(result["file"]))
+            md_out, md_warnings = pdf_to_markdown_detailed(result["file"])
+            result["markdown"] = str(md_out)
+            if md_warnings:
+                result["markdown_warnings"] = md_warnings
         except Exception as exc:
             result["markdown_error"] = str(exc)
 
@@ -308,9 +311,11 @@ def scansci_pdf_verify_identifiers(candidates_json: str) -> str:
     Args:
         candidates_json: JSON array of candidates (as produced by ScanSci Find), or a path to one.
     """
-    from .discovery import verify
+    from .discovery import DiscoveryTimeoutError, verify
     try:
         return json.dumps(verify(candidates_json), ensure_ascii=False)
+    except DiscoveryTimeoutError as exc:
+        return json.dumps(_discovery_timeout_payload(exc), ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -321,11 +326,26 @@ def scansci_pdf_resolve_oa(candidates_json: str) -> str:
     Args:
         candidates_json: JSON array of candidates (as produced by ScanSci Find), or a path to one.
     """
-    from .discovery import resolve_oa
+    from .discovery import DiscoveryTimeoutError, resolve_oa
     try:
         return json.dumps(resolve_oa(candidates_json), ensure_ascii=False)
+    except DiscoveryTimeoutError as exc:
+        return json.dumps(_discovery_timeout_payload(exc), ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def _discovery_timeout_payload(exc: Any) -> dict[str, Any]:
+    """Structured timeout payload so agents can tell dependency timeouts apart
+    from 'paper not found' or 'rate limited'."""
+    return {
+        "error": str(exc),
+        "stage": "discovery",
+        "provider": "scansci-find",
+        "timeout_seconds": getattr(exc, "timeout_seconds", None),
+        "retryable": getattr(exc, "retryable", True),
+        "fallback_used": False,
+    }
 
 
 def scansci_pdf_build_download_queue(
@@ -1286,9 +1306,24 @@ def scansci_pdf_prepare_queue(
     if action == "build":
         return scansci_pdf_build_download_queue(query=query, limit=limit, depth=depth)
     if action == "full":
-        verified = scansci_pdf_verify_identifiers(candidates_json)
-        with_oa = scansci_pdf_resolve_oa(candidates_json)
-        return json.dumps({"verified": json.loads(verified), "oa": json.loads(with_oa)}, ensure_ascii=False)
+        from .discovery import DiscoveryTimeoutError, resolve_oa, verify
+        # Shared budget: verify + resolve-oa together must not take the sum of
+        # two light budgets (45s each). Each subprocess gets the remaining time.
+        budget_seconds = 75
+        t0 = time.time()
+        try:
+            verified = verify(candidates_json, timeout=max(10, int(budget_seconds - (time.time() - t0))))
+        except DiscoveryTimeoutError as exc:
+            verified = _discovery_timeout_payload(exc)
+        except Exception as exc:
+            verified = {"error": str(exc)}
+        try:
+            with_oa = resolve_oa(candidates_json, timeout=max(10, int(budget_seconds - (time.time() - t0))))
+        except DiscoveryTimeoutError as exc:
+            with_oa = _discovery_timeout_payload(exc)
+        except Exception as exc:
+            with_oa = {"error": str(exc)}
+        return json.dumps({"verified": verified, "oa": with_oa}, ensure_ascii=False)
     return json.dumps({"error": f"unknown action: {action}", "allowed": ["verify", "resolve_oa", "build", "full"]}, ensure_ascii=False)
 
 

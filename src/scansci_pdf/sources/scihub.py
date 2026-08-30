@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import atexit
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +43,64 @@ def _mark_browser_required(domain: str, config: dict[str, Any]) -> None:
 def _is_browser_domain(domain: str) -> bool:
     """Check if domain requires browser bypass."""
     return domain in _browser_domains
+
+
+# ---------------------------------------------------------------------------
+# Persistent browser-worker pool
+# ---------------------------------------------------------------------------
+# Every browser-backed Sci-Hub attempt (browser-first download, tab racing,
+# Cloudflare/ALTCHA bypass) runs on THIS pool instead of ad-hoc per-paper
+# executors. Its threads live for the whole process, so each worker's
+# thread-local browser (browser_engine._get_shared_browser) is created once
+# and reused for every paper: no per-paper window flashing, no per-paper
+# startup cost, and Cloudflare clearance cookies survive between attempts.
+# Workers are closed by _shutdown_scihub_pool (registered below) — never per
+# paper. browser_engine's atexit reaper is the last-resort backstop.
+
+_RACE_POOL: ThreadPoolExecutor | None = None
+_RACE_POOL_LOCK = threading.Lock()
+
+
+def _race_pool(config: dict[str, Any]) -> ThreadPoolExecutor:
+    global _RACE_POOL
+    with _RACE_POOL_LOCK:
+        if _RACE_POOL is None:
+            workers = max(1, int(config.get("scihub_browser_workers", 3) or 3))
+            _RACE_POOL = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="scihub-browser"
+            )
+        return _RACE_POOL
+
+
+def _close_my_browser() -> None:
+    """Runs INSIDE a pool worker: closes that worker's own thread-local browser."""
+    try:
+        from ..browser_engine import shutdown_shared_browser
+        shutdown_shared_browser()
+    except Exception:
+        pass
+
+
+def _shutdown_scihub_pool() -> None:
+    """Gracefully close every pool worker's browser, then the pool. Idempotent."""
+    global _RACE_POOL
+    with _RACE_POOL_LOCK:
+        pool, _RACE_POOL = _RACE_POOL, None
+    if pool is None:
+        return
+    try:
+        # Idle workers each pick up one shutdown task and close their own
+        # browser in their own thread (Playwright sync objects are
+        # thread-affine). Anything missed here is caught by the process-exit
+        # reaper in browser_engine.
+        for _ in range(pool._max_workers):  # type: ignore[attr-defined]
+            pool.submit(_close_my_browser)
+        pool.shutdown(wait=True)
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown_scihub_pool)
 
 _PROBE_TTL_HOURS = 4
 _SCIHUB_PROBE_WORKERS = 8
@@ -94,14 +154,18 @@ def _probe_scihub_domains(config: dict[str, Any]) -> None:
 
 def _is_browser_available(config: dict[str, Any]) -> bool:
     """Check if CloakBrowser is available. Returns False in asyncio context."""
-    # Playwright Sync API cannot run inside a running asyncio event loop, so
-    # don't even try — return False and let HTTP-only sources handle it.
+    # A running asyncio loop normally means "user asyncio code — the Playwright
+    # sync API cannot serve it". Exception: our persistent pool workers, where
+    # the loop was created by the sync API itself (browser_engine tracks it).
     try:
         import asyncio
-        asyncio.get_running_loop()
-        return False
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        pass
+        loop = None
+    if loop is not None:
+        from ..browser_engine import is_playwright_owned_loop
+        if not is_playwright_owned_loop(loop):
+            return False
     try:
         from ..browser_engine import is_available
         return is_available(config)
@@ -577,6 +641,11 @@ def _race_browser_domains(
 
 
 def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: bool = False) -> dict[str, Any] | None:
+    # All browser-backed attempts below run on the persistent worker pool
+    # (_race_pool): pool threads live for the whole process, so each worker's
+    # thread-local browser is created once and reused across papers — no
+    # per-paper window flashing. Do NOT shut browsers down here; cleanup is
+    # _shutdown_scihub_pool (atexit) plus browser_engine's process-exit reaper.
     try:
         return _try_scihub_impl(doi, output_path, config, use_tor)
     except Exception as e:
@@ -589,15 +658,6 @@ def try_scihub(doi: str, output_path: Path, config: dict[str, Any], use_tor: boo
                 return {"success": True, "identifier": doi, "doi": doi,
                         "file": str(output_path), "source": "Sci-Hub(recovered)"}
         return None
-    finally:
-        # Ensure no CloakBrowser subprocess is left behind after Sci-Hub
-        # attempts (browser-first pass, Cloudflare/ALTCHA challenge solving).
-        # Idempotent — safe to call even when nothing was launched.
-        try:
-            from ..browser_engine import shutdown_shared_browser
-            shutdown_shared_browser()
-        except Exception:
-            pass
 
 
 def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_tor: bool = False) -> dict[str, Any] | None:
@@ -616,15 +676,21 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         browser_domains = configured_domains[:5]
         max_workers = min(config.get("scihub_browser_workers", 3), len(browser_domains))
 
+        pool = _race_pool(config)
         if max_workers <= 1 or len(browser_domains) == 1:
-            # Single worker or single domain: skip thread pool overhead
+            # Single worker or single domain: sequential attempts on the pool
+            # (browser lives on the pool worker, not the caller's thread).
             for domain in browser_domains:
                 landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
-                result = _browser_first_download(landing_url, doi, output_path, config)
+                result = pool.submit(
+                    _browser_first_download, landing_url, doi, output_path, config
+                ).result()
                 if result:
                     return result
         else:
-            result = _race_browser_domains(browser_domains, doi, output_path, config, max_workers)
+            result = pool.submit(
+                _race_browser_domains, browser_domains, doi, output_path, config, max_workers
+            ).result()
             if result:
                 return result
 
@@ -701,7 +767,9 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
     best_output = output_path.parent / f"{output_path.stem}_scihub_{best_domain.split('//')[1].replace('.', '_')}.pdf"
     log.info(f"   Sci-Hub: trying {best_domain} first...")
     try:
-        result = try_scihub_domain(doi, best_domain, best_output, config, use_tor=use_tor)
+        result = _race_pool(config).submit(
+            try_scihub_domain, doi, best_domain, best_output, config, use_tor
+        ).result()
         if result and result.get("success"):
             final_path = Path(result.get("file", ""))
             if final_path != output_path and final_path.exists():
@@ -723,50 +791,53 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         return None
 
     log.info(f"   Sci-Hub: racing {len(remaining)} backup domains...")
-    with ThreadPoolExecutor(max_workers=len(remaining)) as pool:
-        futures = {}
-        for domain in remaining:
-            src_output = output_path.parent / f"{output_path.stem}_scihub_{domain.split('//')[1].replace('.', '_')}.pdf"
-            futures[pool.submit(try_scihub_domain, doi, domain, src_output, config, use_tor)] = (domain, src_output)
-        try:
-            for future in as_completed(futures, timeout=10):
-                domain, src_output = futures[future]
-                try:
-                    result = future.result(timeout=1)
-                except Exception:
-                    result = None
-                if result and result.get("success"):
-                    final_path = Path(result.get("file", ""))
-                    if final_path != output_path and final_path.exists():
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        if output_path.exists():
-                            output_path.unlink()
-                        final_path.rename(output_path)
-                        result["file"] = str(output_path)
-                    for _, other_path in futures.values():
-                        if other_path != output_path and other_path.exists():
-                            try:
-                                other_path.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                    record_result(domain, True, config)
-                    log.info(f"   Sci-Hub: OK {domain}")
-                    return result
-                else:
-                    record_result(domain, False, config)
-                    if src_output.exists():
+    # Persistent pool — workers (and their browsers) are NOT torn down here.
+    # Losers that outlive the 10s collection window keep running in the
+    # background and are simply ignored; their temp files may linger.
+    pool = _race_pool(config)
+    futures = {}
+    for domain in remaining:
+        src_output = output_path.parent / f"{output_path.stem}_scihub_{domain.split('//')[1].replace('.', '_')}.pdf"
+        futures[pool.submit(try_scihub_domain, doi, domain, src_output, config, use_tor)] = (domain, src_output)
+    try:
+        for future in as_completed(futures, timeout=10):
+            domain, src_output = futures[future]
+            try:
+                result = future.result(timeout=1)
+            except Exception:
+                result = None
+            if result and result.get("success"):
+                final_path = Path(result.get("file", ""))
+                if final_path != output_path and final_path.exists():
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    if output_path.exists():
+                        output_path.unlink()
+                    final_path.rename(output_path)
+                    result["file"] = str(output_path)
+                for _, other_path in futures.values():
+                    if other_path != output_path and other_path.exists():
                         try:
-                            src_output.unlink(missing_ok=True)
+                            other_path.unlink(missing_ok=True)
                         except OSError:
                             pass
-        except TimeoutError:
-            log.info("   Sci-Hub: backup domains timed out")
-        for _, src_output in futures.values():
-            if src_output.exists():
-                try:
-                    src_output.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                record_result(domain, True, config)
+                log.info(f"   Sci-Hub: OK {domain}")
+                return result
+            else:
+                record_result(domain, False, config)
+                if src_output.exists():
+                    try:
+                        src_output.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+    except TimeoutError:
+        log.info("   Sci-Hub: backup domains timed out")
+    for _, src_output in futures.values():
+        if src_output.exists():
+            try:
+                src_output.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # All clearnet domains failed — auto-retry with Tor + .onion (only if config allows)
     if not use_tor and config.get("use_tor_for_scihub", True):
