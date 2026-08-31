@@ -77,6 +77,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 批量下载成功后自动抓取附件/补充材料（SI）。默认关——大多数任务只要主 PDF。
     # 开启后成功论文会尝试抓取出版商补充材料，存为 {DOI}_SI{n}.{ext}，并写 si_manifest.json。
     "download_si": False,
+    # 任务启动时自动弹出悬浮进度条（独立进程，已有实例则不重复弹出）。
+    "progress_bar_auto": True,
     # Turnstile 交互门（如 sci-hub.vg）：无头会话下无法点击，默认跳过并冷却。
     # scihub_browser_headless=false 时可开启人工点一次模式（点一次整批复用）。
     "scihub_turnstile_click": True,

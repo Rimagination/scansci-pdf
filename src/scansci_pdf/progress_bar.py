@@ -22,6 +22,8 @@ import tkinter as tk
 import tkinter.font as tkfont
 from typing import Any
 
+import os as _os
+
 from .progress_reporter import read_state
 
 # --- Win32 / DWM constants -------------------------------------------------
@@ -317,9 +319,35 @@ class ProgressWindow:
         except Exception:
             pass
 
+    def _write_lock(self) -> None:
+        try:
+            from .progress_reporter import progress_path
+
+            lock = progress_path().parent / "bar.pid"
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            lock.write_text(str(_os.getpid()), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _release_lock(self) -> None:
+        try:
+            from .progress_reporter import progress_path
+
+            lock = progress_path().parent / "bar.pid"
+            if lock.exists():
+                lock.unlink()
+        except Exception:
+            pass
+
     def run(self) -> None:
+        self._write_lock()
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.after(400, self._report_geom)
         self.root.mainloop()
+
+    def _close(self) -> None:
+        self._release_lock()
+        self.root.destroy()
 
 
 def main() -> None:

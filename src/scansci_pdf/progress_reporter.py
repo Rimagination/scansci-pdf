@@ -52,9 +52,78 @@ def _atomic_write(payload: dict[str, Any]) -> None:
         raise
 
 
+def _pid_alive(pid: int) -> bool:
+    """Windows-safe liveness probe. NEVER use os.kill(pid, 0) on Windows —
+    any signal value there calls TerminateProcess and would murder the bar."""
+    if pid <= 0:
+        return False
+    try:
+        if os.name != "nt":
+            os.kill(pid, 0)
+            return True
+        import ctypes
+
+        SYNCHRONIZE = 0x00100000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return False
+        kernel32.CloseHandle(int(handle))
+        return True
+    except Exception:
+        return False
+
+
+def ensure_progress_bar(config: dict[str, Any] | None = None) -> None:
+    """Spawn the floating progress bar once (no-op when one is already up).
+
+    Called whenever a task starts, so users always get visibility without
+    launching anything by hand. The bar is an independent process; a stale
+    pid lock (dead bar) is reclaimed. Disable via config
+    ``progress_bar_auto: false`` or env ``SCANSCI_PROGRESS_BAR=0``.
+    """
+    if os.environ.get("SCANSCI_PROGRESS_BAR") == "0":
+        return
+    if os.environ.get("SCANSCI_PROGRESS_BAR_CHILD") == "1":
+        return
+    if config is not None and config.get("progress_bar_auto") is False:
+        return
+    lock = _progress_dir() / "bar.pid"
+    try:
+        if lock.exists():
+            pid = int(lock.read_text(encoding="utf-8").strip() or 0)
+            if _pid_alive(pid):
+                return  # a bar is already up
+            # else: stale lock (bar died) - reclaim below
+    except (ValueError, OSError):
+        return
+    try:
+        import subprocess
+        import sys
+
+        kwargs = {"creationflags": 0x08000000} if os.name == "nt" else {}
+        env = {**os.environ, "SCANSCI_PROGRESS_BAR_CHILD": "1"}
+        subprocess.Popen(
+            [sys.executable, "-m", "scansci_pdf.progress_bar"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, **kwargs,
+        )
+    except Exception:
+        pass
+
+
 def start_task(task: str, total: int, **extra: Any) -> None:
     """Begin (or restart) the reported task with a known total."""
     global _STATE, _STARTED_MONO
+    try:
+        from .config import load_config
+
+        ensure_progress_bar(load_config())
+    except Exception:
+        try:
+            ensure_progress_bar()
+        except Exception:
+            pass
     with _LOCK:
         _STARTED_MONO = time.monotonic()
         _STATE = {
