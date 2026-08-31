@@ -38,6 +38,13 @@
 - `_WALL_COOLDOWN_BASE_SEC = 90`，×3 指数递增，cap 900：撞墙后冷却
 - `_MIRROR_STRUCTURAL_COOLDOWN_SEC = 7200`：结构性坏死跳过 2 小时
 
+## Elsevier API 节奏（2026-08-31 实测）
+
+按**请求速度**限流：批量 1.6 篇/秒时触发瞬时失败（64 篇失败中 56 篇为瞬时限流）；
+**15s/篇 的节奏实测 56/56 全部收回**。HEAD 探测（200=有权）不占配额、可随时做。
+冷却重试用 `_transient_retry`（fast_retry_delay_sec=15, workers=1）。**换 IP 无增益**：
+权限矩阵显示代理与直连双路由 99.7% 等价（1456/1460 ENTITLED）。
+
 ## 按域直连
 
 sci-hub.ru 按**出口 IP** 限速：代理用户共享一个出口，很快被墙；直连每用户独立 IP，清白（2026-08-30 实测：同机代理=常驻墙，直连=干净文章页）。`network.select_proxy_for_url` 默认让 `sci-hub.ru` 直连——`direct_domains` 扩展名单、`scihub_direct: false` 关闭、Tor 优先级最高。

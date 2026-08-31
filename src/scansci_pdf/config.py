@@ -76,7 +76,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "browser_restart_every": 0,
     # 批量下载成功后自动抓取附件/补充材料（SI）。默认关——大多数任务只要主 PDF。
     # 开启后成功论文会尝试抓取出版商补充材料，存为 {DOI}_SI{n}.{ext}，并写 si_manifest.json。
-    "download_si": False,
+    "fast_retry_wait_sec": 60,
+    # 冷却重试期间的逐篇间隔（秒）。实测 15s/篇可 100% 绕开 Elsevier API 限流。
+    "fast_retry_delay_sec": 15,
     # 任务启动时自动弹出悬浮进度条（独立进程，已有实例则不重复弹出）。
     "progress_bar_auto": True,
     # Turnstile 交互门（如 sci-hub.vg）：无头会话下无法点击，默认跳过并冷却。

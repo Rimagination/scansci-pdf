@@ -488,7 +488,8 @@ def _transient_retry(results: list[dict[str, Any]], entries: list[QueueEntry],
     except Exception:
         pass
     time.sleep(wait_sec)
-    retry_results = _run_fast_lane(retry_entries, out, config, workers=4, progress=None)
+    delay = max(1.0, float(config.get("fast_retry_delay_sec", 15)))
+    retry_results = _run_fast_lane(retry_entries, out, config, workers=1, progress=None, delay=delay)
     recovered = 0
     by_doi = {r["doi"]: r for r in retry_results if r.get("doi")}
     for i, r in enumerate(results):
@@ -551,6 +552,7 @@ def _run_fast_lane(
     config: dict[str, Any],
     workers: int = 8,
     progress: Any = None,
+    delay: float = 0.0,
 ) -> list[dict[str, Any]]:
     """HTTP fast lane: known OA URLs and the Elsevier API, in parallel."""
     import requests
@@ -583,8 +585,15 @@ def _run_fast_lane(
     if progress is not None:
         progress.update(phase="快车道")
     results: list[dict[str, Any]] = []
+    import time as _time
+
+    def _one_paced(e: QueueEntry) -> dict[str, Any]:
+        if delay > 0:
+            _time.sleep(delay)  # 节流：冷却重试期间按间隔逐篇取，绕开限流
+        return one(e)
+
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        futures = {ex.submit(one, e): e for e in entries}
+        futures = {ex.submit(_one_paced, e): e for e in entries}
         for fut in as_completed(futures):
             entry = futures[fut]
             try:

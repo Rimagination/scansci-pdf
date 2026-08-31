@@ -132,7 +132,7 @@ class TransientRetryTests(unittest.TestCase):
                     "error": "fast lane failed (no OA url / API miss)"}]
         retry_call = {}
 
-        def fake_fast(fast_entries, out, config, workers=8, progress=None):
+        def fake_fast(fast_entries, out, config, workers=8, progress=None, delay=0.0):
             retry_call["entries"] = [e.identifier for e in fast_entries]
             return [{"success": True, "doi": "10.1016/x", "file": str(self.out / "x.pdf")}]
 
