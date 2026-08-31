@@ -200,6 +200,20 @@ def set_attention(key: str, message: str, *, current: str = "", phase: str = "")
             pass
 
 
+def set_output_dir(path) -> None:
+    """Record the task's output folder — the progress bar shows it as a
+    clickable link so users can jump straight to the downloads."""
+    with _LOCK:
+        if not _STATE:
+            return
+        _STATE["output_dir"] = str(path)
+        _STATE["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            _atomic_write(dict(_STATE))
+        except Exception:
+            pass
+
+
 def clear_attention(key: str) -> None:
     """Remove one manual-action reminder after its browser page clears."""
     with _LOCK:

@@ -18,6 +18,7 @@ Visual stack (no third-party GUI deps):
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 import tkinter.font as tkfont
 from typing import Any
@@ -45,7 +46,7 @@ DIM = "#475569"
 ATTENTION = "#b45309"
 
 # Logical layout (scaled by the real DPI factor at runtime)
-W, H, MARGIN = 440, 92, 12
+W, H, MARGIN = 440, 108, 12
 RADIUS = 16
 
 
@@ -290,6 +291,18 @@ class ProgressWindow:
                           text=_elide(self.f_small, current, avail),
                           fill=DIM, font=self.f_small, anchor="w")
 
+        # Output folder row: clickable, opens the downloads folder in Explorer.
+        output_dir = str(state.get("output_dir") or "")
+        out_y = cur_y + int(18 * self.s)
+        if output_dir:
+            c.tag_bind("outdir", "<Button-1>",
+                       lambda e: self._open_output_dir(state))
+            c.tag_bind("outdir", "<Enter>", lambda e: c.config(cursor="hand2"))
+            c.tag_bind("outdir", "<Leave>", lambda e: c.config(cursor=""))
+            c.create_text(M + int(14 * self.s), out_y,
+                          text="📂 " + _elide(self.f_small, output_dir, avail - int(16 * self.s)),
+                          fill=DIM, font=self.f_small, anchor="w", tags=("outdir",))
+
         # pill progress bar
         bx0, by1 = M + int(14 * self.s), Hl - M - int(12 * self.s)
         bx1, by0 = Wl - M - int(14 * self.s), by1 - int(16 * self.s)
@@ -301,6 +314,14 @@ class ProgressWindow:
                                fill=(FILL_OK if not running else FILL), outline="")
 
     # --- polling ------------------------------------------------------------
+    def _open_output_dir(self, state: dict) -> None:
+        d = str(state.get("output_dir") or "")
+        if d and os.path.isdir(d):
+            try:
+                os.startfile(d)  # Windows: open Explorer at the folder
+            except Exception:
+                pass
+
     def _tick(self) -> None:
         try:
             self._draw(read_state())

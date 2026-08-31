@@ -117,3 +117,25 @@ class StartTaskAutoLaunchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetOutputDirTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = patch.object(pr, "_progress_dir",
+                               return_value=Path(self.tmp.name) / "progress")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: setattr(pr, "_STATE", {}))
+
+    def test_set_output_dir_persists_to_state_file(self):
+        pr.start_task("文献下载", total=5)
+        pr.set_output_dir(r"D:\scansci-deliverables\L3-Elsevier")
+        state = json.loads((Path(self.tmp.name) / "progress" / "current.json")
+                           .read_text(encoding="utf-8"))
+        self.assertEqual(state["output_dir"], r"D:\scansci-deliverables\L3-Elsevier")
+
+    def test_set_output_dir_before_task_is_ignored(self):
+        pr.set_output_dir(r"D:\nowhere")  # 没有活动任务时不产生状态
+        self.assertFalse((Path(self.tmp.name) / "progress" / "current.json").exists())

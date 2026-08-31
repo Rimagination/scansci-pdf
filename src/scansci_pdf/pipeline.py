@@ -372,6 +372,7 @@ def run_lanes(
 
     from . import progress_reporter as _progress
     _progress.start_task("文献下载", total=len(entries))
+    _progress.set_output_dir(str(out))
 
     fast: list[QueueEntry] = []
     grey: list[str] = []
