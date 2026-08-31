@@ -44,9 +44,11 @@ FILL_OK = "#16834b"
 TEXT = "#0f172a"
 DIM = "#475569"
 ATTENTION = "#b45309"
+OK_GREEN = "#1b7d46"
+BAD_RED = "#c0392b"
 
 # Logical layout (scaled by the real DPI factor at runtime)
-W, H, MARGIN = 440, 108, 12
+W, H, MARGIN = 440, 122, 12
 RADIUS = 16
 
 
@@ -257,13 +259,16 @@ class ProgressWindow:
         x_pct = Wl - M - int(12 * self.s)
         c.create_text(x_pct, top, text=f"{pct * 100:.0f}%", fill=FILL,
                       font=self.f_pct, anchor="e")
-        x_cnt = x_pct - self.f_pct.measure(f"{pct * 100:.0f}%") - int(10 * self.s)
-        c.create_text(x_cnt, top, text=f"✓{ok} ✗{bad}",
-                      fill=(DIM if running else FILL_OK), font=self.f_small, anchor="e")
+        x_bad = x_pct - self.f_pct.measure(f"{pct * 100:.0f}%") - int(12 * self.s)
+        c.create_text(x_bad, top, text=f"✗{bad}", fill=BAD_RED,
+                      font=self.f_small, anchor="e")
+        x_ok = x_bad - self.f_small.measure(f"✗{bad}") - int(8 * self.s)
+        c.create_text(x_ok, top, text=f"✓{ok}", fill=OK_GREEN,
+                      font=self.f_small, anchor="e")
 
         # Current item, or a persistent in-progress reminder for a browser
         # challenge. The challenged DOI is not advanced until its page clears.
-        cur_y = top + int(20 * self.s)
+        cur_y = top + int(24 * self.s)
         avail = Wl - 2 * M - int(28 * self.s)
         attention = state.get("attention")
         attention_items: list[dict[str, Any]] = []
@@ -293,20 +298,27 @@ class ProgressWindow:
 
         # Output folder row: clickable, opens the downloads folder in Explorer.
         output_dir = str(state.get("output_dir") or "")
-        out_y = cur_y + int(18 * self.s)
+        out_y = cur_y + int(22 * self.s)
         if output_dir:
+            # Segoe MDL2 Assets (ships with Win10/11) renders the standard
+            # folder glyph U+E8B7 on the text baseline - crisp and aligned.
+            icon_font = tkfont.Font(family="Segoe MDL2 Assets", size=int(-10 * self.s))
+            out_x = M + int(14 * self.s)
+            c.create_text(out_x, out_y, text="", fill=DIM,
+                          font=icon_font, anchor="w", tags=("outdir",))
+            text_x = out_x + icon_font.measure("") + int(4 * self.s)
             c.tag_bind("outdir", "<Button-1>",
                        lambda e: self._open_output_dir(state))
             c.tag_bind("outdir", "<Enter>", lambda e: c.config(cursor="hand2"))
             c.tag_bind("outdir", "<Leave>", lambda e: c.config(cursor=""))
-            c.create_text(M + int(14 * self.s), out_y,
-                          text="📂 " + _elide(self.f_small, output_dir, avail - int(16 * self.s)),
+            c.create_text(text_x, out_y,
+                          text=_elide(self.f_small, output_dir, Wl - M - int(8 * self.s) - text_x),
                           fill=DIM, font=self.f_small, anchor="w", tags=("outdir",))
 
         # pill progress bar
-        bx0, by1 = M + int(14 * self.s), Hl - M - int(12 * self.s)
-        bx1, by0 = Wl - M - int(14 * self.s), by1 - int(16 * self.s)
-        r = int(8 * self.s)
+        bx0, by1 = M + int(14 * self.s), Hl - M - int(14 * self.s)
+        bx1, by0 = Wl - M - int(14 * self.s), by1 - int(18 * self.s)
+        r = int(9 * self.s)
         self._rounded_rect(bx0, by0, bx1, by1, r, fill=TRACK, outline="")
         fill_w = int((bx1 - bx0) * pct)
         if fill_w > 2 * r:
