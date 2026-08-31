@@ -22,8 +22,12 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
+import logging
 import threading
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import Any
 
 from .identifiers import normalize_doi, normalize_arxiv_id
@@ -447,9 +451,52 @@ def run_lanes(
                 for rows in ex.map(_inst_fetch_chunk, chunks):
                     results.extend(rows)
 
+    _transient_retry(results, entries, out, config)
     _progress.finish()
     _fetch_si_for_results(results, out, config)
     return results
+
+
+def _transient_retry(results: list[dict[str, Any]], entries: list[QueueEntry],
+                     out: Path, config: dict[str, Any]) -> None:
+    """瞬时失败冷却重试：限流/超时类失败等 60s 后按原车道重试一次。
+
+    实测（2026-08-31，Elsevier 批量）：64 篇失败中 56 篇为瞬时限流
+    （冷却后 HEAD 探测 100% 可得），高速重试仅收回 9 篇——**下载通道也
+    需要节流**。本函数在车道全部跑完后执行一次带退避的重试。
+    权限类失败（403/NOT_ENTITLED）不重试——那是真实边界。
+    """
+    if not config.get("fast_retry", True):
+        return
+    transient_marks = ("fast lane failed", "no PDF found", "timeout", "ERR_",
+                       "API miss", "timed out")
+    failed = [r for r in results
+              if not r.get("success") and r.get("doi")
+              and any(m in (str(r.get("error", "")) + str(r.get("reason", "")))
+                      for m in transient_marks)]
+    if not failed:
+        return
+    wait_sec = max(15, int(config.get("fast_retry_wait_sec", 60)))
+    failed_dois = {r["doi"] for r in failed}
+    retry_entries = [e for e in entries if e.identifier in failed_dois]
+    if not retry_entries:
+        return
+    logger.info(f"  瞬时失败冷却重试: {len(retry_entries)} 篇，等待 {wait_sec}s 后原车道重试")
+    try:
+        from . import progress_reporter as _progress
+        _progress.update(phase="冷却重试")
+    except Exception:
+        pass
+    time.sleep(wait_sec)
+    retry_results = _run_fast_lane(retry_entries, out, config, workers=4, progress=None)
+    recovered = 0
+    by_doi = {r["doi"]: r for r in retry_results if r.get("doi")}
+    for i, r in enumerate(results):
+        d = r.get("doi")
+        if d in by_doi and by_doi[d].get("success") and not r.get("success"):
+            results[i] = by_doi[d]
+            recovered += 1
+    logger.info(f"  冷却重试收回 {recovered}/{len(retry_entries)} 篇")
 
 
 def _fetch_si_for_results(results: list[dict[str, Any]], out: Path, config: dict[str, Any]) -> None:

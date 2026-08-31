@@ -11,7 +11,8 @@
 3. **修复必须发布。** 不发 PyPI，用户手里的永远是旧版（"我这里好好的，用户那里不行"的根源之一）。
 4. **双 checkout 必须同步。** 编辑在 `D:\scansci-pdf`，运行在 `C:\Users\Liang\plugins\scansci-pdf`。`tests/test_checkout_sync.py` 会拦——它已抓出 268 文件漂移和多次单文件遗漏。
 5. **多文件 cp 必须用显式目标路径。** `cp a b dest/` 曾三次把 `sources/` 下的文件错误复制到平面层（同步测试抓的）。
-6. **Playwright sync 对象线程亲和。** 退出收割时跨线程 close() 必然失败，Windows 上杀父进程不杀子进程——收割必须 tree-kill（taskkill /F /T）。
+6. **Playwright sync 对象线程亲和。**（2026-08-31：退出收割时跨线程 close 失败 + Windows 杀父不杀子，4 个 chrome 残留）
+7. **每个验证过的单元立即提交。**（2026-08-31：一条手滑的 cp 覆盖了未提交的 progress_reporter.py，靠 git 恢复——攒着就是风险） 退出收割时跨线程 close() 必然失败，Windows 上杀父进程不杀子进程——收割必须 tree-kill（taskkill /F /T）。
 
 ## 镜像健康：唯一权威存储
 

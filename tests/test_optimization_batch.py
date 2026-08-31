@@ -118,3 +118,45 @@ class SIParallelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TransientRetryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name)
+
+    def test_transient_failures_retried_and_recovered(self):
+        entries = [QueueEntry(identifier="10.1016/x", channel="elsevier")]
+        results = [{"success": False, "doi": "10.1016/x",
+                    "error": "fast lane failed (no OA url / API miss)"}]
+        retry_call = {}
+
+        def fake_fast(fast_entries, out, config, workers=8, progress=None):
+            retry_call["entries"] = [e.identifier for e in fast_entries]
+            return [{"success": True, "doi": "10.1016/x", "file": str(self.out / "x.pdf")}]
+
+        cfg = {"fast_retry": True, "fast_retry_wait_sec": 0}
+        with patch.object(pipeline, "_run_fast_lane", side_effect=fake_fast), \
+             patch.object(pipeline.time, "sleep"):
+            pipeline._transient_retry(results, entries, self.out, cfg)
+        self.assertTrue(results[0]["success"], "transient failure must be recovered")
+        self.assertEqual(retry_call["entries"], ["10.1016/x"])
+
+    def test_permission_failure_not_retried(self):
+        entries = [QueueEntry(identifier="10.1016/y", channel="elsevier")]
+        results = [{"success": False, "doi": "10.1016/y", "error": "NOT_ENTITLED"}]
+        with patch.object(pipeline, "_run_fast_lane",
+                          side_effect=AssertionError("permission failures must not retry")), \
+             patch.object(pipeline.time, "sleep"):
+            pipeline._transient_retry(results, entries, self.out,
+                                      {"fast_retry": True, "fast_retry_wait_sec": 0})
+
+    def test_kill_switch(self):
+        entries = [QueueEntry(identifier="10.1016/z", channel="elsevier")]
+        results = [{"success": False, "doi": "10.1016/z",
+                    "error": "fast lane failed (no OA url / API miss)"}]
+        with patch.object(pipeline, "_run_fast_lane",
+                          side_effect=AssertionError("must not retry when off")):
+            pipeline._transient_retry(results, entries, self.out, {"fast_retry": False})
+        self.assertFalse(results[0]["success"])
