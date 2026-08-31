@@ -74,6 +74,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 批量下载时每 N 篇回收一次浏览器上下文（cookie 内存交接，登录态不丢）。
     # 0 = 关闭。长批次（上千篇）建议 100-200，避免 Chrome 长会话内存漂移。
     "browser_restart_every": 0,
+    # 批量下载成功后自动抓取附件/补充材料（SI）。默认关——大多数任务只要主 PDF。
+    # 开启后成功论文会尝试抓取出版商补充材料，存为 {DOI}_SI{n}.{ext}，并写 si_manifest.json。
+    "download_si": False,
     # 灰色源竞速浏览器的独立无头开关（只影响 sci-hub 竞速，机构登录仍有可见窗口）。
     # true = 竞速全程零窗口、零任务栏闪烁；指纹安全性由 UA 清洗保证。
     "scihub_browser_headless": False,

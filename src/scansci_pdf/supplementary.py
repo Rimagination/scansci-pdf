@@ -141,30 +141,30 @@ def _fetch_page(article_url: str, config: dict, timeout: int):
 
 
 def _browser_page(article_url: str, config: dict, timeout: int):
-    """Render the article page through the stealth-browser backend.
+    """Render the article page through the shared stealth-browser backend.
 
-    Returns (page_html, fetch_bytes) where fetch_bytes uses the browser
-    context's request API so Cloudflare cookies are shared. None when the
-    backend is unavailable or the page does not load.
+    Uses the browser-worker pool (browser_engine) instead of a cold start per
+    call, and downloads attachments through the browser context's request API
+    so Cloudflare cookies are shared. Returns (page_html, fetch_bytes); only
+    the PAGE is closed - the pooled browser stays alive for the next paper.
     """
     try:
-        # No is_available() gate: it checks the *default* backend, while
-        # launch() itself resolves the fallback (e.g. patchright -> cloakbrowser).
-        from .browser_backend import launch
+        from .browser_engine import get_browser_page
 
-        ctx = launch(headless=True, config=config)
+        page = get_browser_page(config)
     except Exception:
+        return None
+    if page is None:
         return None
 
     try:
-        page = ctx.new_page()
         page.goto(article_url, wait_until="domcontentloaded", timeout=max(timeout, 45) * 1000)
         page.wait_for_timeout(2500)
         html = page.content()
 
         def fetch_bytes(url: str):
             try:
-                r = ctx.request.get(url, timeout=max(timeout, 45) * 1000)
+                r = page.context.request.get(url, timeout=max(timeout, 45) * 1000)
                 if r.status != 200:
                     return None, None
                 return r.body(), r.headers.get("content-type")

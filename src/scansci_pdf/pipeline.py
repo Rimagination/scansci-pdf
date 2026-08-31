@@ -21,6 +21,7 @@ import csv
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,8 @@ def predict_channel(identifier: str) -> str:
         return CHANNEL_BY_PREFIX.get(m.group(1).lower(), "auto")
     return "auto"
 
+
+from .supplementary import fetch_supplementary
 
 _PDF_URL_HINT = re.compile(r"\.pdf($|[?#])|/pdf/|article-pdf|/epdf/", re.IGNORECASE)
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -422,7 +425,43 @@ def run_lanes(
             fetcher.close()
 
     _progress.finish()
+    _fetch_si_for_results(results, out, config)
     return results
+
+
+def _fetch_si_for_results(results: list[dict[str, Any]], out: Path, config: dict[str, Any]) -> None:
+    """抓取成功论文的附件/补充材料（config: download_si，默认关）。
+
+    存到主 PDF 旁边，命名为 {DOI}_SI{n}.{ext}，并写 si_manifest.json 便于核对。
+    任何失败只减少附件数量，不影响主结果。
+    """
+    if not config.get("download_si"):
+        return
+    ok = [r for r in results if r.get("success") and r.get("doi")]
+    if not ok:
+        return
+    try:
+        from . import progress_reporter as _progress
+        _progress.update(phase="抓取附件")
+    except Exception:
+        pass
+    manifest: dict[str, list[str]] = {}
+    for r in ok:
+        doi = r["doi"]
+        try:
+            files = fetch_supplementary(doi, out, config)
+        except Exception:
+            files = []
+        if files:
+            manifest[doi] = files
+            print(f"  [SI] {doi}: {len(files)} 个附件")
+    if manifest:
+        try:
+            (out / "si_manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
 
 
 def _run_fast_lane(
