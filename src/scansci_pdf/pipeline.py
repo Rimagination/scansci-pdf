@@ -22,6 +22,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -400,29 +401,50 @@ def run_lanes(
     if grey_ids and allow_grey and grey_allowed(config):
         from .sources import batch_download
         _progress.update(phase="灰色源竞速")
-        raw = batch_download(grey_ids, str(out), scihub_enabled=True)
+        raw = batch_download(
+            grey_ids, str(out), scihub_enabled=True,
+            progress_callback=lambda done, total, current, result: (
+                _progress.advance(
+                    bool(result and result.get("success")),
+                    current=str(current),
+                )
+            ),
+        )
         results += _normalize_engine_results(raw)
 
     if inst and allow_institution:
         from .institutional.config_adapter import ConfigAdapter
         from .institutional.fetcher import PaperFetcher
 
-        cfg = ConfigAdapter.load()
-        cfg._config["output_dir"] = str(out)
-        fetcher = PaperFetcher(cfg)
-        try:
-            _progress.update(phase="机构级联")
-            for i, doi in enumerate(inst, 1):
-                print(f"  [institution {i}/{len(inst)}] {doi}")
-                try:
-                    r = fetcher.fetch_with_result(doi).to_dict()
-                    r.setdefault("doi", doi)
-                except Exception as exc:
-                    r = {"doi": doi, "success": False, "error": str(exc)}
-                _progress.advance(bool(r.get("success")), current=doi)
-                results.append(r)
-        finally:
-            fetcher.close()
+        _progress.update(phase="机构级联")
+
+        def _inst_fetch_chunk(chunk: list[str]) -> list[dict[str, Any]]:
+            cfg = ConfigAdapter.load()
+            cfg._config["output_dir"] = str(out)
+            fetcher = PaperFetcher(cfg)
+            rows: list[dict[str, Any]] = []
+            try:
+                for doi in chunk:
+                    print(f"  [institution] {doi}")
+                    try:
+                        r = fetcher.fetch_with_result(doi).to_dict()
+                        r.setdefault("doi", doi)
+                    except Exception as exc:
+                        r = {"doi": doi, "success": False, "error": str(exc)}
+                    _progress.advance(bool(r.get("success")), current=doi)
+                    rows.append(r)
+            finally:
+                fetcher.close()
+            return rows
+
+        workers_inst = max(1, min(int(config.get("institutional_workers", 1) or 1), 2))
+        if workers_inst <= 1 or len(inst) < 2:
+            results.extend(_inst_fetch_chunk(inst))
+        else:
+            chunks = [inst[i::workers_inst] for i in range(workers_inst)]
+            with ThreadPoolExecutor(max_workers=workers_inst) as ex:
+                for rows in ex.map(_inst_fetch_chunk, chunks):
+                    results.extend(rows)
 
     _progress.finish()
     _fetch_si_for_results(results, out, config)
@@ -446,15 +468,26 @@ def _fetch_si_for_results(results: list[dict[str, Any]], out: Path, config: dict
     except Exception:
         pass
     manifest: dict[str, list[str]] = {}
-    for r in ok:
-        doi = r["doi"]
+    manifest_lock = threading.Lock()
+
+    def _si_one(row: dict[str, Any]) -> None:
+        doi = row["doi"]
         try:
             files = fetch_supplementary(doi, out, config)
         except Exception:
             files = []
         if files:
-            manifest[doi] = files
+            with manifest_lock:
+                manifest[doi] = files
             print(f"  [SI] {doi}: {len(files)} 个附件")
+
+    workers_si = max(1, min(4, len(ok)))
+    if workers_si == 1:
+        for r in ok:
+            _si_one(r)
+    else:
+        with ThreadPoolExecutor(max_workers=workers_si) as ex:
+            list(ex.map(_si_one, ok))
     if manifest:
         try:
             (out / "si_manifest.json").write_text(

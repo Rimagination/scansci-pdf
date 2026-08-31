@@ -77,6 +77,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 批量下载成功后自动抓取附件/补充材料（SI）。默认关——大多数任务只要主 PDF。
     # 开启后成功论文会尝试抓取出版商补充材料，存为 {DOI}_SI{n}.{ext}，并写 si_manifest.json。
     "download_si": False,
+    # Turnstile 交互门（如 sci-hub.vg）：无头会话下无法点击，默认跳过并冷却。
+    # scihub_browser_headless=false 时可开启人工点一次模式（点一次整批复用）。
+    "scihub_turnstile_click": True,
+    "turnstile_wait_sec": 180,
+    # 机构级联并行 fetcher 数（各持独立登录会话）。默认 1 = 串行；2 可省约一半
+    # Phase 2 时间，代价是同 IP 双浏览器会话。
+    "institutional_workers": 1,
     # 灰色源竞速浏览器的独立无头开关（只影响 sci-hub 竞速，机构登录仍有可见窗口）。
     # true = 竞速全程零窗口、零任务栏闪烁；指纹安全性由 UA 清洗保证。
     "scihub_browser_headless": False,

@@ -160,6 +160,42 @@ def _note_wall_success(domain: str) -> None:
         st["last_solve"] = time.time()
 
 
+_MIRROR_STRUCTURAL_COOLDOWN_SEC = 7200.0  # structurally broken mirror: skip 2h
+
+
+def _note_structural(domain: str) -> None:
+    """Structurally broken response (homepage shell / interactive gate).
+
+    Unlike transient walls, re-paying the timeout every paper is pure loss:
+    skip the mirror for hours. It retries automatically once the cooldown
+    lapses, so a mirror that comes back to life is picked up again.
+    """
+    st = _wall_state(domain)
+    with _WALL_STATE_LOCK:
+        st["cooldown_until"] = time.time() + _MIRROR_STRUCTURAL_COOLDOWN_SEC
+    log.info(f"   Sci-Hub: {domain} structurally broken — skipping for "
+             f"{_MIRROR_STRUCTURAL_COOLDOWN_SEC / 3600:.0f}h")
+
+
+def _classify_mirror_page(html: str) -> str:
+    """Classify a mirror response: turnstile | homepage | other.
+
+    ALTCHA walls are intentionally NOT classified here — the dedicated ALTCHA
+    solver handles them.
+    """
+    low = (html or "").lower()
+    if "challenges.cloudflare.com/turnstile" in low or "verification - sci-hub" in low:
+        return "turnstile"
+    if "search proxy to download" in low:
+        return "homepage"
+    return "other"
+
+
+def _racing_browser_headless(config: dict[str, Any]) -> bool:
+    """Mirror the headless computation used to launch the racing browser."""
+    return bool(config.get("scihub_browser_headless", config.get("browser_headless", False)))
+
+
 _PROBE_TTL_HOURS = 4
 _SCIHUB_PROBE_WORKERS = 8
 
@@ -397,6 +433,59 @@ def _browser_first_download(
         if any(sig in lower for sig in ["article not found", "статья не найдена", "не найден"]):
             log.info(f"   [browser-first] article not found on {domain}")
             return None
+
+        # Structural failures: mirror shell or interactive gate. These cost a
+        # fixed timeout every paper until cooled down — note once, skip for hours.
+        kind = _classify_mirror_page(html)
+        if kind == "homepage":
+            _note_structural(domain)
+            log.info(f"   [browser-first] {domain} serves its homepage shell — structural, cooling down")
+            return None
+        if kind == "turnstile":
+            if _racing_browser_headless(config) or not config.get("scihub_turnstile_click", True):
+                _note_structural(domain)
+                log.info(f"   [browser-first] Turnstile gate on {domain} — headless/no-click session, cooling down")
+                return None
+            # Interactive mode: surface it on the progress bar, wait for one
+            # human click. The clearance cookie then lasts the whole batch.
+            from ..browser_engine import get_browser_page
+            page = get_browser_page(config)
+            if page is None:
+                _note_structural(domain)
+                return None
+            attention_key = f"turnstile:{domain}"
+            try:
+                from .. import progress_reporter as _pr
+                _pr.set_attention(attention_key, "请在浏览器窗口完成 Turnstile 人机验证",
+                                  current=doi, phase="人工验证")
+            except Exception:
+                _pr = None
+            passed = False
+            try:
+                deadline = time.time() + max(30, int(config.get("turnstile_wait_sec", 180)))
+                while time.time() < deadline:
+                    time.sleep(5)
+                    page.goto(landing_url, wait_until="domcontentloaded", timeout=30000)
+                    html = page.content()
+                    if _classify_mirror_page(html) != "turnstile":
+                        passed = True
+                        break
+                if not passed:
+                    log.info(f"   [browser-first] Turnstile not passed within wait window")
+                    return None
+                solution["url"] = page.url
+                log.info(f"   [browser-first] Turnstile cleared by human — cookie kept for the batch")
+            finally:
+                if _pr is not None:
+                    try:
+                        _pr.clear_attention(attention_key)
+                    except Exception:
+                        pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            lower = html.lower()
 
         # Check for ALTCHA anti-bot verification (used by sci-hub.ru and other mirrors)
         if any(sig in lower for sig in ["altcha", "你是机器人吗", "not a robot"]):
