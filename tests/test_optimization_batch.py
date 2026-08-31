@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from scansci_pdf import pipeline
+from scansci_pdf import domain_db, pipeline
 from scansci_pdf.pipeline import QueueEntry
 from scansci_pdf.sources import scihub
 
@@ -35,18 +35,22 @@ class MirrorClassificationTests(unittest.TestCase):
 
 class StructuralCooldownTests(unittest.TestCase):
     def setUp(self):
-        scihub._WALL_STATE.clear()
-        self.addCleanup(scihub._WALL_STATE.clear)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(domain_db.close_connection)
+        self.cfg = {"cache_dir": str(Path(self.tmp.name) / "cache")}
+        domain_db.reset_wall_state(self.cfg)
+        self.addCleanup(lambda: (domain_db.close_connection(), domain_db.reset_wall_state(self.cfg)))
 
     def test_structural_failure_skips_mirror_for_hours(self):
-        scihub._note_structural("https://sci-hub.vg")
-        self.assertTrue(scihub._wall_guard("https://sci-hub.vg"))
-        remaining = scihub._wall_state("https://sci-hub.vg")["cooldown_until"] - time.time()
+        scihub._note_structural("https://sci-hub.vg", self.cfg)
+        self.assertTrue(scihub._wall_guard("https://sci-hub.vg", self.cfg))
+        remaining = domain_db.get_wall_state("https://sci-hub.vg", self.cfg)["cooldown_until"] - time.time()
         self.assertGreater(remaining, 3600, "structural skip must be hours, not seconds")
 
     def test_structural_does_not_touch_other_mirrors(self):
-        scihub._note_structural("https://sci-hub.vg")
-        self.assertFalse(scihub._wall_guard("https://sci-hub.ru"))
+        scihub._note_structural("https://sci-hub.vg", self.cfg)
+        self.assertFalse(scihub._wall_guard("https://sci-hub.ru", self.cfg))
 
 
 import time  # noqa: E402
@@ -62,6 +66,7 @@ class InstitutionalParallelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(domain_db.close_connection)
         self.out = Path(self.tmp.name)
 
     def _cfg(self, workers):
@@ -97,6 +102,7 @@ class SIParallelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(domain_db.close_connection)
         self.out = Path(self.tmp.name)
 
     def test_parallel_si_covers_every_successful_paper(self):

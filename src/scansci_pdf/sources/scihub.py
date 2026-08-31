@@ -13,7 +13,16 @@ from typing import Any
 import requests
 
 from ..config import DEFAULT_SCIHUB_DOMAINS
-from ..domain_db import load_stats, record_result, update_probe, set_probe_timestamp, get_probe_timestamp
+from .. import domain_db
+from ..domain_db import (
+    load_stats,
+    record_result,
+    update_probe,
+    set_probe_timestamp,
+    get_probe_timestamp,
+    get_wall_state,
+    set_wall_state,
+)
 from ..log import get_logger
 from ..network import fetch, proxy_dict, select_proxy_for_url, _is_cloudflare_block, USER_AGENT
 from ..pdf_utils import extract_pdf_url_from_html, is_pdf_file, success, _response_looks_pdf
@@ -114,65 +123,52 @@ atexit.register(_shutdown_scihub_pool)
 _WALL_MIN_SPACING_SEC = 25.0     # min gap between verification solves
 _WALL_COOLDOWN_BASE_SEC = 90.0   # first persistent-wall cooldown
 _WALL_COOLDOWN_CAP_SEC = 900.0   # never cool down longer than this
-
-_WALL_STATE: dict[str, dict[str, float]] = {}
-_WALL_STATE_LOCK = threading.Lock()
+_MIRROR_STRUCTURAL_COOLDOWN_SEC = 7200.0  # structurally broken mirror: skip 2h
 
 
-def _wall_state(domain: str) -> dict[str, float]:
-    with _WALL_STATE_LOCK:
-        return _WALL_STATE.setdefault(domain, {"last_solve": 0.0, "walls": 0.0, "cooldown_until": 0.0})
+def _wall_guard(domain: str, config: dict[str, Any]) -> bool:
+    """True while a domain is cooling down after persistent walls — skip it.
 
-
-def _wall_guard(domain: str) -> bool:
-    """True while a domain is cooling down after persistent walls — skip it."""
-    st = _wall_state(domain)
+    State lives in domain_db (wall_state table): persistent across processes
+    and sessions. Do NOT reintroduce in-memory health dicts — that split
+    caused three generations of mirror-health rework.
+    """
+    st = domain_db.get_wall_state(domain, config)
     return time.time() < st["cooldown_until"]
 
 
-def _wall_pace(domain: str) -> None:
+def _wall_pace(domain: str, config: dict[str, Any]) -> None:
     """Sleep so consecutive verification solves stay spaced out."""
-    st = _wall_state(domain)
+    st = domain_db.get_wall_state(domain, config)
     wait = _WALL_MIN_SPACING_SEC - (time.time() - st["last_solve"])
     if wait > 0:
         time.sleep(min(wait, _WALL_MIN_SPACING_SEC))
 
 
-def _note_wall(domain: str) -> None:
+def _note_wall(domain: str, config: dict[str, Any]) -> None:
     """A wall persisted after a solve attempt — escalate the cooldown."""
-    st = _wall_state(domain)
-    with _WALL_STATE_LOCK:
-        st["walls"] = st.get("walls", 0) + 1
-        st["cooldown_until"] = time.time() + min(
-            _WALL_COOLDOWN_BASE_SEC * (3 ** (st["walls"] - 1)), _WALL_COOLDOWN_CAP_SEC
-        )
-        st["last_solve"] = time.time()
-    log.info(f"   Sci-Hub: {domain} verification wall persists — cooling down "
-             f"{st['cooldown_until'] - time.time():.0f}s")
+    st = domain_db.get_wall_state(domain, config)
+    walls = int(st["walls"]) + 1
+    cooldown = min(_WALL_COOLDOWN_BASE_SEC * (3 ** (walls - 1)), _WALL_COOLDOWN_CAP_SEC)
+    until = time.time() + cooldown
+    domain_db.set_wall_state(domain, config, last_solve=time.time(), walls=walls, cooldown_until=until)
+    log.info(f"   Sci-Hub: {domain} verification wall persists — cooling down {cooldown:.0f}s")
 
 
-def _note_wall_success(domain: str) -> None:
+def _note_wall_success(domain: str, config: dict[str, Any]) -> None:
     """A solve cleared the wall — reset escalations, record the solve time."""
-    st = _wall_state(domain)
-    with _WALL_STATE_LOCK:
-        st["walls"] = 0
-        st["cooldown_until"] = 0.0
-        st["last_solve"] = time.time()
+    domain_db.set_wall_state(domain, config, last_solve=time.time(), walls=0, cooldown_until=0.0)
 
 
-_MIRROR_STRUCTURAL_COOLDOWN_SEC = 7200.0  # structurally broken mirror: skip 2h
-
-
-def _note_structural(domain: str) -> None:
+def _note_structural(domain: str, config: dict[str, Any]) -> None:
     """Structurally broken response (homepage shell / interactive gate).
 
     Unlike transient walls, re-paying the timeout every paper is pure loss:
     skip the mirror for hours. It retries automatically once the cooldown
     lapses, so a mirror that comes back to life is picked up again.
     """
-    st = _wall_state(domain)
-    with _WALL_STATE_LOCK:
-        st["cooldown_until"] = time.time() + _MIRROR_STRUCTURAL_COOLDOWN_SEC
+    until = time.time() + _MIRROR_STRUCTURAL_COOLDOWN_SEC
+    domain_db.set_wall_state(domain, config, last_solve=time.time(), walls=1, cooldown_until=until)
     log.info(f"   Sci-Hub: {domain} structurally broken — skipping for "
              f"{_MIRROR_STRUCTURAL_COOLDOWN_SEC / 3600:.0f}h")
 
@@ -290,10 +286,10 @@ def _solve_altcha_and_reload(
         return None
 
     domain = urllib.parse.urlparse(landing_url).netloc
-    if _wall_guard(domain):
+    if _wall_guard(domain, config):
         log.info(f"   [altcha] {domain} in wall cooldown — skipping this attempt")
         return None
-    _wall_pace(domain)
+    _wall_pace(domain, config)
 
     page = None
     try:
@@ -372,7 +368,7 @@ def _solve_altcha_and_reload(
 
         lower = html.lower()
         if "你是机器人吗" in html or "altcha" in lower and "iframe" not in lower:
-            _note_wall(domain)
+            _note_wall(domain, config)
             log.info("   [altcha] verification wall persists after solve")
             return None
 
@@ -386,7 +382,7 @@ def _solve_altcha_and_reload(
             log.info(f"   [altcha] found PDF: {pdf_url[:80]}")
             if download_pdf_via_browser(pdf_url, output_path, config):
                 if is_pdf_file(output_path):
-                    _note_wall_success(domain)
+                    _note_wall_success(domain, config)
                     return success(doi, output_path, "Sci-Hub(altcha)")
 
         log.info("   [altcha] no PDF found after verification")
@@ -438,12 +434,12 @@ def _browser_first_download(
         # fixed timeout every paper until cooled down — note once, skip for hours.
         kind = _classify_mirror_page(html)
         if kind == "homepage":
-            _note_structural(domain)
+            _note_structural(domain, config)
             log.info(f"   [browser-first] {domain} serves its homepage shell — structural, cooling down")
             return None
         if kind == "turnstile":
             if _racing_browser_headless(config) or not config.get("scihub_turnstile_click", True):
-                _note_structural(domain)
+                _note_structural(domain, config)
                 log.info(f"   [browser-first] Turnstile gate on {domain} — headless/no-click session, cooling down")
                 return None
             # Interactive mode: surface it on the progress bar, wait for one
@@ -451,7 +447,7 @@ def _browser_first_download(
             from ..browser_engine import get_browser_page
             page = get_browser_page(config)
             if page is None:
-                _note_structural(domain)
+                _note_structural(domain, config)
                 return None
             attention_key = f"turnstile:{domain}"
             try:
@@ -834,7 +830,7 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
     # or as a Cloudflare/ALTCHA challenge fallback.
     if config.get("scihub_browser_first_enabled", False) and _is_browser_available(config):
         configured_domains = config.get("scihub_domains") or DEFAULT_SCIHUB_DOMAINS
-        browser_domains = [d for d in configured_domains[:5] if not _wall_guard(d)]
+        browser_domains = [d for d in configured_domains[:5] if not _wall_guard(d, config)]
         if not browser_domains:
             browser_domains = [d for d in configured_domains[:5]]  # all cooling down — try anyway, paced
         max_workers = min(config.get("scihub_browser_workers", 3), len(browser_domains))
@@ -873,7 +869,7 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         now = time.time()
         cooldown_domains = []
         for d in all_domains:
-            if _wall_guard(d):
+            if _wall_guard(d, config):
                 continue  # persistent verification wall — pacing cooldown
             d_stats = stats.get(d, {})
             last_fail = d_stats.get("last_fail_time", 0)
