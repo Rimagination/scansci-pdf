@@ -10,7 +10,7 @@
       "source": "./",
       "icon": "https://raw.githubusercontent.com/Rimagination/scansci-pdf/main/zcode-plugin/icon.png",
       "description": "ScanSci 学术文献全家桶:大清单嗅探分类(sort)、单篇/批量下载、机构渠道(Elsevier API/WebVPN/CARSI)、检索发现、诊断排障。携带 scansci-pdf MCP server,即装即用。",
-      "version": "1.13.0",
+      "version": "1.13.1",
       "author": {
         "name": "Rimagination"
       },
