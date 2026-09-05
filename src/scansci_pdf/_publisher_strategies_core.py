@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import threading
 import time
@@ -2423,6 +2424,58 @@ def _try_elsevier_object_pdf_from_xml(
     return None
 
 
+def _try_elsevier_text_fallback(
+    doi: str,
+    output_path: Path,
+    session: Any,
+    article_url: str,
+    headers: dict[str, str],
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Last API resort: save the httpAccept=text/plain full text as .txt.
+
+    Only kept when the body is a real plain-text payload above 100KB — the
+    same threshold pdf_utils.is_suspicious_pdf treats as certainly full text —
+    so the racing pipeline never flags or drops the artifact. API error
+    payloads (text/xml) are rejected by the content-type check.
+    """
+    txt_headers = dict(headers)
+    txt_headers["Accept"] = "text/plain"
+    try:
+        resp = session.get(
+            article_url,
+            headers=txt_headers,
+            params={"httpAccept": "text/plain"},
+            timeout=30,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        log.info(f"   [ElsevierAPI] text/plain request failed: {e}")
+        return None
+
+    if getattr(resp, "status_code", 0) != 200:
+        return None
+    content_type = _elsevier_header(getattr(resp, "headers", {}), "content-type").lower()
+    content = getattr(resp, "content", b"") or b""
+    if "text/plain" not in content_type or len(content) < 100_000:
+        log.info(
+            f"   [ElsevierAPI] no usable full text ({content_type[:40]}, "
+            f"{len(content)} bytes)"
+        )
+        return None
+
+    txt_path = output_path.with_suffix(".txt")
+    try:
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        txt_path.write_bytes(content)
+    except OSError as e:
+        log.info(f"   [ElsevierAPI] full text save failed: {e}")
+        return None
+    log.info(f"   [ElsevierAPI] saved {len(content)} bytes of full text as {txt_path.name}")
+    from .pdf_utils import success
+    return success(doi, txt_path, "ElsevierAPI(Text)")
+
+
 def try_elsevier_api(
     doi: str, output_path: Path, config: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -2432,15 +2485,28 @@ def try_elsevier_api(
     and optional institutional token. This is far faster and more reliable
     than browser-based login flows.
 
+    API-first request order per route (browser navigation is only a last
+    resort and lives in try_elsevier_browser):
+      1. article endpoint with Accept: application/pdf — the full PDF when
+         the key's entitlement covers the article. Entitlement follows the
+         API key, not the client IP, so this works off-campus. The body is
+         validated as a real multi-page PDF before saving (rejects the
+         1-page preview served to unentitled keys).
+      2. FULL XML → main-PDF attachment EIDs → Content Object API
+         (existing chain; covers articles whose direct endpoint misbehaves).
+      3. httpAccept=text/plain full text saved as .txt when no PDF is
+         returned at all.
+
     When the API does not return a PDF directly (no institutional access),
-    cookies from the redirect chain (api.elsevier.com → linkinghub.elsevier.com
+    cookies from the request chain (api.elsevier.com → linkinghub.elsevier.com
     → sciencedirect.com) are persisted for the browser strategy to reuse.
 
     Config keys:
-        elsevier_api_key   — personal or institutional API key (required)
+        elsevier_api_key   — personal or institutional API key (required);
+                             falls back to the ELSEVIER_API_KEY env var
         elsevier_insttoken — institutional token for campus-level access
     """
-    api_key = config.get("elsevier_api_key", "")
+    api_key = config.get("elsevier_api_key", "") or os.environ.get("ELSEVIER_API_KEY", "")
     if not api_key:
         log.info(f"   [ElsevierAPI] no API key configured, skipping. "
                  f"Run scansci_pdf_elsevier_setup to configure (free).")
@@ -2467,13 +2533,45 @@ def try_elsevier_api(
     import requests
 
     for route_name, proxies in route_options:
-        try:
-            session = requests.Session()
-            session.trust_env = False
-            if proxies:
-                session.proxies = proxies
+        session = requests.Session()
+        session.trust_env = False
+        if proxies:
+            session.proxies = proxies
 
+        # Step 1: direct article PDF — entitlement follows the API key, so no
+        # campus IP is needed. Reject non-200 and 1-page preview responses.
+        pdf_headers = dict(headers)
+        pdf_headers["Accept"] = "application/pdf"
+        pdf_resp = None
+        try:
             log.info(f"   [ElsevierAPI] trying {route_name} route")
+            pdf_resp = session.get(
+                url,
+                headers=pdf_headers,
+                timeout=30,
+                allow_redirects=True,
+            )
+        except Exception as e:
+            log.info(f"   [ElsevierAPI] {route_name} direct PDF request failed: {e}")
+
+        if pdf_resp is not None and pdf_resp.status_code == 200 and _elsevier_response_is_pdf(pdf_resp):
+            result = _save_elsevier_pdf_content(
+                doi,
+                output_path,
+                pdf_resp.content,
+                config,
+                "ElsevierAPI",
+                reject_single_page=True,
+            )
+            if result:
+                return result
+        elif pdf_resp is not None and pdf_resp.status_code != 200:
+            log.info(
+                f"   [ElsevierAPI] {route_name} direct PDF HTTP "
+                f"{pdf_resp.status_code} for {doi}, trying FULL XML route"
+            )
+
+        try:
             xml_headers = dict(headers)
             xml_headers["Accept"] = "application/xml"
             resp = session.get(
@@ -2541,6 +2639,12 @@ def try_elsevier_api(
             _persist_api_cookies(session, config)
         except Exception as e:
             log.info(f"   [ElsevierAPI] cookie persist failed: {e}")
+
+        # Step 3: full text as .txt — the API returned no PDF deliverable for
+        # this DOI; grab the plain-text full text before falling back further.
+        txt_result = _try_elsevier_text_fallback(doi, output_path, session, url, headers, config)
+        if txt_result:
+            return txt_result
 
     return None
 # ============================================================
