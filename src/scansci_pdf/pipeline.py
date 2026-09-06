@@ -602,6 +602,18 @@ def _run_fast_lane(
     def one(e: QueueEntry) -> dict[str, Any]:
         if e.oa_url:
             path = _download_url(e.oa_url, out, e.identifier, headers, proxies)
+            if not path and config.get("oa_browser_fallback", True):
+                # OA 直链被出版商反爬 403（如 Wiley pdfdirect 挡无指纹请求），
+                # 内容公开可得——浏览器指纹可过，回退常驻池浏览器捕获。
+                try:
+                    from .browser_engine import download_pdf_via_browser
+
+                    bpath = out / _safe_name(e.identifier)
+                    if download_pdf_via_browser(e.oa_url, bpath, config):
+                        return {"success": True, "doi": e.identifier,
+                                "file": str(bpath), "source": "oa_browser"}
+                except Exception:
+                    pass
             if path:
                 return {"success": True, "doi": e.identifier, "file": str(path), "source": "oa_url"}
         if api_key and (e.channel == "elsevier" or e.identifier.lower().startswith("10.1016/")):

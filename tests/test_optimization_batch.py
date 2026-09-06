@@ -160,3 +160,38 @@ class TransientRetryTests(unittest.TestCase):
                           side_effect=AssertionError("must not retry when off")):
             pipeline._transient_retry(results, entries, self.out, {"fast_retry": False})
         self.assertFalse(results[0]["success"])
+
+
+class OaBrowserFallbackTests(unittest.TestCase):
+    """OA 直链 403（Wiley pdfdirect 挡无指纹请求）→ 浏览器兜底。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name)
+
+    def test_oa_403_falls_back_to_browser(self):
+        entries = [QueueEntry(identifier="10.1002/agg2.20145",
+                              channel="oa", oa_url="https://onlinelibrary.wiley.com/doi/pdfdirect/x")]
+        with patch.object(pipeline, "_download_url", return_value=None), \
+             patch("scansci_pdf.browser_engine.download_pdf_via_browser",
+                          return_value=True) as mock_browser, \
+             patch("builtins.open", create=True):
+            r = pipeline._run_fast_lane(entries, self.out, {"workers": 1})
+        self.assertTrue(r[0]["success"])
+        self.assertEqual(r[0]["source"], "oa_browser")
+        mock_browser.assert_called_once()
+
+    def test_browser_fallback_off_when_disabled(self):
+        entries = [QueueEntry(identifier="10.1002/agg2.20145",
+                              channel="oa", oa_url="https://onlinelibrary.wiley.com/doi/pdfdirect/x")]
+        cfg = {"workers": 1, "oa_browser_fallback": False}
+        with patch.object(pipeline, "_download_url", return_value=None), \
+             patch("scansci_pdf.browser_engine.download_pdf_via_browser",
+                          side_effect=AssertionError("must not run when disabled")):
+            r = pipeline._run_fast_lane(entries, self.out, cfg)
+        self.assertFalse(r[0]["success"])
+
+
+if __name__ == "__main__":
+    unittest.main()

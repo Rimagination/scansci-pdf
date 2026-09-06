@@ -13,9 +13,13 @@ CONFIG_FILE = DATA_DIR / "config.json"
 
 DEFAULT_SCIHUB_DOMAINS = [
     # Direct PDF mirrors (no CAPTCHA, PDF via sci.bban.top iframe) — verified 2026-07
+    # vg/al 现为 Turnstile 门/首页壳（2026-08-31 实测），保留用于人工点一次模式
     "https://sci-hub.vg",
     "https://sci-hub.al",
     "https://sci-hub.mk",
+    # 2026-08-31 深夜直连实测新增：bz/mksa 稳定出文章页（iframe PDF，无验证墙）
+    "https://sci-hub.bz",
+    "https://sci-hub.mksa.top",
     # ALTCHA-protected (stable; used as manual-download hint)
     "https://sci-hub.ru",
     "https://sci-hub.ee",
