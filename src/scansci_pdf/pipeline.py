@@ -242,7 +242,24 @@ def read_table(path: str | Path) -> list[dict[str, str]]:
     if suffix in (".csv", ".tsv", ".tab"):
         delim = "\t" if suffix in (".tsv", ".tab") else ","
         with open(p, newline="", encoding="utf-8-sig") as f:
-            return [dict(r) for r in csv.DictReader(f, delimiter=delim)]
+            first = f.readline()
+            rest = f.read()
+        first_cells = [c.strip() for c in first.rstrip("\r\n").split(delim)]
+        # 表头嗅探：首行首列能解析出 DOI/arXiv = 无表头队列契约（首行是数据行）
+        headerless = bool(first_cells) and extract_identifier(first_cells[0]) is not None
+        if headerless:
+            names = ["identifier", "channel", "oa_url"] + [
+                f"col{i}" for i in range(len(first_cells) - 3)]
+            out = []
+            for line in (first + rest).splitlines():
+                if not line.strip():
+                    continue
+                cells = [c.strip() for c in line.rstrip("\r\n").split(delim)]
+                out.append({name: (cells[i] if i < len(cells) else "")
+                            for i, name in enumerate(names)})
+            return out
+        import io as _io
+        return [dict(r) for r in csv.DictReader(_io.StringIO(first + rest), delimiter=delim)]
     if suffix == ".xlsx":
         try:
             import openpyxl
@@ -265,7 +282,11 @@ def read_table(path: str | Path) -> list[dict[str, str]]:
 
 
 def entries_from_table(rows: list[dict[str, str]]) -> list[QueueEntry]:
-    """Map table rows to queue entries; the DOI column is sniffed if needed."""
+    """Map table rows to queue entries; the DOI column is sniffed if needed.
+
+    队列契约列同样尊重：channel（∈ oa/elsevier/grey/institution/auto）与
+    oa_url——无表头三列队列（identifier/channel/oa_url）由此生效。
+    """
     if not rows:
         return []
     cols = list(rows[0].keys())
@@ -276,6 +297,8 @@ def entries_from_table(rows: list[dict[str, str]]) -> list[QueueEntry]:
                 doi_col = c
                 break
     title_col = next((c for c in cols if "title" in c.lower() or "标题" in c or "题名" in c), "")
+    channel_col = next((c for c in cols if re.search(r"\bchannel\b", c, re.I)), None)
+    oa_url_col = next((c for c in cols if re.search(r"oa.?url", c, re.I)), None)
     entries: list[QueueEntry] = []
     for r in rows:
         raw_val = str(r.get(doi_col, "")).strip() if doi_col else ""
@@ -283,9 +306,14 @@ def entries_from_table(rows: list[dict[str, str]]) -> list[QueueEntry]:
         if not ident:
             entries.append(QueueEntry(raw=str(r)[:200], unresolved=True))
             continue
+        channel = (str(r.get(channel_col, "") or "").strip()
+                   if channel_col else "") or predict_channel(ident)
+        oa_url = (str(r.get(oa_url_col, "") or "").strip()
+                  if oa_url_col else "")
         entries.append(QueueEntry(
             identifier=ident,
-            channel=predict_channel(ident),
+            channel=channel,
+            oa_url=oa_url,
             title=(str(r.get(title_col, "") or "") if title_col else ""),
         ))
     return entries
