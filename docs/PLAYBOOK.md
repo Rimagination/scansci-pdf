@@ -78,6 +78,8 @@ sci-hub.ru 按**出口 IP** 限速：代理用户共享一个出口，很快被�
 | sci-hub.al / .mk | 坏（回首页壳） |
 | sci-hub.se / .st | 代理不可达（SSL） |
 | sci-hub.shop | 不是镜像，是镜像目录站（只列国际家族，价值有限） |
+| sci.bban.top | 根路径 404；article 路径模式未知，需研究 try_scibban 的实现桩 |
+| sci-hub.bz / .wf / .ren / .mksa.top | **直连可达（2026-08-31 深夜探测，待网络稳定复核）**——bz 曾单次命中、wf 返回文章页、ren 403、mksa 11KB 疑似墙页；当日网络极不稳定，结论不可靠，**优先重测** |
 
 ## 待办 / 已知边界
 
