@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 from typing import Any
 
 from .identifiers import normalize_doi, normalize_arxiv_id
+from .identifiers import OLD_ARXIV_RE
 
 CHANNELS = ("oa", "elsevier", "grey", "institution", "auto")
 
@@ -194,7 +195,11 @@ def extract_identifier(text: str) -> str | None:
     if not raw:
         return None
     arxiv = normalize_arxiv_id(raw)
-    if arxiv and ("arxiv" in raw.lower() or re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", raw)):
+    if arxiv and ("arxiv" in raw.lower()
+                  or re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", raw)
+                  or OLD_ARXIV_RE.match(raw)):
+        # 旧式 arXiv（quant-ph/9901001）裸写时原文不含 "arxiv"，
+        # 需要显式匹配旧式模式，否则会被当成无法识别的行。
         return arxiv
     doi_m = DOI_RE.search(raw)
     if doi_m:
