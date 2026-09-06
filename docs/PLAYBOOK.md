@@ -45,6 +45,16 @@
 冷却重试用 `_transient_retry`（fast_retry_delay_sec=15, workers=1）。**换 IP 无增益**：
 权限矩阵显示代理与直连双路由 99.7% 等价（1456/1460 ENTITLED）。
 
+## Elsevier key 权限自检（2026-08-31 实测流程）
+
+key 的权益**跟注册时的机构绑定**（跟 key 走，与出口 IP 无关）。用户报"配了 key 下不到"时按序排查：
+
+1. **无 key 基线**：HEAD 同一 DOI 不带 key → 应 406（证明权限来自 key）
+2. **大刊样本**：HEAD 一篇知名付费刊（如 10.1016/S0140-6736(20)30183-5，Lancet）→ 200 = key 绑定了广覆盖机构订阅；403 = key 没绑机构权益（让用户在机构网络/VPN 下重新注册并选择机构）
+3. **双路由对照**：HEAD 代理与直连各一次 → 应等价（entitlement 跟 key 不跟 IP）
+
+实测样例：某 key 对 Lancet 200、清单内 DOI 200、无 key 406、双路由 1456/1460 ENTITLED。
+
 ## 按域直连
 
 sci-hub.ru 按**出口 IP** 限速：代理用户共享一个出口，很快被墙；直连每用户独立 IP，清白（2026-08-30 实测：同机代理=常驻墙，直连=干净文章页）。`network.select_proxy_for_url` 默认让 `sci-hub.ru` 直连——`direct_domains` 扩展名单、`scihub_direct: false` 关闭、Tor 优先级最高。
