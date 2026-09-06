@@ -466,6 +466,16 @@ def _try_elsevier_api(
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         if resp.status_code == 200 and resp.content[:5] == b"%PDF-":
+            # A valid API key without full-text entitlement still returns a
+            # 1-page preview PDF (often >100KB). Accepting it poisons the
+            # result and the download cache with a fake success.
+            try:
+                from ..sources.elsevier_api import _pdf_page_count
+                if _pdf_page_count(resp.content) == 1:
+                    log.info(f"   [Institutional] Elsevier API: 1-page preview (not entitled) for {doi}")
+                    return None
+            except ImportError:
+                pass
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(resp.content)
             if output_path.exists() and output_path.stat().st_size > 5000:
