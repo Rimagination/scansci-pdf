@@ -599,6 +599,15 @@ def elsevier_setup(
         config["elsevier_api_key"] = api_key
         changed = True
         print(f"  Elsevier API key: saved")
+        # 配置即验证：自检样本自动跑一遍，当场给出 key 画像
+        try:
+            from .elsevier_check import check_key_profile
+
+            _rows, profile, advice = check_key_profile(config)
+            print(f"  key 画像: {profile}")
+            print(f"  建议: {advice}")
+        except Exception as e:
+            print(f"  自检失败（可稍后运行 elsevier-check）: {e}")
     if inst_token:
         config["elsevier_insttoken"] = inst_token
         changed = True
@@ -612,6 +621,62 @@ def elsevier_setup(
         print(f"\n  Usage: scansci-pdf elsevier-setup --api-key YOUR_KEY")
         print(f"\n  提示：insttoken 通常不需要——API key + 校园网/机构网络出口即可。")
         print(f"  NOT_ENTITLED 表示未连校园网或学校未订阅该刊，不是缺 insttoken。")
+
+
+@app.command("elsevier-check")
+def elsevier_check_cmd(
+    doi: str = typer.Option("", "--doi", help="单篇 DOI 逐篇双路由探测"),
+    file: str = typer.Option("", "--file", help="DOI 清单（每行一个，逐篇探测）"),
+    json_out: bool = typer.Option(False, "--json", help="输出机读 JSON"),
+) -> None:
+    """Elsevier API key 权限自检与逐篇探测（纯查询，零下载）。"""
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+
+    from . import progress_reporter as _pr
+    from .config import load_config
+    from .elsevier_check import check_dois, check_key_profile
+
+    config = load_config()
+    console.print("[bold]Elsevier key 权限自检[/bold]")
+    profile_rows, profile, advice = check_key_profile(config)
+    t = Table(title="key 自检样本")
+    for col in ("DOI", "样本类型", "代理路由", "直连路由", "判定"):
+        t.add_column(col)
+    for r in profile_rows:
+        t.add_row(r["doi"][:34], r["sample_type"], r["proxy"], r["direct"], r["verdict"])
+    console.print(t)
+    console.print(f"[bold]key 画像:[/bold] {profile} — {advice}")
+
+    dois: list[str] = []
+    if doi:
+        dois.append(doi.strip())
+    elif file:
+        from pathlib import Path as _Path
+
+        p = _Path(file)
+        if p.exists():
+            dois = [l.strip() for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        else:
+            console.print(f"[red]清单不存在: {file}[/red]")
+    if dois:
+        _pr.start_task("Elsevier权限检测", total=len(dois))
+        rows = check_dois(dois, config, progress=_pr)
+        _pr.finish()
+        t2 = Table(title="用户样本双路由探测")
+        for col in ("DOI", "代理路由", "直连路由", "判定", "建议通道"):
+            t2.add_column(col)
+        for r in rows:
+            t2.add_row(r["doi"][:34], r["proxy"], r["direct"], r["verdict"], r["route_advice"])
+        console.print(t2)
+        if json_out:
+            import json as _json
+
+            console.print(_json.dumps({"profile": profile, "advice": advice,
+                                       "rows": profile_rows + rows},
+                                      ensure_ascii=False, indent=2))
 
 
 @app.command("session-doctor")
