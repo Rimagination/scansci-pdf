@@ -125,6 +125,13 @@ _WALL_COOLDOWN_BASE_SEC = 90.0   # first persistent-wall cooldown
 _WALL_COOLDOWN_CAP_SEC = 900.0   # never cool down longer than this
 _MIRROR_STRUCTURAL_COOLDOWN_SEC = 7200.0  # structurally broken mirror: skip 2h
 
+# Serialize INTERACTIVE Turnstile solving across pool workers. Each pool
+# worker owns a browser, so without this lock N workers hitting a gate open N
+# "please click the captcha" windows at once. Queued workers re-check after
+# the first solve; the clearance cookie is shared per domain, so they usually
+# pass without a new human challenge.
+_TURNSTILE_INTERACTIVE_LOCK = threading.Lock()
+
 
 def _wall_guard(domain: str, config: dict[str, Any]) -> bool:
     """True while a domain is cooling down after persistent walls — skip it.
@@ -404,8 +411,14 @@ def _browser_first_download(
     doi: str,
     output_path: Path,
     config: dict[str, Any],
+    fail_notes: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Try browser-first download for Sci-Hub. Bypasses Cloudflare/CAPTCHA."""
+    """Try browser-first download for Sci-Hub. Bypasses Cloudflare/CAPTCHA.
+
+    fail_notes (optional): appended with a short classification string at
+    every failure exit so callers can report WHY Sci-Hub gave up
+    (not_in_library / challenge_* / network / http_*).
+    """
     try:
         from ..browser_engine import solve_url, download_pdf_via_browser
         from ..pdf_utils import is_pdf_file, success, extract_pdf_url_from_html
@@ -416,18 +429,24 @@ def _browser_first_download(
         result = solve_url(landing_url, config, max_timeout=30000)
         if not result:
             log.info(f"   [browser-first] no response")
+            if fail_notes is not None:
+                fail_notes.append("network(no response)")
             return None
 
         solution = result.get("solution", {})
         html = solution.get("response", "")
         if not html:
             log.info(f"   [browser-first] empty response")
+            if fail_notes is not None:
+                fail_notes.append("network(empty response)")
             return None
 
         # Check for article not found
         lower = html.lower()
         if any(sig in lower for sig in ["article not found", "статья не найдена", "не найден"]):
             log.info(f"   [browser-first] article not found on {domain}")
+            if fail_notes is not None:
+                fail_notes.append("not_in_library")
             return None
 
         # Structural failures: mirror shell or interactive gate. These cost a
@@ -436,6 +455,8 @@ def _browser_first_download(
         if kind == "homepage":
             _note_structural(domain, config)
             log.info(f"   [browser-first] {domain} serves its homepage shell — structural, cooling down")
+            if fail_notes is not None:
+                fail_notes.append("structural_homepage")
             return None
         if kind == "turnstile":
             if _racing_browser_headless(config) or not config.get("scihub_turnstile_click", True):
@@ -444,44 +465,48 @@ def _browser_first_download(
                 return None
             # Interactive mode: surface it on the progress bar, wait for one
             # human click. The clearance cookie then lasts the whole batch.
-            from ..browser_engine import get_browser_page
-            page = get_browser_page(config)
-            if page is None:
-                _note_structural(domain, config)
-                return None
-            attention_key = f"turnstile:{domain}"
-            try:
-                from .. import progress_reporter as _pr
-                _pr.set_attention(attention_key, "请在浏览器窗口完成 Turnstile 人机验证",
-                                  current=doi, phase="人工验证")
-            except Exception:
-                _pr = None
-            passed = False
-            try:
-                deadline = time.time() + max(30, int(config.get("turnstile_wait_sec", 180)))
-                while time.time() < deadline:
-                    time.sleep(5)
-                    page.goto(landing_url, wait_until="domcontentloaded", timeout=30000)
-                    html = page.content()
-                    if _classify_mirror_page(html) != "turnstile":
-                        passed = True
-                        break
-                if not passed:
-                    log.info(f"   [browser-first] Turnstile not passed within wait window")
+            # Serialized across pool workers — see _TURNSTILE_INTERACTIVE_LOCK.
+            with _TURNSTILE_INTERACTIVE_LOCK:
+                from ..browser_engine import get_browser_page
+                page = get_browser_page(config)
+                if page is None:
+                    _note_structural(domain, config)
                     return None
-                solution["url"] = page.url
-                log.info(f"   [browser-first] Turnstile cleared by human — cookie kept for the batch")
-            finally:
-                if _pr is not None:
+                attention_key = f"turnstile:{domain}"
+                try:
+                    from .. import progress_reporter as _pr
+                    _pr.set_attention(attention_key, "请在浏览器窗口完成 Turnstile 人机验证",
+                                      current=doi, phase="人工验证")
+                except Exception:
+                    _pr = None
+                passed = False
+                try:
+                    deadline = time.time() + max(30, int(config.get("turnstile_wait_sec", 180)))
+                    while time.time() < deadline:
+                        time.sleep(5)
+                        page.goto(landing_url, wait_until="domcontentloaded", timeout=30000)
+                        html = page.content()
+                        if _classify_mirror_page(html) != "turnstile":
+                            passed = True
+                            break
+                    if not passed:
+                        log.info(f"   [browser-first] Turnstile not passed within wait window")
+                        if fail_notes is not None:
+                            fail_notes.append("challenge_turnstile_timeout")
+                        return None
+                    solution["url"] = page.url
+                    log.info(f"   [browser-first] Turnstile cleared by human — cookie kept for the batch")
+                finally:
+                    if _pr is not None:
+                        try:
+                            _pr.clear_attention(attention_key)
+                        except Exception:
+                            pass
                     try:
-                        _pr.clear_attention(attention_key)
+                        page.close()
                     except Exception:
                         pass
-                try:
-                    page.close()
-                except Exception:
-                    pass
-            lower = html.lower()
+                lower = html.lower()
 
         # Check for ALTCHA anti-bot verification (used by sci-hub.ru and other mirrors)
         if any(sig in lower for sig in ["altcha", "你是机器人吗", "not a robot"]):
@@ -498,11 +523,15 @@ def _browser_first_download(
             log.info(f"   [browser-first] Cloudflare challenge on {domain}, page may need more time")
             # The solve_url should have waited, but if we still see the challenge,
             # mark this domain as needing browser bypass for future attempts
+            if fail_notes is not None:
+                fail_notes.append("challenge_cloudflare")
             return None
 
         # Check for empty embed (Sci-Hub has no PDF)
         if '<embed' in lower and 'src=""' in lower:
             log.info(f"   [browser-first] empty embed — article not in Sci-Hub database")
+            if fail_notes is not None:
+                fail_notes.append("not_in_library")
             return None
 
         # Extract PDF URL from HTML
@@ -533,9 +562,13 @@ def _browser_first_download(
                 pass
 
         log.info(f"   [browser-first] no PDF found in response")
+        if fail_notes is not None:
+            fail_notes.append("not_in_library(no pdf in response)")
         return None
     except Exception as e:
         log.info(f"   [browser-first] error: {e}")
+        if fail_notes is not None:
+            fail_notes.append(f"network({type(e).__name__})")
         return None
 
 
@@ -545,12 +578,14 @@ def try_scihub_domain(
     output_path: Path,
     config: dict[str, Any],
     use_tor: bool = False,
+    fail_notes: list[str] | None = None,
 ) -> dict[str, Any] | None:
     landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
 
     # Browser-first: bypass Cloudflare/CAPTCHA before HTTP attempt
     if _is_browser_available(config):
-        result = _browser_first_download(landing_url, doi, output_path, config)
+        result = _browser_first_download(landing_url, doi, output_path, config,
+                                         fail_notes=fail_notes)
         if result:
             return result
 
@@ -562,9 +597,13 @@ def try_scihub_domain(
             _mark_browser_required(domain, config)
             resp = _try_browser(landing_url, config, resp)
             if resp is None:
+                if fail_notes is not None:
+                    fail_notes.append("challenge(browser bypass failed)")
                 return None
 
         if resp.status_code >= 400:
+            if fail_notes is not None:
+                fail_notes.append(f"http_{resp.status_code}")
             return None
 
         first = next(resp.iter_content(chunk_size=8192), b"")
@@ -577,6 +616,8 @@ def try_scihub_domain(
                 browser_resp = _try_browser(landing_url, config, resp)
                 if browser_resp is None:
                     log.warning(f"   browser bypass failed — is CloakBrowser installed? Run: pip install cloakbrowser")
+                    if fail_notes is not None:
+                        fail_notes.append("challenge(captcha bypass failed)")
                     return None
                 # Get new content from browser response
                 resp = browser_resp
@@ -609,13 +650,19 @@ def try_scihub_domain(
                 html = first
         pdf_url = extract_pdf_url_from_html(html.decode("utf-8", errors="ignore"), resp.url)
         if not pdf_url:
+            if fail_notes is not None:
+                fail_notes.append("not_in_library(no pdf url)")
             return None
         result = download_pdf_from_scihub(pdf_url, output_path, config, f"Sci-Hub({domain})", use_tor=use_tor, cookies=resp.cookies)
         if result:
             result["doi"] = doi
             result["identifier"] = doi
+        elif fail_notes is not None:
+            fail_notes.append("not_in_library(pdf download failed)")
         return result
-    except Exception:
+    except Exception as e:
+        if fail_notes is not None:
+            fail_notes.append(f"network({type(e).__name__})")
         return None
 
 
@@ -861,6 +908,7 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
     _failure_reason = "all domains unreachable"
     _any_reachable = False
     _any_browser_tried = False
+    fail_notes: list[str] = []
 
 
     if _HAS_COMPILED_CORE:
@@ -913,7 +961,8 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
 
     if len(domains) == 1:
         try:
-            result = try_scihub_domain(doi, domains[0], output_path, config, use_tor=use_tor)
+            result = try_scihub_domain(doi, domains[0], output_path, config, use_tor=use_tor,
+                                       fail_notes=fail_notes)
             if result:
                 record_result(domains[0], True, config)
                 return result
@@ -929,7 +978,7 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
     log.info(f"   Sci-Hub: trying {best_domain} first...")
     try:
         result = _race_pool(config).submit(
-            try_scihub_domain, doi, best_domain, best_output, config, use_tor
+            try_scihub_domain, doi, best_domain, best_output, config, use_tor, fail_notes
         ).result()
         if result and result.get("success"):
             final_path = Path(result.get("file", ""))
@@ -959,7 +1008,7 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
     futures = {}
     for domain in remaining:
         src_output = output_path.parent / f"{output_path.stem}_scihub_{domain.split('//')[1].replace('.', '_')}.pdf"
-        futures[pool.submit(try_scihub_domain, doi, domain, src_output, config, use_tor)] = (domain, src_output)
+        futures[pool.submit(try_scihub_domain, doi, domain, src_output, config, use_tor, fail_notes)] = (domain, src_output)
     try:
         for future in as_completed(futures, timeout=10):
             domain, src_output = futures[future]
@@ -1005,5 +1054,10 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         log.info("   Sci-Hub: all clearnet domains failed, retrying via Tor...")
         return try_scihub(doi, output_path, config, use_tor=True)
 
-    log.warning(f"   Sci-Hub: all domains failed for {doi}. Check: 1) network connectivity 2) Tor status (scansci-pdf tor_start)")
+    if fail_notes:
+        from collections import Counter
+        summary = ", ".join(f"{k}×{v}" for k, v in Counter(fail_notes).most_common())
+        log.warning(f"   Sci-Hub: all domains failed for {doi} ({summary})")
+    else:
+        log.warning(f"   Sci-Hub: all domains failed for {doi}. Check: 1) network connectivity 2) Tor status (scansci-pdf tor_start)")
     return None
