@@ -23,8 +23,20 @@ def _make_source(delay: float, ok: bool, label: str):
         time.sleep(delay)
         if not ok:
             return {"success": False, "error": "simulated failure", "source": label_}
-        # >100KB so is_suspicious_pdf (size heuristic) does not flag it
-        out_path.write_bytes(b"%PDF-1.4 fake" + b"0" * 150_000)
+        # A real multi-page PDF padded >100KB: is_suspicious_pdf now uses the
+        # actual page count (single-page previews are rejected), so the fake
+        # must be a parseable multi-page document to count as full text.
+        import os as _os
+        import fitz as _fitz
+        doc = _fitz.open()
+        for _i in range(3):
+            _page = doc.new_page()
+            _page.insert_text((72, 72), f"Fake full text page {_i + 1}")
+        _blob = _os.urandom(120_000)
+        _xref = doc.get_new_xref()
+        doc.update_object(_xref, f"<< /Type /EmbeddedFile /Length {len(_blob)} >>")
+        doc.update_stream(_xref, _blob, compress=False)
+        out_path.write_bytes(doc.tobytes())
         return {"success": True, "file": str(out_path), "source": label_}
     return src
 
