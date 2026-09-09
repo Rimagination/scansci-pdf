@@ -87,7 +87,13 @@ class TestInstsciElsevierPreview:
         """The second institutional Elsevier PDF path must reject previews too."""
         from scansci_pdf.institutional.sources import elsevier_api as inst_api
 
-        assert inst_api.fetch_pdf("10.1016/j.fake.3", "k") is None
+        class _Resp:
+            status_code = 200
+            headers = {"content-type": "application/pdf"}
+            content = _make_pdf(1, min_size=150_000)
+
+        with patch("requests.Session.get", return_value=_Resp()):
+            assert inst_api.fetch_pdf("10.1016/j.fake.3", "k") is None
 
 
 class TestRacingElsevierPreview:

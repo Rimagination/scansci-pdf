@@ -94,7 +94,11 @@ class WebVPNAuth:
         self._browser = None
         self._context = None
         self._page = None
-        base = base_url or config.get("instsci_base_url", "") or config.get("vpnsci_base_url", "")
+        # Explicit config wins over the school-database fallback: users may
+        # have customized their gateway URL after `setup`.
+        base = (config.get("instsci_base_url", "")
+                or config.get("vpnsci_base_url", "")
+                or base_url)
         self._webvpn_base = base.rstrip("/") if base else ""
 
     @property

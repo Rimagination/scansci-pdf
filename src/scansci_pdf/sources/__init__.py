@@ -354,17 +354,19 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
         legal_sources.append((try_openalex_content_api, "OpenAlexContent"))
 
     # Grey / shadow-library sources (Sci-Hub, SciBban, LibGen) are all gated
-    # by scihub_enabled. Default mirrors config.DEFAULT_CONFIG (False) so a
-    # partial config dict doesn't silently enable them.
+    # by scihub_enabled. The fallback mirrors config.DEFAULT_CONFIG (True):
+    # grey sources are a core, default-on capability and a partial config
+    # dict must not silently disable them. Opt-out is explicit
+    # (scihub_enabled=false / strategy=legal_only).
     grey_sources: list[tuple[Any, str]] = []
-    if config.get("scihub_enabled", False):
+    if config.get("scihub_enabled", True):
         grey_sources.append((try_scibban, "SciBban"))
         grey_sources.append((try_libgen, "LibGen"))
         grey_sources.append((try_scihub, "Sci-Hub"))
 
     if strategy == "scihub_only":
         # Only Sci-Hub (not SciBban, not LibGen)
-        return sort_sources([(try_scihub, "Sci-Hub")]) if config.get("scihub_enabled", False) else []
+        return sort_sources([(try_scihub, "Sci-Hub")]) if config.get("scihub_enabled", True) else []
     elif strategy == "grey_only":
         return sort_sources(grey_sources)
     elif strategy == "legal_only":
@@ -691,6 +693,11 @@ def _auto_rename(result: dict[str, Any], identifier: str, config: dict[str, Any]
         return
     file_path = Path(result.get("file", ""))
     if not file_path.exists():
+        return
+    if file_path.suffix.lower() != ".pdf":
+        # Non-PDF artifacts (e.g. the ElsevierAPI text/plain full text) keep
+        # their own extension — rename_pdf would force a .pdf name onto them.
+        log.info(f"   Non-PDF artifact ({file_path.suffix or 'no ext'}) — skipping auto-rename")
         return
     # Use cached metadata or fetch from Crossref
     from ..citation import fetch_metadata
