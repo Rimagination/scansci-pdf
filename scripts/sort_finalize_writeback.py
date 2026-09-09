@@ -18,7 +18,7 @@ Design notes:
 
 Usage:
   python sort_finalize_writeback.py triage.jsonl --xlsx a.xlsx --xlsx b.xlsx \
-      --key-col "Serial No.ID" --prefix-a global --prefix-b collection \
+      --key-col "Serial No.ID" --prefix global --prefix collection \
       --out-dir report/
 """
 import argparse
@@ -72,18 +72,22 @@ def main():
         for k, v in sorted(cnt.items(), key=lambda x: -x[1]):
             w.writerow([k, v])
 
-    # Excel write-back
+    # Excel write-back: two columns — 获取分诊 (bucket) + 已下载/编号 (human key)
     fills = {"OA-开源": "C6EFCE", "仓库有全文": "E2EFDA", "需机构权限": "FFEB9C"}
     for i, xls in enumerate(a.xlsx):
         prefix = a.prefix[i] if i < len(a.prefix) else None
         wb = openpyxl.load_workbook(xls)
         ws = wb[a.sheet] if a.sheet else wb.active
         head = {ws.cell(1, c).value: c for c in range(1, ws.max_column + 1)}
+        if "DOI" not in head:
+            raise SystemExit(f"{xls}: no 'DOI' column in the header row")
         doi_col = head["DOI"]
         key_col = head.get(a.key_col) if a.key_col else None
         col = ws.max_column + 1
-        ws.cell(1, col, "获取分诊")
-        ws.cell(1, col).font = Font(bold=True)
+        keycol = col + 1 if (prefix and key_col) else None
+        ws.cell(1, col, "获取分诊").font = Font(bold=True)
+        if keycol:
+            ws.cell(1, keycol, "已下载/编号").font = Font(bold=True)
         n = 0
         for ri in range(2, ws.max_row + 1):
             doi = str(ws.cell(ri, doi_col).value or "").strip().lower()
@@ -94,8 +98,8 @@ def main():
             if fills.get(r["cat"]):
                 ws.cell(ri, col).fill = PatternFill("solid",
                                                     fgColor=fills[r["cat"]])
-            if prefix and key_col:
-                ws.cell(ri, col, f"{prefix}{ws.cell(ri, key_col).value}")
+            if keycol:
+                ws.cell(ri, keycol, f"{prefix}{ws.cell(ri, key_col).value}")
             n += 1
         wb.save(xls)
         print(f"{Path(xls).name}: wrote {n} rows", flush=True)

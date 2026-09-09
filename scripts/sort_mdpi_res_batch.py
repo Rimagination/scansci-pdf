@@ -89,7 +89,9 @@ def main():
                         ok += 1
                         hit = True
                         print(f"OK {doi} {len(data) // 1024}KB", flush=True)
-                    break  # any non-PDF 200/404: this candidate is wrong, try next suffix
+                        break  # got the PDF — no need for further suffixes
+                    # 200 but not a PDF (HTML error page): wrong candidate,
+                    # fall through and try the next suffix/variant
                 except HTTPError as e:
                     if e.code == 404:
                         time.sleep(0.1)
