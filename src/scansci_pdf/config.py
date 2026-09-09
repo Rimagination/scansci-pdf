@@ -40,6 +40,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "network_proxy": "",
     "proxy_pool": "",  # 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP
     "download_strategy": "fastest",  # fastest / grey_only(all 3 grey) / scihub_only(Sci-Hub only) / scihub_first / oa_first / legal_only
+    "race_mode": "hedge",  # hedge: score-ordered staggered cascade (fewer requests, less anti-bot heat) / full: flat parallel race
+    "hedge_delay_seconds": 1.5,  # hedged cascade: wait this long before widening to the next lane
+    "batch_default_lanes": True,  # batch downloads default to pretriage + channel-lane scheduling (fast HTTP -> grey -> institutional)
+    "lane_s2_batch_min": 10,  # minimum batch size to enrich OA URLs via the S2 batch endpoint (500 ids/request)
+    "lane_mdpi_cdn": True,  # fast lane: construct mdpi-res.com CDN URLs for 10.3390 DOIs (bypasses the bot-walled main site)
     "scihub_enabled": True,
     "scihub_domains": DEFAULT_SCIHUB_DOMAINS,
     "vpnsci_enabled": False,

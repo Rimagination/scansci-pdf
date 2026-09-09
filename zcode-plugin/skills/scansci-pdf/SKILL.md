@@ -35,15 +35,20 @@ scansci-pdf fetch <DOI> [--output DIR]   # 7 步机构级联
 
 竞速分层:Tier1 出版商直链(4s) → Tier2 OpenAlex/Unpaywall(5s) → Tier3 EuropePMC/PMC/arXiv(8s) → Tier4 Sci-Hub/LibGen 无头浏览器(25s) → Tier5 WebVPN/CARSI(20s)。国内 Tor 常失败,直接不用。
 
+单篇竞速默认是**对冲级联**(`race_mode=hedge`):车道按评分排序,最优源先发,`hedge_delay_seconds`(默认 1.5s)内无响应才加发下一车道,已发车道快速失败则立即加发——请求量/反爬触发率比齐发降 3-5 倍,尾延迟几乎不变。`config set race_mode full` 恢复旧版齐发竞速。
+
 **换源重下必须清缓存**:`rm -f <out>/.doi_index.json && rm -rf ~/.scansci-pdf/cache/*`。
 
 ## 批量下载
 
 ```bash
-scansci-pdf batch dois.txt --scihub --output <dir> --format json   # 灰源竞速
-scansci-pdf batch dois.txt                                          # 机构级联
+scansci-pdf batch dois.txt --output <dir>            # 默认车道调度(见下)
+scansci-pdf batch dois.txt --no-lanes                # 退回逐篇对冲竞速
+scansci-pdf batch dois.txt --scihub                  # 灰源竞速引擎(scihub_only/grey_only/scihub_first 策略自动走此路)
 scansci-pdf publisher-batch f.txt --publisher elsevier
 ```
+
+**车道调度是批量默认**(CLI 默认开,MCP `batch_download` 对 ≥3 条标识符自动启用;`config set batch_default_lanes false` 全局关闭):先 **S2 批量预嗅探**(500 DOI/请求,直接拿到 OA PDF 直链,≥`lane_s2_batch_min`(10) 条才启用)→ **快车道并行 HTTP**(OA 直链 + Elsevier API + MDPI CDN 规律构造 `lane_mdpi_cdn`)→ 失败溢流 **灰色源竞速** → **机构级联**,最后瞬时失败冷却重试。MDPI(`10.3390`)走 mdpi-res.com CDN 直连(94% 命中,绕开主站反爬),不消耗嗅探请求。车道模式忽略 `batch_id` 断点(灰色道内部仍保留断点);需要断点续传用 `--no-lanes`。
 
 ⚠️ **>300 篇必须分批**——校验阶段并发 validate 会 TimeoutError 崩溃,一个都不下。断点续传:重跑同文件自动跳过已完成;MCP 用相同 `batch_id`。连续 Cloudflare 拦截时停下来排障(见下),不要硬冲。
 
@@ -88,6 +93,8 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 | Elsevier 只回 1 页预览 | key 无效/无权限,重新 setup --validate |
 | 下载失败结果带 `source_failures` | 逐渠道失败明细(渠道多为**临时**不可用):`error_type=rate_limited/network` → 稍后重试;`config_needed` → 缺用户决策,按 `action` 处理(如 `ask_user_email`)。不要静默换渠道了事,把明细告诉用户让其选择 |
 | `config_needed`/`ask_user_email` | Unpaywall 必须真实邮箱(占位邮箱 422)。**问用户要邮箱**,然后 `scansci_pdf_config(key="email", value="<用户邮箱>")` 并重试 |
+| 想恢复旧版齐发竞速 | `config set race_mode full`(默认 hedge 对冲级联,请求量已降 3-5 倍) |
+| 批量想回逐篇竞速 | CLI `batch --no-lanes`;MCP `batch_download(..., lanes=false)`;全局 `config set batch_default_lanes false` |
 | Agent 坚持要 Elsevier insttoken | 不需要:API key + 校园网出口即可;NOT_ENTITLED=未连校园网或学校未订阅,连网重试或转其他渠道 |
 | MCP 无 `scansci_pdf_*` 工具 | plugin 未启用 → 走 CLI 兜底 |
 | 403/超时 ≠ 无全文 | 多为反爬或网络受限,留给浏览器/代理轮 |

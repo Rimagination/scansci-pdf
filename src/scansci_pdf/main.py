@@ -448,7 +448,7 @@ def batch_fetch_cmd(
     format: str = typer.Option("json", help="Output format: json, text"),
     scihub: bool = typer.Option(False, "--scihub", help="Use Sci-Hub racing engine (includes grey sources) instead of institutional cascade"),
     runs_dir: str = typer.Option("", "--runs-dir", help="ScanSci Find run directory: use its download queue as input and its preprint arXiv IDs as fallbacks for failed DOIs"),
-    lanes: bool = typer.Option(False, "--lanes", help="Channel-lane scheduling: Elsevier API/OA fast lane (parallel HTTP), grey racing, institutional cascade"),
+    lanes: bool = typer.Option(True, "--lanes/--no-lanes", help="Channel-lane scheduling (default on): pretriage + Elsevier API/OA/MDPI fast lane -> grey racing -> institutional cascade. --no-lanes falls back to per-item racing"),
     retry: str = typer.Option("", "--retry", help="Retry failed identifiers from a previous batch_results.json"),
 ) -> None:
     """Batch fetch papers. Default: institutional cascade. Use --scihub for grey-source racing."""
@@ -484,10 +484,19 @@ def batch_fetch_cmd(
         print("  No DOIs/URLs found in input file.")
         return
 
-    # Channel-lane scheduling (opt-in, or automatic for table inputs)
+    # Channel-lane scheduling (default; --no-lanes falls back to per-item
+    # racing). Grey-oriented strategies (scihub_only/grey_only/scihub_first)
+    # express a lane-ORDER preference the fast->grey->institutional schedule
+    # would invert, and an explicit --scihub asks for the racing engine —
+    # both stay on racing.
     from .pipeline import collect_failures, grey_allowed, run_lanes
 
-    use_lanes = lanes and entries is not None
+    _cfg = _load_config()
+    _grey_oriented = (
+        scihub
+        or _cfg.get("download_strategy", "fastest") in ("scihub_only", "grey_only", "scihub_first")
+    )
+    use_lanes = lanes and entries is not None and not _grey_oriented
     if use_lanes:
         cfg = _load_config()
         try:

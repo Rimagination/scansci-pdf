@@ -116,18 +116,24 @@ def _batch_download_impl(
     use_vpnsci: bool = False,
     batch_id: str | None = None,
     resume: bool = True,
+    lanes: bool | None = None,
     ctx: Any = None,
 ) -> str:
     """Download multiple papers by DOI or arXiv ID.
 
     Args:
-        identifiers: List of DOIs or arXiv IDs
+        identifiers: List of DOIs or arXiv IDs (queue-contract lines
+            "identifier<TAB>channel<TAB>oa_url" are honored too)
         output_dir: Override default output directory
         scihub_enabled: Enable/disable Sci-Hub
         use_tor: Route Sci-Hub/LibGen through Tor
         use_vpnsci: Try WebVPN institutional proxy as last resort (requires prior login via scansci_pdf_login(kind='webvpn'))
         batch_id: Unique ID for this batch (auto-generated if omitted). Used for resume support.
         resume: Skip items completed in a previous run (default true). Set false to re-download all.
+        lanes: Channel-lane scheduling (default on for >=3 items): S2-batch
+            pretriage -> fast HTTP lane (OA/Elsevier/MDPI CDN) -> grey racing
+            -> institutional cascade. Lane mode ignores batch_id/resume (the
+            grey lane keeps its own resume). Set false for per-item racing.
     """
     from .log import get_logger
     _log = get_logger()
@@ -142,6 +148,45 @@ def _batch_download_impl(
                 ctx.report_progress(current, total)
             except Exception:
                 pass
+
+    cfg = load_config()
+    use_lanes = (
+        (lanes if lanes is not None else bool(cfg.get("batch_default_lanes", True)))
+        and len(identifiers) >= 3
+        # Grey-oriented strategies express a lane-ORDER preference that the
+        # fast->grey->institutional schedule would invert — keep racing.
+        and cfg.get("download_strategy", "fastest") not in ("scihub_only", "grey_only", "scihub_first")
+    )
+    if use_lanes:
+        from .pipeline import grey_allowed, parse_queue, run_lanes
+        from .sources import _write_download_results
+
+        all_entries = parse_queue("\n".join(identifiers))
+        entries = [e for e in all_entries if e.identifier and not e.unresolved]
+        dropped = [e for e in all_entries if e.unresolved or not e.identifier]
+        allow_grey = (scihub_enabled is not False) and grey_allowed(cfg)
+        out_dir = output_dir or cfg.get("output_dir") or str(Path.cwd())
+        _log.info(f"Lane scheduling {len(entries)} items: pretriage -> fast HTTP -> grey -> institutional")
+        raw = run_lanes(entries, out_dir, config=cfg, allow_grey=allow_grey)
+        raw += [
+            {"doi": (e.raw or "")[:80], "success": False,
+             "error": "unrecognized identifier (lane mode)"}
+            for e in dropped
+        ]
+        succeeded = sum(1 for r in raw if r.get("success"))
+        summary = {
+            "total": len(identifiers),
+            "unique": len(all_entries),
+            "succeeded": succeeded,
+            "failed": len(raw) - succeeded,
+            "results": raw,
+            "failed_dois": [r.get("doi") or r.get("identifier", "")
+                            for r in raw if not r.get("success")],
+            "batch_id": batch_id or "lanes",
+            "mode": "lanes",
+        }
+        _write_download_results(raw, out_dir)
+        return json.dumps(summary, ensure_ascii=False)
 
     result = batch_download(
         identifiers, output_dir,
@@ -1424,8 +1469,9 @@ def scansci_pdf_batch_download(
     batch_id: str | None = None,
     resume: bool = True,
     resolve_titles: bool = True,
+    lanes: bool | None = None,
 ) -> str:
-    """Batch download: identifier list OR a file (txt/csv/xlsx/BibTeX/APA) with auto DOI resolution; resumable via batch_id."""
+    """Batch download: identifiers OR file (txt/csv/xlsx/BibTeX/APA); auto DOI resolution; resumable batch_id; >=3 items default to lane scheduling (fast->grey->institutional); lanes=false for racing."""
     if file:
         suffix = Path(file).suffix.lower()
         if suffix == ".bib":
@@ -1439,6 +1485,7 @@ def scansci_pdf_batch_download(
     return _batch_download_impl(
         identifiers=identifiers, output_dir=output_dir, scihub_enabled=scihub_enabled,
         use_tor=use_tor, use_vpnsci=use_vpnsci, batch_id=batch_id, resume=resume,
+        lanes=lanes,
     )
 
 

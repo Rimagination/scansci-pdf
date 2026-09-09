@@ -40,6 +40,7 @@ TABLE_SUFFIXES = (".csv", ".xlsx", ".tsv", ".tab")
 # DOI prefix -> fast HTTP lane. Extend as new publisher API fast paths land.
 CHANNEL_BY_PREFIX = {
     "10.1016": "elsevier",  # Elsevier / ScienceDirect / Cell / Lancet
+    "10.3390": "oa",        # MDPI — fully OA; fast lane constructs mdpi-res CDN URLs
 }
 
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"'<>]+)", re.I)
@@ -153,16 +154,117 @@ def _fetch_oa_pdf(doi: str, config: dict[str, Any]) -> str:
     return pdf
 
 
+def _s2_batch_oa_urls(dois: list[str], config: dict[str, Any]) -> dict[str, str]:
+    """Semantic Scholar batch OA lookup: up to 500 ids per POST, no email/key.
+
+    Returns {doi: pdf_url}; empty when nothing was found or the endpoint is
+    unreachable. All errors are silent — enrichment is an optimization and
+    the caller falls back to per-DOI lookups. Field test: 5,645 DOIs in 12
+    requests (~3 min) vs 5,645 single-DOI calls.
+    """
+    import requests as _requests
+
+    proxy = config.get("network_proxy", "")
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    url = ("https://api.semanticscholar.org/graph/v1/paper/batch"
+           "?fields=isOpenAccess,openAccessPdf")
+    out: dict[str, str] = {}
+    for i in range(0, len(dois), 500):
+        chunk = [d.strip().lower() for d in dois[i:i + 500]]
+        for attempt in range(3):
+            try:
+                resp = _requests.post(
+                    url, json={"ids": [f"DOI:{d}" for d in chunk]},
+                    timeout=(10, 45), proxies=proxies,
+                    headers={"User-Agent": _user_agent()},
+                )
+                if resp.status_code == 429:  # common; clears in 10-20s
+                    time.sleep(min(20, 5 * (attempt + 1)))
+                    continue
+                if resp.status_code != 200:
+                    return out
+                data = resp.json()
+                if not isinstance(data, list):
+                    return out
+                for d, item in zip(chunk, data):
+                    if not isinstance(item, dict):
+                        continue
+                    pdf = str(((item.get("openAccessPdf") or {}).get("url")) or "")
+                    if item.get("isOpenAccess") and _looks_like_pdf_url(pdf):
+                        out[d] = pdf
+                break
+            except Exception:
+                if attempt == 2:
+                    return out
+                time.sleep(3)
+    return out
+
+
+# MDPI DOI-prefix -> full journal name for mdpi-res.com CDN URLs. Ambiguous
+# prefixes (app/s/pr) are left unmapped — identity misses just overflow to
+# the grey lane. Field-tested 268/285 = 94% hit rate.
+_MDPI_SLUGS = {
+    "su": "sustainability", "atmos": "atmosphere", "w": "water", "f": "forests",
+    "min": "minerals", "en": "energies", "polym": "polymers",
+    "applbiosci": "appliedbiosciences",
+}
+
+
+def _mdpi_variants(doi: str) -> list[str]:
+    """Constructible mdpi-res.com CDN URLs for an MDPI DOI.
+
+    www.mdpi.com/pdf is bot-walled (Cloudflare TLS fingerprinting) but the
+    CDN is open. Filename = {slug}-{vol:02d}-{art:05d}[-v2|-v3|-v4].pdf;
+    slug is the FULL journal name (not the DOI prefix), there is no issue
+    number, and old journals have 1-digit volumes — try both splits.
+    """
+    m = re.match(r"^10\.3390/([a-z]+)(\d{6,})$", doi.strip().lower())
+    if not m:
+        return []
+    pref, digits = m.groups()
+    slug = _MDPI_SLUGS.get(pref, pref)
+    out: list[str] = []
+    seen: set[str] = set()
+    for vol_take in (2, 1):
+        if len(digits) <= vol_take + 2:
+            continue
+        vol = str(int(digits[:vol_take])).zfill(2)
+        art = str(int(digits[vol_take + 2:])).zfill(5)
+        base = f"{slug}-{vol}-{art}"
+        if base in seen:
+            continue
+        seen.add(base)
+        for suffix in ("", "-v2", "-v3", "-v4"):
+            out.append(f"https://mdpi-res.com/d_attachment/{slug}/{base}/"
+                       f"article_deploy/{base}{suffix}.pdf")
+    return out
+
+
+def _mdpi_cdn_fetch(doi: str, out: Path,
+                    headers: dict[str, str],
+                    proxies: dict[str, str] | None) -> Path | None:
+    """Try the constructible CDN variants until one returns a real PDF."""
+    import time as _time
+
+    for url in _mdpi_variants(doi):
+        path = _download_url(url, out, doi, headers, proxies)
+        if path:
+            return path
+        _time.sleep(0.15)  # rapid-fire misses earn a temporary IP block
+    return None
+
+
 def _enrich_oa_urls(entries: list[QueueEntry], config: dict[str, Any]) -> None:
     """Route gold/hybrid OA papers into the fast lane before scheduling.
 
-    The prefix DB only knows Elsevier, so plain-DOI batches sent every other
-    publisher to the grey or institutional lanes — OA journals (NAR, PLoS,
-    Nat Commun, …) ended up at publisher bot-walls needing manual Turnstile
-    clicks. One parallel OpenAlex lookup per unknown DOI fills ``oa_url``;
-    the fast lane's own %PDF/10KB validation keeps junk from landing.
-    Failures and the kill switch (``lane_oa_enrich: false``) leave entries
-    exactly as they were.
+    The prefix DB only knows Elsevier/MDPI, so plain-DOI batches send every
+    other publisher to the grey or institutional lanes — OA journals (NAR,
+    PLoS, Nat Commun, …) end up at publisher bot-walls needing manual
+    Turnstile clicks. For larger batches one S2 batch request per 500 DOIs
+    fills ``oa_url`` first; per-DOI OpenAlex/Unpaywall lookups mop up the
+    remainder (and serve small batches). The fast lane's own %PDF/10KB
+    validation keeps junk from landing. Failures and the kill switch
+    (``lane_oa_enrich: false``) leave entries exactly as they were.
     """
     if not config.get("lane_oa_enrich", True):
         return
@@ -171,9 +273,27 @@ def _enrich_oa_urls(entries: list[QueueEntry], config: dict[str, Any]) -> None:
         if e.identifier.lower().startswith("10.")
         and not e.oa_url
         and predict_channel(e.identifier) not in ("elsevier", "institution")
+        # MDPI is covered deterministically by the CDN constructor in the
+        # fast lane — no enrichment requests spent on it.
+        and not e.identifier.lower().startswith("10.3390/")
     ]
     if not targets:
         return
+
+    # Batch sniff first: 1 request per 500 DOIs instead of 1 per DOI.
+    s2_min = max(1, int(config.get("lane_s2_batch_min", 10)))
+    if len(targets) >= s2_min:
+        try:
+            batch = _s2_batch_oa_urls([e.identifier for e in targets], config)
+        except Exception:
+            batch = {}
+        for e in targets:
+            pdf = batch.get(e.identifier.strip().lower())
+            if pdf:
+                e.oa_url = pdf
+                if e.channel == "auto":
+                    e.channel = "oa"
+        targets = [e for e in targets if not e.oa_url]
 
     def lookup(entry: QueueEntry) -> None:
         try:
@@ -600,6 +720,13 @@ def _run_fast_lane(
     headers = {"User-Agent": _user_agent()}
 
     def one(e: QueueEntry) -> dict[str, Any]:
+        # MDPI: deterministic CDN URLs first — 94% field hit rate, no bot wall.
+        if (config.get("lane_mdpi_cdn", True)
+                and e.identifier.lower().startswith("10.3390/")):
+            path = _mdpi_cdn_fetch(e.identifier, out, headers, proxies)
+            if path:
+                return {"success": True, "doi": e.identifier, "file": str(path),
+                        "source": "mdpi_cdn"}
         if e.oa_url:
             path = _download_url(e.oa_url, out, e.identifier, headers, proxies)
             if not path and config.get("oa_browser_fallback", True):

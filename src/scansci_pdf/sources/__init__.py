@@ -436,8 +436,11 @@ def _run_tiers_parallel(
     """
     if failures is None:
         failures = []
-    # Delegate to compiled racing engine if available
-    if _HAS_COMPILED_CORE:
+    # Delegate to the compiled racing engine only for the flat race: the
+    # hedged cascade needs staggered submission, which the compiled engine
+    # does not model.
+    race_mode = str(config.get("race_mode", "hedge")).lower()
+    if _HAS_COMPILED_CORE and race_mode == "full":
         all_sources = []
         for tier_sources, tier_label, tier_timeout in tiers:
             for fn, label in tier_sources:
@@ -494,6 +497,8 @@ def _run_tiers_parallel(
     all_done_event = threading.Event()   # set when every submitted future returned
     done_counter: list[int] = [0]
     done_counter_lock = threading.Lock()
+    submission_done = threading.Event()  # staggered scheduler finished launching lanes
+    lanes_idle = threading.Event()       # every launched-so-far lane has answered
     shared_result: dict[str, Any] = {"result": None}
 
     def _try_and_publish(fn, label, src_output):
@@ -519,26 +524,64 @@ def _run_tiers_parallel(
         with done_counter_lock:
             done_counter[0] += 1
             if done_counter[0] >= len(futures):
-                all_done_event.set()
+                # Mid-scheduling this wakes the scheduler so a fast-failing
+                # lane widens immediately instead of idling out the hedge
+                # delay; after submission_done it means the race is over.
+                lanes_idle.set()
+                if submission_done.is_set():
+                    all_done_event.set()
 
-    log.info(f"   Racing {len(all_sources)} sources across {len(tiers)} tiers (parallel)...")
-    pool = ThreadPoolExecutor(max_workers=len(all_sources))
+    # Hedged cascade (default): lanes arrive score-ordered by the caller.
+    # Launch the best first and only widen when it fails to answer within
+    # hedge_delay_seconds — cuts request volume and anti-bot heat vs a flat
+    # race while keeping tail latency close. race_mode=full restores the
+    # flat all-at-once race (compiled engine eligible again).
+    hedge_delay = max(0.0, float(config.get("hedge_delay_seconds", 1.5)))
+    if race_mode == "full":
+        hedge_delay = 0.0
+    mode_label = "hedged cascade" if hedge_delay > 0 else "flat race"
+
+    launchable: list[tuple[Any, str]] = []
+    for fn, label, _tier_label, _tier_timeout in all_sources:
+        if _neg_blocked(label, doi):
+            log.info(f"   SKIP {label} (negative cache: recently failed for this publisher)")
+            continue
+        launchable.append((fn, label))
+
+    log.info(f"   Racing {len(all_sources)} sources across {len(tiers)} tiers ({mode_label})...")
+    deadline = time.time() + overall_timeout + 5
+    pool = ThreadPoolExecutor(max_workers=max(1, len(launchable)))
     futures = {}
     try:
-        for fn, label, tier_label, tier_timeout in all_sources:
-            if _neg_blocked(label, doi):
-                log.info(f"   SKIP {label} (negative cache: recently failed for this publisher)")
-                continue
+        for i, (fn, label) in enumerate(launchable):
+            lanes_idle.clear()
             src_output = target_dir / f"{safe_filename(doi)}_{label}.pdf"
             fut = pool.submit(_try_and_publish, fn, label, src_output)
             futures[fut] = (label, src_output)
-        for fut in futures:
             fut.add_done_callback(_on_future_done)
+            if hedge_delay <= 0 or i == len(launchable) - 1 or success_event.is_set():
+                continue
+            # Widen only when needed: another lane succeeded, everything
+            # launched so far already answered (fast failure), the hedge
+            # delay elapsed, or the overall deadline arrived.
+            now = time.time()
+            if now >= deadline:
+                break
+            _wait_any((success_event, lanes_idle),
+                      min(hedge_delay, deadline - now))
+            if success_event.is_set() or time.time() >= deadline:
+                break
+        submission_done.set()
+        with done_counter_lock:
+            if done_counter[0] >= len(futures):
+                all_done_event.set()
 
         # Wait for first success, all sources done, or the overall timeout.
         # all_done lets a full fast-failure return immediately instead of
         # burning the whole timeout + grace period.
-        _wait_any((success_event, all_done_event), overall_timeout + 5)
+        if not success_event.is_set() and not all_done_event.is_set():
+            _wait_any((success_event, all_done_event),
+                      max(0.0, deadline - time.time()))
 
         if shared_result["result"] is not None:
             result, label, src_output = shared_result["result"]
