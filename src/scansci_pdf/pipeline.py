@@ -534,13 +534,16 @@ def run_lanes(
     fast: list[QueueEntry] = []
     grey: list[str] = []
     inst: list[str] = []
+    springer_key = str(config.get("springer_api_key", "") or "")
     for e in entries:
         if e.unresolved or not e.identifier:
             continue
         ch = e.channel or predict_channel(e.identifier)
+        springer_fast = (springer_key
+                         and e.identifier.lower().startswith("10.1007/"))
         if ch == "institution":
             inst.append(e.identifier)
-        elif ch in ("oa", "elsevier") or e.oa_url:
+        elif ch in ("oa", "elsevier") or e.oa_url or springer_fast:
             fast.append(e)
         else:
             grey.append(e.identifier)
@@ -727,6 +730,15 @@ def _run_fast_lane(
             if path:
                 return {"success": True, "doi": e.identifier, "file": str(path),
                         "source": "mdpi_cdn"}
+        # Springer: entitled full text via the TDM API (JATS XML artifact)
+        if (str(config.get("springer_api_key", "") or "")
+                and e.identifier.lower().startswith("10.1007/")):
+            from .sources.springer_tdm import try_springer_tdm
+
+            r = try_springer_tdm(e.identifier, out / _safe_name(e.identifier), config)
+            if r and r.get("success"):
+                return {"success": True, "doi": e.identifier,
+                        "file": r["file"], "source": "springer_tdm"}
         if e.oa_url:
             path = _download_url(e.oa_url, out, e.identifier, headers, proxies)
             if not path and config.get("oa_browser_fallback", True):

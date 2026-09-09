@@ -62,6 +62,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "core_api_key": "",
     "openalex_api_key": "",
     "elsevier_api_key": "",
+    "springer_api_key": "",  # Springer Nature Full Text API (TDM) — entitlement follows the institution (ORCID-affiliated key, needs a Springer subscription with TDM rights)
     "elsevier_insttoken": "",
     "connect_timeout": 15,
     "read_timeout": 30,

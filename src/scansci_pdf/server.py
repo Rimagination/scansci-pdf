@@ -654,6 +654,62 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+@mcp_app.tool()
+def scansci_pdf_springer_setup(test: bool = False) -> str:
+    """Set up the Springer TDM API key (subscription full text; entitlement follows the institution via ORCID-affiliated key; test=true probes entitlement with a paywalled article)."""
+    import webbrowser
+    config = load_config()
+    api_key = str(config.get("springer_api_key", "") or "")
+
+    result: dict[str, Any] = {}
+
+    if api_key:
+        result["status"] = "configured"
+        result["key_preview"] = f"{api_key[:8]}...{api_key[-4:]}"
+        result["message"] = "Springer TDM API key 已配置。"
+        if test:
+            from .sources.springer_tdm import validate_springer_key
+
+            v = validate_springer_key(api_key, config)
+            result["test"] = v["status"]
+            if v["status"] == "entitled":
+                result["message"] += (
+                    " ✅ 验证通过：机构订阅全文可用，10.1007 论文可走 TDM 车道（JATS XML 全文，1-2 秒）。"
+                )
+            elif v["status"] == "not_entitled":
+                result["message"] += (
+                    f" ⚠️ {v['detail']}。无权限时 10.1007 走 WebVPN/CARSI 机构级联。"
+                )
+            elif v["status"] == "invalid_key":
+                result["message"] += f" ❌ {v['detail']}，请到 dev.springernature.com 重新生成。"
+            else:
+                result["message"] += f" ⚠️ 验证未完成（{v['status']}），稍后重试。"
+        else:
+            result["message"] += " 运行 scansci_pdf_springer_setup(test=true) 验证机构权限。"
+    else:
+        result["status"] = "not_configured"
+        try:
+            webbrowser.open("https://dev.springernature.com/")
+            result["browser_opened"] = True
+        except Exception:
+            result["browser_opened"] = False
+
+        result["message"] = (
+            "Springer TDM API key 未配置。机构订阅用户按以下步骤操作：\n\n"
+            "1. 浏览器已打开 Springer Nature 开发者门户（如未打开请访问 https://dev.springernature.com/）\n"
+            "2. 注册账号，注册/登录时用学校邮箱或关联 ORCID（订阅权限跟机构走）\n"
+            "3. 在 API Portal 创建 API key（Full Text API/TDM）\n"
+            "4. 若门户要求接受 TDM 条款/验证机构身份，按提示完成（需要学校订阅 Springer 且含 TDM 权限）\n"
+            "5. 运行配置命令：\n"
+            "   scansci_pdf_config(key=\"springer_api_key\", value=\"你的APIKey\")\n"
+            "6. 运行 scansci_pdf_springer_setup(test=true) 验证权限\n\n"
+            "配置后 10.1007 Springer 论文自动尝试 TDM 全文车道（JATS XML，1-2 秒）；"
+            "PDF 仍优先走 OA 直链/浏览器车道。无机构权限时该车道自动让位给 WebVPN/CARSI。"
+        )
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def scansci_pdf_network_diagnose() -> str:
     """Diagnose network connectivity and provide actionable fix suggestions.
 

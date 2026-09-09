@@ -81,7 +81,8 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
    ```bash
    scansci-pdf elsevier-setup --api-key YOUR_KEY --validate
    ```
-2. **其余出版商 → WebVPN/CARSI**:`scansci-pdf schools 清华` → `setup 清华大学` → `login`(浏览器 CAS,cookie 自动保存,勿让用户手动复制)→ 正常 `get`。CARSI:`config-cmd carsi_idp_name <学校>` + `federated-login elsevier`。卡登录页 = session 过期,重新 login。
+2. **`10.1007`(Springer)→ Springer TDM API**(`scansci_pdf_springer_setup`):机构订阅+TDM 授权的 key(dev.springernature.com 注册,ORCID 关联机构),交付 **JATS XML 全文**(无 PDF 端点),1–2 s/篇。`test=true` 用已知付费文章探测权限:`entitled`=通,`not_entitled`=key 有效但机构无订阅/TDM 权限(此时走 WebVPN/CARSI),`invalid_key`=重生成。竞速引擎与车道模式都已接入;无 key 时该车道零成本让位。
+3. **其余出版商 → WebVPN/CARSI**:`scansci-pdf schools 清华` → `setup 清华大学` → `login`(浏览器 CAS,cookie 自动保存,勿让用户手动复制)→ 正常 `get`。CARSI:`config-cmd carsi_idp_name <学校>` + `federated-login elsevier`。卡登录页 = session 过期,重新 login。
 
 ## 排障速查
 

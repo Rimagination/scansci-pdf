@@ -43,6 +43,7 @@ def _load_publisher_cookies(session: requests.Session, config: dict[str, Any]) -
 from .nature import try_nature_direct
 from .openalex import try_openalex_oa
 from .semantic_scholar import try_semanticscholar
+from .springer_tdm import try_springer_tdm
 from .unpaywall import try_unpaywall
 
 # ============================================================
@@ -119,7 +120,7 @@ PUBLISHER_TOOL_MAP: dict[str, list[str]] = {
     "PNAS": ["PNASDirect", "Crossref", "Unpaywall"],
     "Oxford": ["OxfordBrowser", "Crossref", "Unpaywall"],
     "ACS": ["ACSBrowser", "Crossref", "Unpaywall"],
-    "Springer": ["SpringerBrowser", "Crossref", "Unpaywall"],
+    "Springer": ["SpringerTDM", "SpringerBrowser", "Crossref", "Unpaywall"],
     "APS": ["APSBrowser", "Crossref", "Unpaywall"],
     "IOP": ["IOPBrowser", "Crossref", "Unpaywall"],
     "PLOS": ["PLOSDirect", "Crossref", "Unpaywall"],
@@ -664,6 +665,7 @@ _FN_MAP.update({
     "OpenAlexOA": try_openalex_oa,
     "SemanticScholar": try_semanticscholar,
     "MDPIDirect": try_mdpi_direct,
+    "SpringerTDM": try_springer_tdm,
     "ScienceDirect": try_science_direct,
     "PNASDirect": try_pnas_direct,
     "PLOSDirect": try_plos_direct,
