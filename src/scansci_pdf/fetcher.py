@@ -184,12 +184,24 @@ class PaperFetcher:
     def auth(self) -> WebVPNAuth | EZProxyAuth:
         if self._auth is None:
             from .schools import get_school
-            school_name = self.config.get("instsci_school", "")
+            school_name = (self.config.get("instsci_school", "")
+                           or self.config.get("vpnsci_school", "")).strip()
+            if not school_name:
+                # Raised deliberately: fetch_with_result() converts ValueError
+                # into a structured config_needed outcome. get_school("") would
+                # otherwise fuzzy-match an arbitrary school and the cascade
+                # would navigate to a garbage/empty gateway URL.
+                raise ValueError(
+                    "no institution configured (instsci_school/vpnsci_school are empty)"
+                )
             entry = get_school(school_name)
             if entry.school_type == "ezproxy":
                 self._auth = EZProxyAuth(self.config, proxy_base=entry.host)
             else:
-                self._auth = WebVPNAuth(self.config, key=entry.key, iv=entry.iv)
+                # Fall back to the school database gateway host when no
+                # explicit base URL is configured.
+                self._auth = WebVPNAuth(self.config, key=entry.key, iv=entry.iv,
+                                        base_url=getattr(entry, "host", "") or "")
         return self._auth
 
     def fetch(self, identifier: str, use_cache: bool = True) -> Paper:

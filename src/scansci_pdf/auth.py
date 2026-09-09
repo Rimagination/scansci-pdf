@@ -85,6 +85,7 @@ class WebVPNAuth:
         config: dict,
         key: bytes | None = None,
         iv: bytes | None = None,
+        base_url: str = "",
     ):
         self.config = config
         self._encrypt_key = key or WEBVPN_DEFAULT_KEY
@@ -93,7 +94,7 @@ class WebVPNAuth:
         self._browser = None
         self._context = None
         self._page = None
-        base = config.get("instsci_base_url", "") or config.get("vpnsci_base_url", "")
+        base = base_url or config.get("instsci_base_url", "") or config.get("vpnsci_base_url", "")
         self._webvpn_base = base.rstrip("/") if base else ""
 
     @property
@@ -109,6 +110,23 @@ class WebVPNAuth:
             "--no-proxy-server",
             "--disable-features=CrossOriginOpenerPolicy",
         ]
+
+    def _close_browser_quietly(self) -> None:
+        """Close a launched persistent context and release its Playwright loop.
+
+        Skipping this leaks the sync dispatcher loop on the current thread;
+        every later launch in the same thread then fails with "Playwright Sync
+        API inside the asyncio loop" (seen in CLI fetch/batch cascades).
+        """
+        for attr in ("_page", "_context", "_browser"):
+            obj = getattr(self, attr, None)
+            if obj is None:
+                continue
+            try:
+                obj.close()
+            except Exception:
+                pass
+            setattr(self, attr, None)
 
     @property
     def session(self) -> requests.Session:
@@ -144,6 +162,12 @@ class WebVPNAuth:
 
         if not hostname:
             return url
+        if not self._webvpn_base:
+            # Never return a relative gateway URL — callers would navigate to
+            # "/https/77726476..." which is always an invalid URL.
+            raise ValueError(
+                "WebVPN base URL is empty — run `scansci-pdf setup <学校全名>` first"
+            )
 
         cipher = AES.new(self._encrypt_key, AES.MODE_CFB, self._encrypt_iv, segment_size=128)
         encrypted = cipher.encrypt(hostname.encode("utf-8"))
@@ -185,6 +209,8 @@ class WebVPNAuth:
         if proxy:
             test_url = TEST_URL
         else:
+            if not self._webvpn_base:
+                return False
             test_url = self.convert_url(TEST_URL)
         try:
             resp = self.session.get(test_url, timeout=15, allow_redirects=True)
@@ -198,6 +224,16 @@ class WebVPNAuth:
         return False
 
     def _browser_login(self) -> bool:
+        # Fail BEFORE launching any browser: launching and then bailing out
+        # leaks the sync Playwright dispatcher loop on this thread, and every
+        # later launch then dies with "Playwright Sync API inside the asyncio
+        # loop" for the rest of the process (seen in CLI fetch/batch).
+        if not self._webvpn_base:
+            logger.error(
+                "WebVPN base URL is empty — school gateway unknown. "
+                "Run `scansci-pdf setup <学校全名>` first and check `scansci-pdf schools`."
+            )
+            return False
         if not _HAS_CLOAKBROWSER:
             logger.error("no browser backend available. Run: pip install patchright (or pip install cloakbrowser)")
             return False
@@ -215,16 +251,10 @@ class WebVPNAuth:
             self._page = self._context.new_page()
         except Exception as e:
             logger.error("Failed to start CloakBrowser: %s", e)
+            self._close_browser_quietly()
             return False
 
         _seed_saved_cookies(_get_cookie_path(self.config), self._context)
-
-        if not self._webvpn_base:
-            logger.error(
-                "WebVPN base URL is empty — school gateway unknown. "
-                "Run `scansci-pdf setup <学校全名>` first and check `scansci-pdf schools`."
-            )
-            return False
 
         self._page.goto(self._webvpn_base, wait_until="networkidle", timeout=30000)
         current_url = self._page.url

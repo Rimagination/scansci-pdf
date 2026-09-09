@@ -66,27 +66,32 @@ def _response_looks_pdf(resp: requests.Response, first_chunk: bytes) -> bool:
 def is_suspicious_pdf(path: Path) -> bool:
     """Check if a PDF looks like a cover page or preview (not full text).
 
-    Heuristics (all must match to be suspicious):
+    Heuristics:
       - Very small file (< 50 KB): likely a 1-page cover
-      - Has at most 1 page: preview/cover page
+      - At most 1 readable page: preview/cover page. File size alone is NOT
+        trusted — Elsevier serves >100KB single-page previews to API keys
+        without full-text entitlement.
     """
     try:
         size = path.stat().st_size
-        # Large files (> 100KB) are almost certainly full text
-        if size > 100_000:
-            return False
         # Very small files are suspicious regardless
         if size < 50_000:
             return True
-        # For files between 50KB-100KB, check page count
-        with path.open("rb") as fh:
-            content = fh.read(512_000)
-        # Count PDF page objects: look for "/Type /Page" not followed by "s"
-        import re
-        pages = len(re.findall(rb"/Type\s*/Page\b", content))
-        if pages <= 1:
-            return True
-        return False
+        try:
+            import fitz  # type: ignore[import-not-found]
+        except Exception:
+            # No pymupdf: fall back to the cheap regex heuristic
+            with path.open("rb") as fh:
+                content = fh.read(512_000)
+            # Count PDF page objects: look for "/Type /Page" not followed by "s"
+            import re
+            pages = len(re.findall(rb"/Type\s*/Page\b", content))
+            return pages <= 1
+        try:
+            with fitz.open(path) as doc:
+                return int(doc.page_count) <= 1
+        except Exception:
+            return True  # unreadable PDF — treat as suspicious
     except OSError:
         return False
 

@@ -63,6 +63,15 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
         logger.warning("Elsevier API returned suspiciously small PDF (%d bytes)", len(resp.content))
         return None
 
+    # Reject 1-page previews served to API keys without full-text entitlement
+    try:
+        from ...sources.elsevier_api import _pdf_page_count
+        if _pdf_page_count(resp.content) == 1:
+            logger.info("Elsevier API returned a 1-page preview — treating as no entitlement")
+            return None
+    except ImportError:
+        pass
+
     logger.info("Elsevier API: downloaded %d bytes for %s", len(resp.content), doi)
     return resp.content
 

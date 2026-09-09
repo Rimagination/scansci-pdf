@@ -154,7 +154,9 @@ def get_paper(
             for f in si_files:
                 print(f"    {f}")
     else:
-        print(f"  FAILED: {result.get('error', 'unknown')}")
+        reason = (result.get("reason") or result.get("error")
+                  or result.get("error_type") or "unknown")
+        print(f"  FAILED: {reason}")
         hint = result.get('agent_hint', '')
         if hint:
             print(f"  Hint: {hint}")

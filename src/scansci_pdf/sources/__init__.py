@@ -718,7 +718,58 @@ def _auto_rename(result: dict[str, Any], identifier: str, config: dict[str, Any]
         log.info(f"   No metadata for rename, keeping: {file_path.name}")
 
 
+# Single-flight guard: at most one download() per identifier per process.
+# Duplicate submissions (e.g. an MCP client retrying after its own 30s client
+# timeout while the server is still racing sources) used to start a second,
+# parallel browser task for the same paper — the "infinite popup" experience.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: set[str] = set()
+
+
 def download(
+    identifier: str,
+    output_dir: str | Path | None = None,
+    *,
+    scihub_enabled: bool | None = None,
+    use_tor: bool = False,
+    use_vpnsci: bool = False,
+    bibtex: bool = False,
+    rename: bool = True,
+    _institutional: bool = True,
+    strategy: str | None = None,
+) -> dict[str, Any]:
+    key = identifier.strip()
+    if not is_arxiv_identifier(key):
+        key = normalize_doi(key)
+    with _INFLIGHT_LOCK:
+        if key in _INFLIGHT:
+            log.info(f"   Single-flight: download already in progress for {key}")
+            return fail(
+                key,
+                reason="download already in progress for this identifier",
+                error_type="in_progress",
+                action="wait for the in-flight attempt to finish (it is still "
+                       "racing sources); retry in a minute only if it failed",
+            )
+        _INFLIGHT.add(key)
+    try:
+        return _download_impl(
+            identifier,
+            output_dir,
+            scihub_enabled=scihub_enabled,
+            use_tor=use_tor,
+            use_vpnsci=use_vpnsci,
+            bibtex=bibtex,
+            rename=rename,
+            _institutional=_institutional,
+            strategy=strategy,
+        )
+    finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT.discard(key)
+
+
+def _download_impl(
     identifier: str,
     output_dir: str | Path | None = None,
     *,
