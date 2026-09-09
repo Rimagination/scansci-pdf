@@ -7,8 +7,18 @@ from pathlib import Path
 from typing import Any
 
 from ..config import DEFAULT_CONFIG
-from ..network import fetch_json, polite_delay
-from ..pdf_utils import download_pdf, is_plausible_pdf_url, dedupe
+from ..network import fetch, polite_delay
+from ..pdf_utils import download_pdf, is_plausible_pdf_url, dedupe, fail
+
+
+def _is_placeholder_email(email: str) -> bool:
+    """Unpaywall 422s placeholder/anonymous addresses; they are never usable."""
+    return (
+        not email
+        or "@example.invalid" in email
+        or "@example.com" in email
+        or email.startswith("mailto:")
+    )
 
 
 def extract_unpaywall_pdf_candidates(payload: dict[str, Any]) -> list[str]:
@@ -52,11 +62,47 @@ def extract_unpaywall_pdf_candidates(payload: dict[str, Any]) -> list[str]:
 
 
 def try_unpaywall(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
-    email = urllib.parse.quote(str(config.get("email") or DEFAULT_CONFIG["email"]))
+    raw_email = str(config.get("email") or DEFAULT_CONFIG["email"]).strip()
+    if _is_placeholder_email(raw_email):
+        # Unpaywall ALWAYS requires a real email and rejects placeholders with
+        # 422. Ask the user for theirs instead of silently losing the channel.
+        return fail(
+            doi,
+            "Unpaywall needs the user's real email address — only a placeholder is configured",
+            error_type="config_needed",
+            action="ask_user_email",
+        )
+    email = urllib.parse.quote(raw_email)
     q = urllib.parse.quote(doi, safe="")
     url = f"https://api.unpaywall.org/v2/{q}?email={email}"
-    payload = fetch_json(url, config)
-    if not payload:
+    try:
+        resp = fetch(url, config, headers={"Accept": "application/json"})
+        status = int(getattr(resp, "status_code", 0) or 0)
+    except Exception:
+        status = 0
+    if status == 422:
+        return fail(
+            doi,
+            "Unpaywall rejected the configured email address (HTTP 422)",
+            error_type="config_needed",
+            action="ask_user_email",
+        )
+    if status == 429:
+        # Temporary, per-IP limit — retry later rather than dropping the channel.
+        return fail(
+            doi,
+            "Unpaywall rate limit (HTTP 429) — temporary, retry later",
+            error_type="rate_limited",
+            action="retry_later",
+            extra={"status_code": 429},
+        )
+    if status != 200:
+        # 404 = DOI genuinely not in Unpaywall (silent skip is correct);
+        # other transient errors just let the race continue elsewhere.
+        return None
+    try:
+        payload = resp.json()
+    except Exception:
         return None
 
     candidates = extract_unpaywall_pdf_candidates(payload)

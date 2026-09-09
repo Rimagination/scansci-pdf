@@ -157,6 +157,12 @@ def get_paper(
         reason = (result.get("reason") or result.get("error")
                   or result.get("error_type") or "unknown")
         print(f"  FAILED: {reason}")
+        source_failures = result.get("source_failures") or []
+        if source_failures:
+            print(f"  渠道明细 ({len(source_failures)} 个渠道失败，部分可能只是临时不可用):")
+            for f in source_failures:
+                note = f" — {f['reason']}" if f.get("reason") else ""
+                print(f"    {f.get('source', '?')}: {f.get('error_type') or 'failed'}{note}")
         hint = result.get('agent_hint', '')
         if hint:
             print(f"  Hint: {hint}")

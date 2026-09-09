@@ -21,7 +21,7 @@ description: 大型文献清单分类摸底(嗅探优先)。当用户拿到数�
 - 首选 **OpenAlex**:50 DOI/请求、10 并发、~3 min/4000 篇。⚠️ 免费配额按 IP 每日计,共享 IP 可能 429(`$0 remaining`)。
 - 二选 **Semantic Scholar 批量**:`POST /graph/v1/paper/batch?fields=isOpenAccess,openAccessPdf&id=DOI:...`,500 篇/请求、无需邮箱、429 退避 10–20s 可续;`openAccessPdf` 直链质量不错。5645 篇 12 批 ≈3 min(2026-09 实测)。
 - 兜底 **Unpaywall 单点并发**:10 并发、3 次重试、每 500 条落盘 JSON 断点续传,~17 min/4000 篇。⚠️ 批量端点 `POST /v2/dois` 经常 500,不可依赖。
-- ⚠️ Unpaywall 拒绝占位邮箱(422 `Please use your own email address`,错误在响应 body):**必须传真实用户邮箱**,启动前先拿 1 条 DOI 验证;`config.py` 的默认 `scansci-pdf@example.invalid` 不可用于 Unpaywall。
+- ⚠️ Unpaywall 拒绝占位邮箱(422 `Please use your own email address`,错误在响应 body):**必须传真实用户邮箱**,启动前先拿 1 条 DOI 验证;`config.py` 的默认 `scansci-pdf@example.invalid` 不可用于 Unpaywall。插件本体(mcp `scansci_pdf_download`)已改为:缺/被拒邮箱时返回 `error_type=config_needed` + `action=ask_user_email`(带 agent_hint),**先向用户要邮箱再跑,不要静默跳过该渠道**。
 - 查不到的 DOI 用 Crossref `api.crossref.org/works/{doi}` 验证:404 = 未注册(中文刊常见),**不代表 Sci-Hub 没有**。
 
 ### 2. 灰色源嗅探(只对非 OA 子集,请求量天然减半)

@@ -468,6 +468,7 @@ def _run_tiers_parallel(
                 final_path.rename(output_path)
                 result["file"] = str(output_path)
             return result
+        _record_source_failure(label, result)
         return None
 
     # Shared result: any thread can publish success here, signaled via Event
@@ -489,6 +490,7 @@ def _run_tiers_parallel(
             # on one paper must not burn every later paper's timeout; raise TTL
             # or key by full DOI if false-skip reports come in.
             _neg_record(label, doi, result)
+            _record_source_failure(label, result)
         if result and result.get("success"):
             with result_lock:
                 if shared_result["result"] is None:
@@ -733,6 +735,36 @@ _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: set[str] = set()
 
 
+# Per-download record of WHY each racing source failed. A channel being
+# unreachable is usually temporary or a missing user decision (e.g. Unpaywall
+# needs the user's email) — surfaced in the final failure result so the
+# user/agent can choose: retry, fix config, or switch channel. Never skip a
+# channel silently.
+_RACE_FAILURES = threading.local()
+
+
+def _race_failures() -> list[dict[str, str]]:
+    items = getattr(_RACE_FAILURES, "items", None)
+    if items is None:
+        items = _RACE_FAILURES.items = []
+    return items
+
+
+def _record_source_failure(label: str, result: dict[str, Any] | None) -> None:
+    """Collect structured failure reasons (label, reason, error_type, action)."""
+    if not result or result.get("success"):
+        return
+    try:
+        _race_failures().append({
+            "source": label,
+            "reason": str(result.get("reason") or result.get("error") or "")[:200],
+            "error_type": str(result.get("error_type", "")),
+            "action": str(result.get("action", "")),
+        })
+    except Exception:
+        pass
+
+
 def download(
     identifier: str,
     output_dir: str | Path | None = None,
@@ -788,6 +820,7 @@ def _download_impl(
     _institutional: bool = True,
     strategy: str | None = None,
 ) -> dict[str, Any]:
+    _race_failures().clear()
     config = load_config()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1019,6 +1052,21 @@ def _download_impl(
             action=error_action or "",
         )
     result["source"] = "none"
+
+    # Surface WHY each channel failed so the user can decide (channels are
+    # often only temporarily unreachable; some need a user decision, e.g.
+    # Unpaywall requires the user's real email).
+    source_failures = _race_failures()
+    if source_failures:
+        result["source_failures"] = source_failures
+        config_needs = [f for f in source_failures if f.get("error_type") == "config_needed"]
+        if config_needs and "agent_hint" not in result:
+            channels = ", ".join(sorted({f["source"] for f in config_needs}))
+            result["agent_hint"] = (
+                f"配置缺失（{channels}）：Unpaywall 等渠道需要用户真实邮箱。"
+                '请询问用户的邮箱地址，调用 scansci_pdf_config(key="email", value="<用户邮箱>") '
+                "后重试下载。"
+            )
     return result
 
 
