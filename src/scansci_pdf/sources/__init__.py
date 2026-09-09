@@ -442,9 +442,21 @@ def _run_tiers_parallel(
         for tier_sources, tier_label, tier_timeout in tiers:
             for fn, label in tier_sources:
                 all_sources.append((fn, label, tier_label, tier_timeout))
+
+        def _try_source_recorded(source_fn, doi_, out_path, config_, label_,
+                                 use_tor=False):
+            # Same recording contract as the pure-Python race below: the
+            # compiled engine only manages threading, it still calls back
+            # into _try_source for every lane (with use_tor as a keyword —
+            # see racing.pyx).
+            result = _try_source(source_fn, doi_, out_path, config_, label_,
+                                 use_tor=use_tor)
+            _record_source_failure(failures, label_, result)
+            return result
+
         return _run_parallel_race_compiled(
             all_sources, doi, target_dir, output_path, config,
-            use_tor, overall_timeout, _try_source, safe_filename, log,
+            use_tor, overall_timeout, _try_source_recorded, safe_filename, log,
         )
     if not tiers:
         return None
