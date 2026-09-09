@@ -415,7 +415,7 @@ def scansci_pdf_health_check(detailed: bool = False) -> str:
 
     result: dict[str, Any] = {
         "overall": overall,
-        "scihub_enabled": config.get("scihub_enabled", False),
+        "scihub_enabled": config.get("scihub_enabled", True),
         "checks": checks,
     }
 
