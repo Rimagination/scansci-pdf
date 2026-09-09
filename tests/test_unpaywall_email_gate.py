@@ -91,7 +91,7 @@ class TestRaceFailureCollector:
         import scansci_pdf.sources as sources
 
         monkeypatch.setattr(sources, "_HAS_COMPILED_CORE", False)
-        sources._race_failures().clear()
+        failures: list = []
 
         def failing_src(doi, out_path, config):
             return {"success": False, "reason": "needs user email",
@@ -99,24 +99,55 @@ class TestRaceFailureCollector:
 
         tiers = [([(failing_src, "FakeUPW")], "Test", 3)]
         result = sources._run_tiers_parallel(
-            tiers, "10.1000/x", tmp_path, tmp_path / "out.pdf", {}, False, 2)
+            tiers, "10.1000/x", tmp_path, tmp_path / "out.pdf", {}, False, 2,
+            failures=failures)
         assert result is None
 
-        failures = sources._race_failures()
         assert len(failures) == 1
         assert failures[0]["source"] == "FakeUPW"
         assert failures[0]["error_type"] == "config_needed"
         assert failures[0]["action"] == "ask_user_email"
 
-        # successes are never recorded as failures
-        def ok_src(doi, out_path, config):
+    def test_parallel_pool_workers_record_failures(self, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch):
+        """Regression: the collector must survive being appended to from
+        pool worker threads (a thread-local collector silently lost these)."""
+        import time as _time
+
+        import scansci_pdf.sources as sources
+
+        monkeypatch.setattr(sources, "_HAS_COMPILED_CORE", False)
+        failures: list = []
+
+        def slow_fail(doi, out_path, config):
+            _time.sleep(0.05)
+            return {"success": False, "reason": "no",
+                    "error_type": "rate_limited", "action": "retry_later"}
+
+        def slow_fail2(doi, out_path, config):
+            _time.sleep(0.05)
+            return {"success": False, "reason": "needs user email",
+                    "error_type": "config_needed", "action": "ask_user_email"}
+
+        tiers = [([(slow_fail, "A"), (slow_fail2, "B"), (slow_fail, "C")],
+                  "Test", 5)]
+        result = sources._run_tiers_parallel(
+            tiers, "10.1000/x", tmp_path, tmp_path / "out.pdf", {}, False, 5,
+            failures=failures)
+        assert result is None
+        assert sorted(f["source"] for f in failures) == ["A", "B", "C"]
+
+        # successes/None are never recorded as failures
+        failures.clear()
+
+        def silent(doi, out_path, config):
             return None
 
-        sources._race_failures().clear()
-        tiers = [([(ok_src, "Silent")], "Test", 3)]
+        tiers = [([(silent, "Silent1"), (silent, "Silent2")], "Test", 3)]
         sources._run_tiers_parallel(
-            tiers, "10.1000/y", tmp_path, tmp_path / "out2.pdf", {}, False, 2)
-        assert sources._race_failures() == []
+            tiers, "10.1000/y", tmp_path, tmp_path / "out2.pdf", {}, False, 2,
+            failures=failures)
+        assert failures == []
 
 
 if __name__ == "__main__":

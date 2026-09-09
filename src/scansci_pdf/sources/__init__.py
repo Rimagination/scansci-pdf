@@ -425,13 +425,17 @@ def _run_tiers_parallel(
     config: dict[str, Any],
     use_tor: bool,
     overall_timeout: int,
+    failures: list[dict[str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """Race all tiers in parallel. First successful tier wins.
 
     Uses a shared result dict so that any source thread can publish its
     success immediately, even if it's running inside a nested parallel
-    call (like Sci-Hub domain racing).
+    call (like Sci-Hub domain racing). `failures` (optional) collects why
+    each losing lane failed — pool workers append to it.
     """
+    if failures is None:
+        failures = []
     # Delegate to compiled racing engine if available
     if _HAS_COMPILED_CORE:
         all_sources = []
@@ -468,7 +472,7 @@ def _run_tiers_parallel(
                 final_path.rename(output_path)
                 result["file"] = str(output_path)
             return result
-        _record_source_failure(label, result)
+        _record_source_failure(failures, label, result)
         return None
 
     # Shared result: any thread can publish success here, signaled via Event
@@ -490,7 +494,7 @@ def _run_tiers_parallel(
             # on one paper must not burn every later paper's timeout; raise TTL
             # or key by full DOI if false-skip reports come in.
             _neg_record(label, doi, result)
-            _record_source_failure(label, result)
+            _record_source_failure(failures, label, result)
         if result and result.get("success"):
             with result_lock:
                 if shared_result["result"] is None:
@@ -739,23 +743,15 @@ _INFLIGHT: set[str] = set()
 # unreachable is usually temporary or a missing user decision (e.g. Unpaywall
 # needs the user's email) — surfaced in the final failure result so the
 # user/agent can choose: retry, fix config, or switch channel. Never skip a
-# channel silently.
-_RACE_FAILURES = threading.local()
-
-
-def _race_failures() -> list[dict[str, str]]:
-    items = getattr(_RACE_FAILURES, "items", None)
-    if items is None:
-        items = _RACE_FAILURES.items = []
-    return items
-
-
-def _record_source_failure(label: str, result: dict[str, Any] | None) -> None:
+# channel silently. The list is created per download() and threaded through
+# _run_tiers_parallel (pool workers append to it; list.append is atomic).
+def _record_source_failure(failures: list[dict[str, str]], label: str,
+                           result: dict[str, Any] | None) -> None:
     """Collect structured failure reasons (label, reason, error_type, action)."""
     if not result or result.get("success"):
         return
     try:
-        _race_failures().append({
+        failures.append({
             "source": label,
             "reason": str(result.get("reason") or result.get("error") or "")[:200],
             "error_type": str(result.get("error_type", "")),
@@ -820,7 +816,7 @@ def _download_impl(
     _institutional: bool = True,
     strategy: str | None = None,
 ) -> dict[str, Any]:
-    _race_failures().clear()
+    race_failures: list[dict[str, str]] = []
     config = load_config()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -940,7 +936,8 @@ def _download_impl(
     free_sources = _build_free_sources(doi, config)
     if free_sources:
         result = _run_tiers_parallel(
-            [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15
+            [(free_sources, "Free", 15)], doi, target_dir, output_path, config, use_tor, 15,
+            failures=race_failures,
         )
         if result:
             _update_doi_index(
@@ -975,7 +972,8 @@ def _download_impl(
         if inst_sources:
             log.info("   Phase 1 failed, trying institutional access...")
             result = _run_tiers_parallel(
-                [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30
+                [(inst_sources, "Institutional", 30)], doi, target_dir, output_path, config, use_tor, 30,
+                failures=race_failures,
             )
             if result:
                 _update_doi_index(
@@ -1056,7 +1054,7 @@ def _download_impl(
     # Surface WHY each channel failed so the user can decide (channels are
     # often only temporarily unreachable; some need a user decision, e.g.
     # Unpaywall requires the user's real email).
-    source_failures = _race_failures()
+    source_failures = race_failures
     if source_failures:
         result["source_failures"] = source_failures
         config_needs = [f for f in source_failures if f.get("error_type") == "config_needed"]
