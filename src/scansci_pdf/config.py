@@ -101,6 +101,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 灰色源竞速浏览器的独立无头开关（只影响 sci-hub 竞速，机构登录仍有可见窗口）。
     # true = 竞速全程零窗口、零任务栏闪烁；指纹安全性由 UA 清洗保证。
     "scihub_browser_headless": False,
+    "scihub_browser_first": True,  # false = pure-HTTP Sci-Hub lane (use when the PDF CDN challenges headless browsers but serves plain requests)
     # 浏览器内核选择（CloakBrowser 免费版内置 Chromium 146 已过老，遇 Cloudflare Turnstile 会反复验证）：
     #   browser_executable: 显式指定浏览器二进制路径（本机 Chrome/Edge）；留空=自动探测
     #   browser_auto_upgrade: True 时自动探测本机 Chrome/Edge（版本 > 146 优先于内置 stealth Chromium）

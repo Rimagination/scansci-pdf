@@ -123,3 +123,38 @@ class TestWiring:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+class TestScihubBrowserFirstKnob:
+    def test_knob_off_skips_browser_first(self, tmp_path: Path, monkeypatch):
+        """scihub_browser_first=false must go straight to the HTTP lane."""
+        import scansci_pdf.sources.scihub as scihub
+
+        called = []
+        monkeypatch.setattr(
+            scihub, "_is_browser_available", lambda cfg: True)
+        monkeypatch.setattr(
+            scihub, "_browser_first_download",
+            lambda *a, **k: called.append(a) or None)
+        monkeypatch.setattr(
+            scihub, "fetch",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+
+        r = scihub.try_scihub_domain(
+            "10.1/x", "https://sci-hub.vg", tmp_path / "o.pdf",
+            {"scihub_browser_first": False})
+        assert called == [] and r is None
+
+    def test_default_still_browser_first(self, tmp_path: Path, monkeypatch):
+        import scansci_pdf.sources.scihub as scihub
+
+        called = []
+        monkeypatch.setattr(
+            scihub, "_is_browser_available", lambda cfg: True)
+        monkeypatch.setattr(
+            scihub, "_browser_first_download",
+            lambda *a, **k: called.append(1) or None)
+
+        scihub.try_scihub_domain(
+            "10.1/x", "https://sci-hub.vg", tmp_path / "o.pdf", {})
+        assert called == [1]

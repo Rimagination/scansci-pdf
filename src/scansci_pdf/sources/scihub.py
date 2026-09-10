@@ -582,8 +582,12 @@ def try_scihub_domain(
 ) -> dict[str, Any] | None:
     landing_url = f"{domain.rstrip('/')}/{urllib.parse.quote(doi, safe='/')}"
 
-    # Browser-first: bypass Cloudflare/CAPTCHA before HTTP attempt
-    if _is_browser_available(config):
+    # Browser-first: bypass Cloudflare/CAPTCHA before HTTP attempt.
+    # scihub_browser_first=false forces the pure-HTTP path — when the PDF
+    # CDN challenges headless browsers but serves plain requests (observed
+    # in the field, 2026-09: sci.bban.top), HTTP is the working lane.
+    if (config.get("scihub_browser_first", True)
+            and _is_browser_available(config)):
         result = _browser_first_download(landing_url, doi, output_path, config,
                                          fail_notes=fail_notes)
         if result:
