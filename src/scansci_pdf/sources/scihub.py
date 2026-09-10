@@ -657,7 +657,8 @@ def try_scihub_domain(
             if fail_notes is not None:
                 fail_notes.append("not_in_library(no pdf url)")
             return None
-        result = download_pdf_from_scihub(pdf_url, output_path, config, f"Sci-Hub({domain})", use_tor=use_tor, cookies=resp.cookies)
+        result = download_pdf_from_scihub(pdf_url, output_path, config, f"Sci-Hub({domain})",
+                                          use_tor=use_tor, cookies=resp.cookies, referer=landing_url)
         if result:
             result["doi"] = doi
             result["identifier"] = doi
@@ -712,9 +713,11 @@ def download_pdf_from_scihub(
     source: str,
     use_tor: bool = False,
     cookies: Any = None,
+    referer: str = "",
 ) -> dict[str, Any] | None:
     from ..pdf_utils import download_pdf
-    return download_pdf(url, output_path, config, source, require_pdf_like_url=False, use_tor=use_tor, cookies=cookies)
+    return download_pdf(url, output_path, config, source, require_pdf_like_url=False,
+                        use_tor=use_tor, cookies=cookies, referer=referer)
 
 
 def _race_browser_domains(

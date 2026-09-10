@@ -199,6 +199,7 @@ def download_pdf(
     require_pdf_like_url: bool = True,
     use_tor: bool = False,
     cookies: Any = None,
+    referer: str = "",
 ) -> dict[str, Any] | None:
     if require_pdf_like_url and not is_plausible_pdf_url(url):
         return None
@@ -209,6 +210,10 @@ def download_pdf(
             session = requests.Session()
             session.trust_env = False
             session.headers.update({"User-Agent": USER_AGENT})
+            if referer:
+                # Some shadow-library CDNs (sci.bban.top, observed 2026-09)
+                # 403 any PDF request without a same-site Referer.
+                session.headers.update({"Referer": referer})
             session.cookies.update(cookies)
             resp = session.get(
                 url,
