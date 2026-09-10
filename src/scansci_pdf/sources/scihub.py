@@ -666,6 +666,7 @@ def try_scihub_domain(
             fail_notes.append("not_in_library(pdf download failed)")
         return result
     except Exception as e:
+        log.warning("   [scihub] %s HTTP lane failed: %r", domain, e, exc_info=True)
         if fail_notes is not None:
             fail_notes.append(f"network({type(e).__name__})")
         return None

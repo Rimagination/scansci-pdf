@@ -34,6 +34,7 @@ def test_referer_threaded_to_download(monkeypatch, tmp_path: Path):
 
     class _Page:
         status_code = 200
+        headers = {"content-type": "text/html"}
         cookies = {"session": "x"}
         url = "https://sci-hub.vg/10.1/x"
         _content = b""  # no buffered body; the flow falls back to resp.raw
