@@ -12,7 +12,7 @@ class _Resp:
     headers = {"content-type": "application/pdf"}
 
     def __init__(self):
-        self._iter = iter([b"%PDF-1.4 " + b"x" * 12_000])
+        self._iter = iter([b"%PDF-1.4 " + b"x" * 12_000 + b"%%EOF"])
 
     def iter_content(self, chunk_size=8192):
         return self._iter
@@ -88,6 +88,33 @@ def test_download_pdf_sets_referer_header(monkeypatch, tmp_path: Path):
                     cookies={"a": "b"}, referer="https://sci-hub.vg/10.1/x")
 
     assert seen["headers"].get("Referer") == "https://sci-hub.vg/10.1/x"
+
+
+def test_download_pdf_browser_ua(monkeypatch, tmp_path: Path):
+    """browser_ua=True must swap in the Chrome UA (the CDN 403s the engine
+    UA even with Referer) — and the CHROME_UA import must not NameError."""
+    seen: dict = {}
+
+    import scansci_pdf.pdf_utils as pu
+    from scansci_pdf.network import CHROME_UA
+
+    class _S:
+        headers: dict = {}
+        cookies: dict = {}
+
+        def get(self, url, **kwargs):
+            seen["headers"] = dict(self.headers)
+            return _Resp()
+
+    monkeypatch.setattr("requests.Session", lambda: _S())
+
+    r = pu.download_pdf("https://sci.bban.top/pdf/10.1/x.pdf", tmp_path / "o.pdf",
+                        {}, "test", require_pdf_like_url=False,
+                        cookies={"a": "b"}, referer="https://sci-hub.vg/10.1/x",
+                        browser_ua=True)
+
+    assert seen["headers"].get("User-Agent") == CHROME_UA
+    assert r is not None and r["success"] is True
 
 
 if __name__ == "__main__":

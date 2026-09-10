@@ -29,6 +29,15 @@ USER_AGENT = (
     "Chrome/124.0 Safari/537.36 ScanSci PDF/3"
 )
 
+# Browser UA without the ScanSci suffix: some CDNs (sci.bban.top PDF edge,
+# observed 2026-09) 403 any UA that names a non-browser client, even with a
+# valid Referer. Use only where impersonation is required to read at all.
+CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+
 CLOUDFLARE_CHALLENGE_SIGNALS = (
     "just a moment", "attention required", "verify", "security check",
     "请稍候", "正在验证", "checking", "cloudflare",

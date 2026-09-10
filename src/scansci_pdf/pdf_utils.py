@@ -200,13 +200,20 @@ def download_pdf(
     use_tor: bool = False,
     cookies: Any = None,
     referer: str = "",
+    browser_ua: bool = False,
 ) -> dict[str, Any] | None:
     if require_pdf_like_url and not is_plausible_pdf_url(url):
         return None
 
     try:
         if cookies is not None:
-            from .network import request_timeout, proxy_dict, select_proxy_for_url, USER_AGENT
+            from .network import (
+                CHROME_UA,
+                request_timeout,
+                proxy_dict,
+                select_proxy_for_url,
+                USER_AGENT,
+            )
             session = requests.Session()
             session.trust_env = False
             session.headers.update({"User-Agent": USER_AGENT})
@@ -214,6 +221,10 @@ def download_pdf(
                 # Some shadow-library CDNs (sci.bban.top, observed 2026-09)
                 # 403 any PDF request without a same-site Referer.
                 session.headers.update({"Referer": referer})
+            if browser_ua:
+                # …and they also 403 non-browser User-Agents outright — the
+                # engine UA ("scansci-pdf/x") gets HTML even with Referer.
+                session.headers.update({"User-Agent": CHROME_UA})
             session.cookies.update(cookies)
             resp = session.get(
                 url,

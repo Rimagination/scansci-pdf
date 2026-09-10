@@ -593,6 +593,16 @@ def try_scihub_domain(
         if result:
             return result
 
+    # Sci-Hub pages and the PDF CDN are slow through proxies; racing-grade
+    # timeouts (users run connect=3/read=7 for source racing) starve this
+    # lane — a 3s read timeout kills every attempt before the page lands.
+    # Floor the timeouts for this lane only; other sources keep their pace.
+    config = {
+        **config,
+        "connect_timeout": max(int(config.get("connect_timeout", 3)), 10),
+        "read_timeout": max(int(config.get("read_timeout", 7)), 25),
+    }
+
     try:
         resp = fetch(landing_url, config, stream=True, use_tor=use_tor)
 
@@ -680,7 +690,10 @@ def _try_browser(
     """Try CloakBrowser to bypass Cloudflare. Returns Response or None."""
     if not _is_browser_available(config):
         return None
-    from ..flaresolverr import solve_url
+    # solve_url lives in browser_engine (flaresolverr.py only hosts the
+    # raw FlareSolverr client); the old import path broke the challenge
+    # bypass with ImportError.
+    from ..browser_engine import solve_url
     result = solve_url(url, config)
     if not result:
         return None
@@ -718,7 +731,7 @@ def download_pdf_from_scihub(
 ) -> dict[str, Any] | None:
     from ..pdf_utils import download_pdf
     return download_pdf(url, output_path, config, source, require_pdf_like_url=False,
-                        use_tor=use_tor, cookies=cookies, referer=referer)
+                        use_tor=use_tor, cookies=cookies, referer=referer, browser_ua=True)
 
 
 def _race_browser_domains(
