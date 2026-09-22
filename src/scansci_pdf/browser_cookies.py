@@ -38,6 +38,7 @@ PUBLISHER_DOMAINS = [
     "oup.com",
     "academic.oup.com",
     "sagepub.com",
+    "sage.cnpereading.com",
     "mdpi.com",
     "frontiersin.org",
 ]
@@ -59,6 +60,7 @@ PUBLISHER_LOGIN_URLS = {
     "iop": "https://iopscience.iop.org/",
     "oxford": "https://academic.oup.com/",
     "acm": "https://dl.acm.org/",
+    "sage-cn": "https://sage.cnpereading.com/login",
 }
 
 

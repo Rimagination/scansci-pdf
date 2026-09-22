@@ -101,6 +101,7 @@ def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict |
             str(profile_dir),
             headless=False, humanize=True,
             args=["--disable-features=CrossOriginOpenerPolicy"],
+            config=config,
         )
         page = ctx.new_page()
         log.info(f"   [{publisher}] persistent browser profile: {profile_dir}")
@@ -110,7 +111,8 @@ def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict |
         log.info(f"   [{publisher}] persistent context unavailable ({_e}), using ephemeral")
         _vp = viewport or {"width": 1440, "height": 900}
         browser = launch(headless=False, humanize=True,
-                         args=["--disable-features=CrossOriginOpenerPolicy"])
+                         args=["--disable-features=CrossOriginOpenerPolicy"],
+                         config=config)
         ctx = browser.new_context(viewport=_vp)
         _restore_cookies_to_context(ctx, config)
         page = ctx.new_page()
@@ -166,6 +168,7 @@ def _save_all_cookie_formats(
         "aps.org", "journals.aps.org", "aip.org", "pubs.aip.org",
         "dl.acm.org", "acm.org", "science.org", "sciencemag.org",
         "ascelibrary.org", "sagepub.com", "journals.sagepub.com",
+        "sage.cnpereading.com",
         "royalsocietypublishing.org", "copernicus.org",
     ]
     pub_cookies = [c for c in cookie_data
@@ -3110,6 +3113,10 @@ def try_sage_browser(
     by resolving DOI first and using host-relative PDF candidates.
     """
     from .pdf_utils import is_pdf_file, success
+    from .sources.sage_cn import try_sage_cn_authorized
+
+    if try_sage_cn_authorized(doi, output_path, config):
+        return success(doi, output_path, "SAGE-CN(CARSI)")
 
     for url in _direct_pdf_urls(doi, "SAGE"):
         if _try_http_download(url, output_path, config):

@@ -79,12 +79,22 @@
     "success_url_pattern": "ascelibrary.org",
     "pdf_pattern": "/doi/pdf/{doi}"
   },
+  "sage-cn": {
+    "name": "SAGE China",
+    "domains": [
+      "sage.cnpereading.com"
+    ],
+    "login_url": "https://sage.cnpereading.com/login",
+    "search_selector": "input[placeholder*='institution'], input[placeholder*='机构']",
+    "result_selector": "a[href*='carsi'], button:has-text('CARSI')",
+    "success_url_pattern": "sage.cnpereading.com",
+    "pdf_pattern": ""
+  },
   "sage": {
     "name": "SAGE Journals",
     "domains": [
       "journals.sagepub.com",
-      "sagepub.com",
-      "sage.cnpereading.com"
+      "sagepub.com"
     ],
     "login_url": "https://journals.sagepub.com/action/showLogin?redirectUri=/",
     "search_selector": "input#institution-search, input[name='institution'], input[placeholder*='institution']",
