@@ -173,7 +173,9 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 3. scansci_pdf_login(kind="carsi", publisher="sciencedirect")
 ```
 
-支持 sciencedirect、springer、wiley、ieee、tandfonline、nature 等。
+支持 sciencedirect、springer、wiley、ieee、tandfonline、nature 等。SAGE 中国站首次使用
+`scansci_pdf_login(kind="carsi", publisher="sage-cn")` 登录；之后下载会复用已保存会话，
+从文章页解析实际 `articleId` 并请求站点自身的 PDF 下载接口，无需反复开启浏览器。
 
 ### EZProxy（图书馆代理）
 

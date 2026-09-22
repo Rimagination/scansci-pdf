@@ -15,18 +15,16 @@ class SAGEStrategy(BasePublisherStrategy):
     pdf_url_templates = (
         "https://journals.sagepub.com/doi/pdf/{doi}?download=true",
         "https://journals.sagepub.com/doi/pdf/{doi}",
-        # CN mirror (sage.cnpereading.com): CN users' institutional access is
-        # on this mirror (verified /doi/pdf/<doi> pattern live); requires a
-        # CARSI login on the mirror itself, cookies then make it serve PDFs.
-        "https://sage.cnpereading.com/doi/pdf/{doi}",
     )
     success_url_markers = ("journals.sagepub.com/doi/", "sage.cnpereading.com/doi/")
     auth_url_markers = (
         "id.tsinghua.edu.cn",
         "idp.tsinghua.edu.cn",
         "login.openathens.net",
+        "sp-sagecnpiec.carsi.edu.cn",
+        "carsi.edu.cn",
     )
-    sso_text_markers = ("Access through your institution",)
-    sso_url_patterns = ("/shibboleth", "/institutional")
+    sso_text_markers = ("Access through your institution", "CARSI", "机构登录")
+    sso_url_patterns = ("/shibboleth", "/institutional", "carsi")
     institution_input_selectors = ("input[name='search']", "#searchInstitution")
     institution_result_selectors = ("input[name='search']",)
