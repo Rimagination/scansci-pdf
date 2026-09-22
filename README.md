@@ -375,6 +375,12 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 <a href="https://github.com/jingqingqiu1"><img src="https://avatars.githubusercontent.com/u/87510394?v=4" width="50" height="50" alt="jingqingqiu1" title="jingqingqiu1"/></a>
 <a href="https://github.com/minqifeng"><img src="https://avatars.githubusercontent.com/u/61303605?v=4" width="50" height="50" alt="minqifeng" title="minqifeng"/></a>
 
+## 贡献者
+
+<a href="https://github.com/annsyun"><img src="https://avatars.githubusercontent.com/u/151621087?v=4" width="50" height="50" alt="annsyun" title="annsyun"/></a>
+
+- **[annsyun](https://github.com/annsyun)** — SAGE 中国站（sage.cnpereading.com）机构授权下载通道：CARSI 会话复用、`articleId` 解析与站点原生下载接口（[#58](https://github.com/Rimagination/scansci-pdf/pull/58)）
+
 ## 致谢
 
 本项目在开发过程中参考和借鉴了以下开源项目：
