@@ -72,6 +72,7 @@ def _check_browser_backend(config: dict[str, Any] | None = None) -> bool:
         # A missing camoufox must not be masked by (or masked as) a patchright
         # check — resolve_backend already guarantees it is the real selection.
         return is_available(BACKEND_CAMOUFOX)
+    global _HAS_BROWSER_BACKEND
     if _HAS_BROWSER_BACKEND is None:
         _HAS_BROWSER_BACKEND = is_available(BACKEND_PATCHRIGHT)
     return _HAS_BROWSER_BACKEND
