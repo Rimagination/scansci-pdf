@@ -1,7 +1,7 @@
 {
  "repo": "Rimagination/scansci-pdf",
- "updated": "2026-09-24",
- "stars": 1017,
+ "updated": "2026-09-25",
+ "stars": 1022,
  "daily": [
   {
    "date": "2026-05-03",
@@ -541,47 +541,51 @@
   },
   {
    "date": "2026-09-14",
-   "stars": 943
+   "stars": 942
   },
   {
    "date": "2026-09-15",
-   "stars": 954
+   "stars": 953
   },
   {
    "date": "2026-09-16",
-   "stars": 963
+   "stars": 962
   },
   {
    "date": "2026-09-17",
-   "stars": 974
+   "stars": 973
   },
   {
    "date": "2026-09-18",
-   "stars": 982
+   "stars": 981
   },
   {
    "date": "2026-09-19",
-   "stars": 986
+   "stars": 985
   },
   {
    "date": "2026-09-20",
-   "stars": 991
+   "stars": 990
   },
   {
    "date": "2026-09-21",
-   "stars": 997
+   "stars": 996
   },
   {
    "date": "2026-09-22",
-   "stars": 1005
+   "stars": 1004
   },
   {
    "date": "2026-09-23",
-   "stars": 1009
+   "stars": 1008
   },
   {
    "date": "2026-09-24",
    "stars": 1017
+  },
+  {
+   "date": "2026-09-25",
+   "stars": 1022
   }
  ]
 }
