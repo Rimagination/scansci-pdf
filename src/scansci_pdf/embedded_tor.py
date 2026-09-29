@@ -221,6 +221,21 @@ class EmbeddedTor:
             if not self._binary:
                 return False
 
+        # Warn when something else already holds our port — typically a
+        # foreign/orphaned tor from a recycled MCP server process. Our own
+        # tor would then die on bind and start() reports failure while the
+        # proxy actually still works on that port (#61).
+        import socket as _socket
+        try:
+            with _socket.create_connection(("127.0.0.1", self.socks_port), timeout=1):
+                log.warning(
+                    f"Tor: port {self.socks_port} is already occupied by another process — "
+                    "if this is an old embedded Tor, either reuse it via tor_proxy "
+                    f"({self.proxy_url}) or stop it before starting a new instance"
+                )
+        except OSError:
+            pass
+
         tor_dir = self._binary.parent
         torrc = _write_torrc(tor_dir.parent, self.socks_port, self.use_bridges)
 
@@ -304,7 +319,6 @@ def get_embedded_tor(config: dict[str, Any]) -> EmbeddedTor | None:
     with _tor_lock:
         if _embedded_tor and _embedded_tor.is_running():
             return _embedded_tor
-
         # Fast skip: Tor download previously failed within the TTL
         if _tor_unavailable_since and (time.time() - _tor_unavailable_since) < _TOR_UNAVAILABLE_TTL:
             return None
@@ -317,6 +331,18 @@ def get_embedded_tor(config: dict[str, Any]) -> EmbeddedTor | None:
             return tor
         _tor_unavailable_since = time.time()  # cache failure timestamp
         return None
+
+
+def running_embedded_tor() -> "EmbeddedTor | None":
+    """Return the embedded instance only if it is ALREADY running.
+
+    Unlike get_embedded_tor this never starts Tor or downloads a binary —
+    safe to call from a health probe that must stay side-effect free (#61).
+    """
+    with _tor_lock:
+        if _embedded_tor and _embedded_tor.is_running():
+            return _embedded_tor
+    return None
 
 
 def stop_embedded_tor() -> None:

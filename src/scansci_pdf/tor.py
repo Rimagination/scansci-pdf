@@ -18,13 +18,25 @@ def get_tor_proxy(config: dict[str, Any] | None = None) -> str | None:
     Priority:
     1. TOR_PROXY env var
     2. Config tor_proxy
-    3. Default 1080 port
+    3. Embedded instance, if one is already running (never started here)
+    4. Default 1080 port
+
+    Consulting the embedded instance keeps the health probe in sync with the
+    download path (ensure_tor), which falls back to embedded Tor when the
+    configured proxy is absent (#61).
     """
     proxy = os.environ.get("TOR_PROXY", "")
     if proxy:
         return proxy
     if config and config.get("tor_proxy"):
         return config["tor_proxy"]
+    try:
+        from .embedded_tor import running_embedded_tor
+        tor = running_embedded_tor()
+        if tor:
+            return tor.proxy_url
+    except Exception:
+        pass
     return DEFAULT_TOR_PROXY
 
 

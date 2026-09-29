@@ -19,7 +19,7 @@ from .paperlist import parse_paper_list
 from .resolver import batch_resolve
 from .search import search_papers_v2 as search_papers
 from .sources import batch_download, download
-from .tor import check_tor_circuit
+from .tor import check_tor_circuit, get_tor_proxy
 
 mcp_app = FastMCP(
     name="scansci-pdf",
@@ -450,8 +450,11 @@ def scansci_pdf_health_check(detailed: bool = False) -> str:
             latency = round((time.time() - t0) * 1000)
             checks[name] = {"status": "error", "reason": type(exc).__name__, "latency_ms": latency}
 
-    tor_ok = check_tor_circuit()
-    checks["tor"] = {"status": "ok" if tor_ok else "unavailable"}
+    # Probe WITH config so tor_proxy / the embedded instance are honored —
+    # an env-default 1080 probe used to report "unavailable" while downloads
+    # were flowing through a working proxy on another port (#61).
+    tor_ok = check_tor_circuit(config)
+    checks["tor"] = {"status": "ok" if tor_ok else "unavailable", "proxy": get_tor_proxy(config)}
 
     from .browser_engine import is_available as browser_ok
     checks["browser"] = {"status": "ok" if browser_ok(config) else "unavailable"}
