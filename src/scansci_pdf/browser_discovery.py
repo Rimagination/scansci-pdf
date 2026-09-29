@@ -15,8 +15,18 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-PROFILE_DIR = "D:/Dev/browser-profiles/scansci"
-CACHE_DIR = "D:/Dev/cache/browser"
+def _default_profile_dir() -> str:
+    """Where persistent browser profiles actually live (auth.py convention)."""
+    explicit = os.environ.get("SCANSCI_CHROME_PROFILE_DIR", "").strip()
+    if explicit:
+        return explicit
+    from .config import DATA_DIR
+    return str(Path(DATA_DIR) / "browser_profiles")
+
+
+def _default_cache_dir() -> str:
+    from .config import DATA_DIR
+    return str(Path(DATA_DIR) / "cache" / "browser")
 
 
 def _default_system_browser_paths() -> List[str]:
@@ -97,8 +107,8 @@ class BrowserRuntimeResolver:
                 "install_needed": True,
                 "install_hint": "No reusable browser runtime found. Suggested explicit install: pip install cloakbrowser, or configure SCANSCI_BROWSER_COMMAND.",
             }
-        result["profile_dir"] = PROFILE_DIR
-        result["cache_dir"] = CACHE_DIR
+        result["profile_dir"] = _default_profile_dir()
+        result["cache_dir"] = _default_cache_dir()
         result["candidates"] = candidates
         return result
 

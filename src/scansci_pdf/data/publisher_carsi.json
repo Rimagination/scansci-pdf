@@ -29,7 +29,7 @@
     "domains": [
       "onlinelibrary.wiley.com"
     ],
-    "login_url": "https://onlinelibrary.wiley.com/institutional-login",
+    "login_url": "https://onlinelibrary.wiley.com/action/ssostart?redirectUri=%2F",
     "search_selector": "input#institution-search, input[name='institution']",
     "result_selector": ".institution-results a, .search-results a",
     "success_url_pattern": "wiley.com",
