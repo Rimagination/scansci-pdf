@@ -49,6 +49,42 @@ class TreeKillTests(unittest.TestCase):
         proc.kill.assert_called_once()
         run.assert_not_called()
 
+    def test_multiprocessing_process_shape(self):
+        """Playwright's transport hands back multiprocessing.Process (issue
+        #57): no poll(), only is_alive(). The old Popen assumption raised
+        AttributeError inside the callers' except-pass and the kill never
+        happened."""
+        import multiprocessing as mp
+
+        proc = mp.Process(target=lambda: None)  # never started → not alive
+        with patch("scansci_pdf.browser_engine.subprocess.run") as run:
+            be._tree_kill(proc)
+        run.assert_not_called()  # dead (not started) → skipped
+
+    def test_live_multiprocessing_process_killed(self):
+        import multiprocessing as mp
+
+        # time.sleep is picklable — threading.Event is not (Windows spawn).
+        proc = mp.Process(target=__import__("time").sleep, args=(30,))
+        proc.start()
+        try:
+            self.assertTrue(proc.is_alive())
+            with patch("scansci_pdf.browser_engine.os") as mock_os, \
+                 patch("scansci_pdf.browser_engine.subprocess.run") as run:
+                mock_os.name = "posix"
+                be._tree_kill(proc)
+            run.assert_not_called()
+            proc.join(timeout=5)
+            self.assertFalse(proc.is_alive(), "live multiprocessing.Process must be killed")
+        finally:
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+
+    def test_none_and_pidless_are_noops(self):
+        be._tree_kill(None)
+        be._tree_kill(object())  # no poll / is_alive / pid → nothing to kill
+
 
 class ReaperTests(unittest.TestCase):
     def setUp(self):

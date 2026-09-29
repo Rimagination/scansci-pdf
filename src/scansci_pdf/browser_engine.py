@@ -106,16 +106,44 @@ def _unregister_browser(browser: Any) -> None:
 
 
 def _tree_kill(proc: Any) -> None:
-    """Force-kill a driver process and its whole child tree (Windows-safe)."""
-    if proc is None or proc.poll() is not None:
+    """Force-kill a driver process and its whole child tree (Windows-safe).
+
+    Accepts both handle shapes the transport hands back: subprocess.Popen
+    (``poll()``) and multiprocessing.Process (``is_alive()`` — Playwright's
+    driver since 1.x). Assuming Popen made the tree-kill backstop raise
+    AttributeError inside its callers' ``except Exception: pass`` — the
+    backstop never ran and long-lived MCP servers accumulated Chromium
+    processes (issue #57).
+    """
+    if proc is None:
+        return
+    try:
+        if hasattr(proc, "poll"):
+            alive = proc.poll() is None
+        elif hasattr(proc, "is_alive"):
+            alive = proc.is_alive()
+        else:
+            alive = True
+    except Exception:
+        alive = True  # can't tell — assume alive and force-kill
+    if not alive:
+        return
+    pid = getattr(proc, "pid", None)
+    if not pid:
         return
     if os.name == "nt":
         subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
             capture_output=True, timeout=15,
         )
     else:
-        proc.kill()
+        try:
+            proc.kill()
+        except Exception:
+            try:
+                os.kill(pid, 9)
+            except Exception:
+                pass
 
 
 def _reap_browsers_at_exit() -> None:

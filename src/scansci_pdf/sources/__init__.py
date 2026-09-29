@@ -505,7 +505,19 @@ def _run_tiers_parallel(
         # Skip if another source already succeeded
         if cancel_event.is_set():
             return None
-        result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
+        try:
+            result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
+        finally:
+            # This pool is created per download (issue #57): once its worker
+            # threads die, their thread-local shared browsers are unreachable
+            # to close_shared_browser() and the atexit reaper only fires at
+            # process exit — a long-lived MCP server accumulates Chromium
+            # processes. Each worker closes its own browser before exiting.
+            try:
+                from ..browser_engine import shutdown_shared_browser
+                shutdown_shared_browser()
+            except Exception:
+                pass
         if result and not result.get("success"):
             # ponytail: (source, publisher) negative cache — a Cloudflare block
             # on one paper must not burn every later paper's timeout; raise TTL

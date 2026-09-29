@@ -100,11 +100,13 @@ def _shutdown_scihub_pool() -> None:
     try:
         # Idle workers each pick up one shutdown task and close their own
         # browser in their own thread (Playwright sync objects are
-        # thread-affine). Anything missed here is caught by the process-exit
-        # reaper in browser_engine.
+        # thread-affine). shutdown(wait=False) so a worker stuck in an
+        # interactive Cloudflare wait can't hang process exit; anything
+        # missed here is tree-killed by the process-exit reaper in
+        # browser_engine (issue #57).
         for _ in range(pool._max_workers):  # type: ignore[attr-defined]
             pool.submit(_close_my_browser)
-        pool.shutdown(wait=True)
+        pool.shutdown(wait=False)
     except Exception:
         pass
 

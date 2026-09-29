@@ -51,6 +51,13 @@ class PersistentPoolTests(unittest.TestCase):
             # _close_my_browser imports lazily inside the worker; patch the
             # resolved module attribute it will find.
             scihub._shutdown_scihub_pool()
+        # shutdown(wait=False) no longer blocks on the workers (issue #57) —
+        # wait for the shutdown tasks to land instead of assuming they ran.
+        import time as _time
+
+        deadline = _time.time() + 5
+        while not calls and _time.time() < deadline:
+            _time.sleep(0.02)
 
         self.assertIsNone(scihub._RACE_POOL)
         # Each worker closed its own browser in its own thread.
