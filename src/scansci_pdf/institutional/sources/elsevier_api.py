@@ -16,7 +16,19 @@ def get_api_key(config_key: str = "") -> str:
     return config_key or os.environ.get("ELSEVIER_API_KEY", "")
 
 
-def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
+def _resolve_proxies(config: dict | None) -> dict[str, str] | None:
+    """Explicit ScanSci proxy (SCANSCI_PDF_PROXY / network_proxy) → proxies dict.
+
+    Entitlement is IP-based: off-campus direct requests 403 even with a valid
+    key, and HTTP_PROXY/HTTPS_PROXY are ignored project-wide.
+    """
+    from ...network import configured_proxy
+
+    proxy = configured_proxy(config)
+    return {"http": proxy, "https": proxy} if proxy else None
+
+
+def fetch_pdf(doi: str, api_key: str, inst_token: str = "", config: dict | None = None) -> bytes | None:
     """Download PDF directly via Elsevier API."""
     if not api_key:
         return None
@@ -32,6 +44,7 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
     try:
         session = requests.Session()
         session.trust_env = False
+        session.proxies = _resolve_proxies(config) or {}
         resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
     except requests.exceptions.SSLError:
         try:
@@ -45,7 +58,9 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
 
     if resp.status_code != 200:
         if resp.status_code in (401, 403):
-            logger.warning("Elsevier API: HTTP %d (key invalid or insufficient)", resp.status_code)
+            # 403 ≠ key invalid: valid keys 403 on unentitled resources (#56)
+            logger.warning("Elsevier API: HTTP %d (key invalid or not entitled — "
+                           "check elsevier-check dual-route probe)", resp.status_code)
         elif resp.status_code == 429:
             logger.warning("Elsevier API: rate limited")
         else:
@@ -76,7 +91,7 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
     return resp.content
 
 
-def fetch_fulltext(doi: str, api_key: str, inst_token: str = "") -> dict | None:
+def fetch_fulltext(doi: str, api_key: str, inst_token: str = "", config: dict | None = None) -> dict | None:
     """Fetch article full text via Elsevier RetrievalAPI (XML)."""
     if not api_key:
         return None
@@ -92,6 +107,7 @@ def fetch_fulltext(doi: str, api_key: str, inst_token: str = "") -> dict | None:
     try:
         session = requests.Session()
         session.trust_env = False
+        session.proxies = _resolve_proxies(config) or {}
         resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
     except requests.exceptions.SSLError:
         try:

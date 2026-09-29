@@ -52,8 +52,19 @@ def is_cloudflare_challenge(title: str) -> bool:
 _session_pool: dict[str, requests.Session] = {}
 
 
+def configured_proxy(config: dict[str, Any] | None = None) -> str:
+    """The one explicit proxy setting: SCANSCI_PDF_PROXY env > network_proxy config.
+
+    HTTP_PROXY/HTTPS_PROXY are ignored project-wide (NO_PROXY='*' in the
+    package __init__, sessions run trust_env=False — the ZCode proxy CA
+    workaround). Campus-bound traffic (Elsevier/Springer TDM entitlement is
+    IP-based) must go through THIS setting or it egresses off-campus.
+    """
+    return os.environ.get("SCANSCI_PDF_PROXY") or (config or {}).get("network_proxy") or ""
+
+
 def _get_session(config: dict[str, Any]) -> requests.Session:
-    proxy = os.environ.get("SCANSCI_PDF_PROXY") or config.get("network_proxy") or ""
+    proxy = configured_proxy(config)
     key = proxy or "__none__"
     if key not in _session_pool:
         s = requests.Session()
@@ -106,7 +117,7 @@ def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False
     ):
         return None
 
-    explicit = os.environ.get("SCANSCI_PDF_PROXY") or config.get("network_proxy")
+    explicit = configured_proxy(config)
     if explicit:
         return explicit
     return None

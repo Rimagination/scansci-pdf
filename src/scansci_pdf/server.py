@@ -74,11 +74,25 @@ def scansci_pdf_download(
                     "请运行 scansci_pdf_elsevier_setup 获取配置指引。"
                 )
             else:
-                result["hint"]["elsevier_note"] = (
-                    "Elsevier API 已配置但本次下载失败：多为未连接校园网/机构网络出口（NOT_ENTITLED），"
-                    "或学校未订阅该刊。insttoken 通常不需要（API key + 校园网出口即可）；"
-                    "可连接校园网后重试，或改走灰色源/机构浏览器渠道。"
-                )
+                from .network import configured_proxy as _configured_proxy
+
+                if _configured_proxy(config):
+                    result["hint"]["elsevier_note"] = (
+                        "Elsevier API 已配置但本次下载失败。已走配置出口：若自检/日志出现 403 "
+                        "'Requestor configuration settings insufficient'，多为机构未给该 key 开 "
+                        "API 全文权限（联系机构 Elsevier 管理员；insttoken 仅在拿不到校园出口时才需要），"
+                        "或该代理出口不在机构注册 IP 段。先运行 scansci-pdf elsevier-check --doi <DOI> 复核，"
+                        "再转灰色源/机构浏览器渠道。"
+                    )
+                else:
+                    result["hint"]["elsevier_note"] = (
+                        "Elsevier API 已配置但本次下载失败：多为未连接校园网/机构网络出口（NOT_ENTITLED；"
+                        "403 'Requestor configuration settings insufficient' 即出口 IP 不在机构注册段）。"
+                        "API key + 校园网出口即可，insttoken 仅在拿不到校园出口时才需要。"
+                        "若靠代理连校园网：HTTP_PROXY/HTTPS_PROXY 环境变量会被忽略（trust_env=False），"
+                        "请改用 config_set network_proxy \"代理地址\" 或设 SCANSCI_PDF_PROXY 后重试；"
+                        "也可连接校园网后重试，或改走灰色源/机构浏览器渠道。"
+                    )
 
     if result.get("success") and download_si:
         try:
@@ -594,7 +608,7 @@ def scansci_pdf_auto_setup() -> str:
 
 @mcp_app.tool()
 def scansci_pdf_elsevier_setup(test: bool = False) -> str:
-    """Set up the Elsevier API key (opens portal, guides registration, validates). NO insttoken needed: API key + campus egress; NOT_ENTITLED = off-campus or not subscribed."""
+    """Set up the Elsevier API key (opens portal, guides registration, validates). No insttoken — campus egress covers it. Institutional email + campus network at creation, else key never binds (403)."""
     import webbrowser
     config = load_config()
     api_key = config.get("elsevier_api_key", "")
@@ -609,11 +623,11 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
         if test:
             # Validate by hitting the serial title API (lightweight, no PDF download)
             import requests
-            from .network import USER_AGENT
+            from .network import USER_AGENT, configured_proxy
             try:
                 s = requests.Session()
                 s.trust_env = False
-                proxy = config.get("network_proxy", "")
+                proxy = configured_proxy(config)
                 if proxy:
                     s.proxies = {"http": proxy, "https": proxy}
                 resp = s.get(
@@ -645,13 +659,16 @@ def scansci_pdf_elsevier_setup(test: bool = False) -> str:
         result["message"] = (
             "Elsevier API Key 未配置。请按以下步骤操作：\n\n"
             "1. 浏览器已打开 Elsevier Developer Portal（如未打开请访问 https://dev.elsevier.com/）\n"
-            "2. 注册或登录你的 Elsevier 账号（个人邮箱即可，免费）\n"
-            "3. 点击 \"My API Key\" → \"Create new key\"\n"
-            "4. 应用名称随意填写，选择 \"ScienceDirect Article Retrieval\" API\n"
+            "2. 用机构邮箱（@xxx.edu.cn）注册或登录 Elsevier 账号——个人邮箱也能建 key，"
+            "但账号绑不上机构，key 从创建那刻就拿不到全文权益（403 Requestor configuration settings insufficient）\n"
+            "3. 在校园网/学校 VPN 环境下创建 key——门户靠注册时的邮箱域 + 出口 IP 识别机构，校外创建大概率识别失败\n"
+            "4. 点击 \"My API Key\" → \"Create new key\"，应用名称随意，选择 \"ScienceDirect Article Retrieval\" API\n"
             "5. 复制生成的 API Key（32位字符串）\n"
             "6. 运行配置命令：\n"
-            "   scansci_pdf_config(key=\"elsevier_api_key\", value=\"你的APIKey\")\n\n"
+            "   scansci_pdf_config(key=\"elsevier_api_key\", value=\"你的APIKey\")\n"
+            "7. 配置后当场验证：运行 scansci-pdf elsevier-check——无 key 基线 406、大刊样本 200 即机构绑定成功\n\n"
             "配置后所有 Elsevier/ScienceDirect/Cell Press 论文自动走 API 直接下载（1-2秒）。"
+            "insttoken 不需要（API key + 校园网出口即可；仅拿不到校园出口时找机构管理员申请）。"
         )
 
     return json.dumps(result, ensure_ascii=False, indent=2)

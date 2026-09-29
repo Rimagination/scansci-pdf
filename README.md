@@ -237,7 +237,7 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 | `auto_rename` | `true` | 自动按作者/标题重命名 |
 | `download_strategy` | `fastest` | 下载策略 |
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
-| `network_proxy` | 空 | HTTP/SOCKS 代理地址 |
+| `network_proxy` | 空 | HTTP/SOCKS 代理地址（机构 IP 授权类来源——Elsevier/Springer TDM API——必须走这里；`HTTP_PROXY`/`HTTPS_PROXY` 环境变量被有意忽略，也可用 `SCANSCI_PDF_PROXY` 环境变量） |
 | `proxy_pool` | 空 | 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP |
 | `batch_workers` | `10` | 批量下载并发数（被封 IP 时建议调低到 2） |
 | `request_delay_min` | `2.0` | 请求间随机延迟下限（秒） |
@@ -249,7 +249,7 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 | `auto_relogin` | `true` | 机构会话自愈：下载前自动校验 WebVPN 会话，明确过期才弹浏览器重登 |
 | `cache_ttl_hours` | `168` | 下载缓存 TTL（小时），设 0 禁用 |
 | `elsevier_api_key` | 空 | Elsevier / ScienceDirect API Key |
-| `elsevier_insttoken` | 空 | Elsevier institutional token，可选 |
+| `elsevier_insttoken` | 空 | Elsevier institutional token，仅拿不到校园出口时需要（找机构管理员申请） |
 | `use_tor_for_scihub` | `false` | Sci-Hub 走 Tor |
 | `flaresolverr_url` | `http://localhost:8191/v1` | FlareSolverr 服务地址 |
 | `browser_headless` | `false` | 浏览器是否无头运行 |
@@ -306,7 +306,9 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 | 现象 | 先做 |
 |---|---|
 | 下载失败 | `scansci-pdf check`，会话问题再跑 `scansci-pdf session-doctor` |
-| Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
+| Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可（insttoken 仅拿不到校园出口时申请）；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
+| Elsevier 403 Requestor configuration settings insufficient | key 有效但 key+出口未配置全文：`scansci-pdf elsevier-check --doi <DOI>`——未走校园出口则配 `network_proxy`/`SCANSCI_PDF_PROXY`；已走校园出口则是机构未给 key 开 API 全文权限（找机构 Elsevier 管理员，insttoken 为替代路径） |
+| 新申请的 Elsevier key 一直 403 | 注册环节问题：机构邮箱注册 Elsevier 账号 + 校园网/学校 VPN 下创建 key（门户靠邮箱域 + 出口 IP 识别机构）；创建后当场 `scansci-pdf elsevier-check` 验证 |
 | 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_diagnostics(check="network")`，给出针对性修复建议 |
 | 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`scansci-pdf browser-doctor` 会标出 outdated） |
 | WebVPN / CARSI 登录失败 | `pip install "scansci-pdf[cloakbrowser,instsci]"`，在可见浏览器完成登录后重试 |

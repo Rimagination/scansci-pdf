@@ -737,11 +737,12 @@ def _run_fast_lane(
     import requests
 
     from concurrent.futures import as_completed
+    from .network import configured_proxy
     from .sources.elsevier_api import fetch_pdf
 
     api_key = config.get("elsevier_api_key", "")
     inst_token = config.get("elsevier_insttoken", "")
-    proxy = config.get("network_proxy", "")
+    proxy = configured_proxy(config)
     proxies = {"http": proxy, "https": proxy} if proxy else None
     headers = {"User-Agent": _user_agent()}
 
@@ -780,7 +781,7 @@ def _run_fast_lane(
                 return {"success": True, "doi": e.identifier, "file": str(path), "source": "oa_url"}
         if api_key and (e.channel == "elsevier" or e.identifier.lower().startswith("10.1016/")):
             try:
-                pdf = fetch_pdf(e.identifier, api_key, inst_token)
+                pdf = fetch_pdf(e.identifier, api_key, inst_token, config=config)
             except Exception:
                 pdf = None
             if pdf and pdf[:4] == b"%PDF":

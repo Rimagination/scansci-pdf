@@ -17,7 +17,22 @@ def get_api_key(config_key: str = "") -> str:
     return config_key or os.environ.get("ELSEVIER_API_KEY", "")
 
 
-def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
+def _resolve_proxies(config: dict | None) -> dict[str, str] | None:
+    """Explicit ScanSci proxy → requests proxies dict (None = direct).
+
+    Entitlement for subscription full text follows the request's egress IP:
+    off-campus direct requests 403 (NOT_ENTITLED) even with a valid key.
+    HTTP_PROXY/HTTPS_PROXY are ignored project-wide, so a campus-bound proxy
+    must be set via SCANSCI_PDF_PROXY / network_proxy — the same setting the
+    entitlement probe (elsevier_check) routes through.
+    """
+    from ..network import configured_proxy
+
+    proxy = configured_proxy(config)
+    return {"http": proxy, "https": proxy} if proxy else None
+
+
+def fetch_pdf(doi: str, api_key: str, inst_token: str = "", config: dict | None = None) -> bytes | None:
     """Download full PDF via Elsevier API using the attachment EID approach.
 
     Strategy (from successful 32-paper batch experience):
@@ -32,20 +47,22 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
     if not api_key:
         return None
 
+    proxies = _resolve_proxies(config)
+
     # Step 1: Get FULL XML with attachment metadata
-    eids = _fetch_attachment_eids(doi, api_key, inst_token)
+    eids = _fetch_attachment_eids(doi, api_key, inst_token, proxies)
     if not eids:
         # Fallback: try direct PDF endpoint (works for OA articles)
-        return _fetch_pdf_direct(doi, api_key, inst_token)
+        return _fetch_pdf_direct(doi, api_key, inst_token, proxies)
 
     # Step 2: Try each attachment EID until we get a valid PDF
     for eid in eids:
-        pdf_bytes = _fetch_pdf_by_eid(eid, api_key, inst_token)
+        pdf_bytes = _fetch_pdf_by_eid(eid, api_key, inst_token, proxies)
         if pdf_bytes:
             return pdf_bytes
 
     logger.info("Elsevier API: all attachment EIDs failed for %s, trying direct", doi)
-    return _fetch_pdf_direct(doi, api_key, inst_token)
+    return _fetch_pdf_direct(doi, api_key, inst_token, proxies)
 
 
 def _local_name(tag: str) -> str:
@@ -205,7 +222,9 @@ def _valid_pdf_bytes(content: bytes, label: str, *, reject_single_page: bool) ->
     return True
 
 
-def _fetch_attachment_eids(doi: str, api_key: str, inst_token: str = "") -> list[str]:
+def _fetch_attachment_eids(
+    doi: str, api_key: str, inst_token: str = "", proxies: dict[str, str] | None = None,
+) -> list[str]:
     """Fetch FULL XML and extract MAIN PDF attachment EIDs."""
     url = f"{ELSEVIER_API}/article/doi/{doi}"
     headers = {
@@ -215,8 +234,24 @@ def _fetch_attachment_eids(doi: str, api_key: str, inst_token: str = "") -> list
     if inst_token:
         headers["X-ELS-InstToken"] = inst_token
 
-    resp = _api_request(url, headers, params={"view": "FULL"})
+    resp = _api_request(url, headers, params={"view": "FULL"}, proxies=proxies)
     if not resp or resp.status_code != 200:
+        # The XML → attachment-EID chain starts here; a 403 on this request
+        # means the requestor (key + egress IP) is not configured for full
+        # text at all — no EID can exist. Name the two real causes so the
+        # next step is actionable instead of a re-diagnosis.
+        if resp is not None and resp.status_code == 403:
+            text = _error_status_text(resp)
+            if "requestor configuration settings insufficient" in text.lower():
+                logger.warning(
+                    "Elsevier API: 403 '%s' on view=FULL for %s — requestor (key + egress IP) "
+                    "has no full-text configuration. Either the egress IP is outside the "
+                    "institution's registered range (off-campus: route via SCANSCI_PDF_PROXY / "
+                    "network_proxy to campus egress), or the institution has not enabled API "
+                    "full-text for this key (contact the institution's Elsevier admin; "
+                    "insttoken is the off-campus alternative).",
+                    text, doi,
+                )
         return []
 
     eids = _extract_pdf_attachment_eids(resp.text)
@@ -225,7 +260,9 @@ def _fetch_attachment_eids(doi: str, api_key: str, inst_token: str = "") -> list
     return eids
 
 
-def _fetch_pdf_by_eid(eid: str, api_key: str, inst_token: str = "") -> bytes | None:
+def _fetch_pdf_by_eid(
+    eid: str, api_key: str, inst_token: str = "", proxies: dict[str, str] | None = None,
+) -> bytes | None:
     """Download PDF via Content Object API using attachment EID."""
     url = f"{ELSEVIER_API}/object/eid/{quote(eid, safe='')}"
     headers = {
@@ -235,7 +272,7 @@ def _fetch_pdf_by_eid(eid: str, api_key: str, inst_token: str = "") -> bytes | N
     if inst_token:
         headers["X-ELS-InstToken"] = inst_token
 
-    resp = _api_request(url, headers)
+    resp = _api_request(url, headers, proxies=proxies)
     if not resp:
         return None
 
@@ -258,7 +295,9 @@ def _fetch_pdf_by_eid(eid: str, api_key: str, inst_token: str = "") -> bytes | N
     return resp.content
 
 
-def _fetch_pdf_direct(doi: str, api_key: str, inst_token: str = "") -> bytes | None:
+def _fetch_pdf_direct(
+    doi: str, api_key: str, inst_token: str = "", proxies: dict[str, str] | None = None,
+) -> bytes | None:
     """Fallback: download PDF directly from article endpoint (works for OA)."""
     url = f"{ELSEVIER_API}/article/doi/{doi}"
     headers = {
@@ -268,7 +307,7 @@ def _fetch_pdf_direct(doi: str, api_key: str, inst_token: str = "") -> bytes | N
     if inst_token:
         headers["X-ELS-InstToken"] = inst_token
 
-    resp = _api_request(url, headers)
+    resp = _api_request(url, headers, proxies=proxies)
     if not resp or resp.status_code != 200:
         return None
 
@@ -284,16 +323,31 @@ def _fetch_pdf_direct(doi: str, api_key: str, inst_token: str = "") -> bytes | N
     return resp.content
 
 
+def _error_status_text(resp: requests.Response) -> str:
+    """Extract <statusText> from an Elsevier error XML body ("" if absent)."""
+    try:
+        root = ET.fromstring(resp.text)
+    except (ET.ParseError, ValueError):
+        return ""
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "statusText":
+            return (el.text or "").strip()
+    return ""
+
+
 def _api_request(
     url: str,
     headers: dict,
     *,
     params: dict[str, str] | None = None,
+    proxies: dict[str, str] | None = None,
 ) -> requests.Response | None:
     """Make an Elsevier API request with error handling."""
     try:
         session = requests.Session()
         session.trust_env = False
+        if proxies:
+            session.proxies = proxies
         resp = session.get(
             url,
             headers=headers,
@@ -305,6 +359,8 @@ def _api_request(
         try:
             session = requests.Session()
             session.trust_env = False
+            if proxies:
+                session.proxies = proxies
             resp = session.get(
                 url,
                 headers=headers,
@@ -321,14 +377,17 @@ def _api_request(
         return None
 
     if resp.status_code in (401, 403):
-        logger.warning("Elsevier API: HTTP %d (key invalid or insufficient)", resp.status_code)
+        # 403 ≠ key invalid: valid keys 403 on unentitled resources (#56) —
+        # surface Elsevier's own statusText instead of guessing.
+        detail = _error_status_text(resp) or "key invalid or not entitled"
+        logger.warning("Elsevier API: HTTP %d (%s)", resp.status_code, detail)
     elif resp.status_code == 429:
         logger.warning("Elsevier API: rate limited")
 
     return resp
 
 
-def fetch_fulltext(doi: str, api_key: str, inst_token: str = "") -> dict | None:
+def fetch_fulltext(doi: str, api_key: str, inst_token: str = "", config: dict | None = None) -> dict | None:
     """Fetch article full text via Elsevier RetrievalAPI."""
     if not api_key:
         return None
@@ -341,7 +400,7 @@ def fetch_fulltext(doi: str, api_key: str, inst_token: str = "") -> dict | None:
     if inst_token:
         headers["X-ELS-Insttoken"] = inst_token
 
-    resp = _api_request(url, headers, params={"view": "FULL"})
+    resp = _api_request(url, headers, params={"view": "FULL"}, proxies=_resolve_proxies(config))
     if not resp:
         return None
 

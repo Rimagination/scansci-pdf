@@ -55,6 +55,35 @@ key 的权益**跟注册时的机构绑定**（跟 key 走，与出口 IP 无关
 
 实测样例：某 key 对 Lancet 200、清单内 DOI 200、无 key 406、双路由 1456/1460 ENTITLED。
 
+## API key 申请清单（2026-09-29：多数 403 的源头在注册环节，不在代码）
+
+全文权益校验看三件事，缺一不可：**key 绑定了机构** + **机构开通了 API 全文** + **请求从机构注册 IP 段发出**。
+insttoken 只是前两条拿不全时的替代凭证（找机构管理员，或 datasupportRD@elsevier.com 带上 key 申请），不是必经环节。
+
+1. **机构邮箱**注册 Elsevier 账号——个人邮箱也能建 key，但账号绑不上机构，key 从创建那刻就拿不到全文权益
+2. **校园网/学校 VPN 下**创建 key——dev.elsevier.com 靠注册时的邮箱域 + 出口 IP 识别机构，校外创建大概率识别失败
+3. 创建后**当场 `scansci-pdf elsevier-check`**：无 key 基线 406、大刊样本 200 = 绑定成功；大刊 403 → 见下一节
+4. 下载也从校园出口走；校外配 `network_proxy`/`SCANSCI_PDF_PROXY`
+5. 校园出口仍 403 "Requestor configuration settings insufficient" → 机构级 API enablement 缺失，
+   找图书馆（电子资源部）向 Elsevier 申请——唯一需要"求人"的情形
+
+同校人复现不了"别人能用"的常见原因：机构开通是**共享**的（一次性，办过就一直有效），key 绑定是**每人一份**的——
+自己的 key 能用不代表别人的 key 能用；个人邮箱注册、校外创建 key、校外直连测试，三处任一失守都回到 403。
+`elsevier-setup` 与 `elsevier-check` 的指引已按此清单对齐。
+
+## 403 "Requestor configuration settings insufficient"（2026-09-29 补充）
+
+上面"权益跟 key 走、与出口 IP 无关"的实测结论有一个边界：**已配置好的机构 key** 才成立。
+未配置的 key + 出口组合在 `view=FULL` 第一步就被 403 拒掉——错误 XML 的 `<statusText>`
+即 "Requestor configuration settings insufficient"，没有 XML 就没有 attachment-EID，
+后面步骤无从谈起。两种成因现象完全相同，按是否已走配置出口区分：
+
+1. **未走校园出口**：出口 IP 不在机构注册段（校外直连的典型表现）→ 配 `network_proxy`/`SCANSCI_PDF_PROXY` 走校园出口重试
+2. **已走校园出口仍 403**：机构未在 Elsevier 侧给该 key 开 API 全文权限 → 找机构 Elsevier 管理员配置；insttoken 是校外无校园出口时的替代路径
+
+双路由探测（`elsevier-check`）对 403 样本追加一次 `view=META` GET 诊断读 `<statusText>`，
+命中该 message 时按上表直接给定向建议（零正文下载承诺不变）。API 车道日志同步点名。
+
 ## 按域直连
 
 sci-hub.ru 按**出口 IP** 限速：代理用户共享一个出口，很快被墙；直连每用户独立 IP，清白（2026-08-30 实测：同机代理=常驻墙，直连=干净文章页）。`network.select_proxy_for_url` 默认让 `sci-hub.ru` 直连——`direct_domains` 扩展名单、`scihub_direct: false` 关闭、Tor 优先级最高。

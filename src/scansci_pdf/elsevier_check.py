@@ -12,10 +12,13 @@ ENTITLED / NOT_ENTITLED / NOT_FOUND / QUOTA / NO_KEY / NETWORK
 from __future__ import annotations
 
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+
+from .network import configured_proxy
 
 PREMIUM_DOI = "10.1016/S0140-6736(20)30183-5"        # Lancet 知名付费论文（2026-08 实测 200）
 OA_CONTROL_DOI = "10.1016/j.jenvman.2023.118901"      # 无 key 可得的公开对照（实测 200）
@@ -90,6 +93,54 @@ def _head_probe(doi: str, key: str, proxies: dict | None, *, http_accept: bool =
 KEY_VALID = "KEY_VALID"
 KEY_INVALID = "KEY_INVALID"
 
+# 403 "Requestor configuration settings insufficient"：key 本身有效，但
+# key + 出口 IP 组合未被配置为可取全文（HEAD 无 body，只能 GET 读错误 XML）。
+# 两种成因现象完全相同，按是否已走配置出口区分（#56 的姊妹场景）：
+#   1. 未走校园出口 → 出口 IP 不在机构注册段（校外直连的典型表现）
+#   2. 已走校园出口 → 机构未在 Elsevier 侧给该 key 开 API 全文配置
+REQUESTOR_CONFIG_MSG = "requestor configuration settings insufficient"
+
+
+def _requestor_config_advice(proxy_configured: bool) -> str:
+    """按出口路由区分 403 'Requestor configuration settings insufficient' 的两种成因。"""
+    if proxy_configured:
+        return ("403 'Requestor configuration settings insufficient'：已走配置出口仍被拒——"
+                "多为机构未给该 key 开 API 全文权限（联系机构 Elsevier 管理员，insttoken 为替代路径），"
+                "或该代理出口不在机构注册 IP 段")
+    return ("403 'Requestor configuration settings insufficient'：多为出口 IP 不在机构注册段（校外直连）——"
+            "配 network_proxy/SCANSCI_PDF_PROXY 走校园出口重试；校园出口仍 403 则是机构未配置 key 权限"
+            "（联系机构 Elsevier 管理员，insttoken 为替代路径）")
+
+
+def _error_status_text_probe(doi: str, key: str, proxies: dict | None) -> str:
+    """GET 诊断：读 403 错误 XML 的 <statusText>（view=META，零正文下载）。"""
+    try:
+        headers: dict[str, str] = {"Accept": "application/xml", **UA_HEADERS}
+        if key:
+            headers["X-ELS-APIKey"] = key
+        r = requests.get(
+            f"https://api.elsevier.com/content/article/doi/{doi}",
+            params={"view": "META"},
+            headers=headers, timeout=(8, 12), proxies=proxies,
+        )
+        if r.status_code != 403:
+            return ""
+        return _status_text(r.text)
+    except Exception:
+        return ""
+
+
+def _status_text(body: str) -> str:
+    """Elsevier 错误 XML 的 <statusText>（兼容命名空间）。"""
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return ""
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "statusText":
+            return (el.text or "").strip()
+    return ""
+
 
 def _probe_key_valid(key: str, proxies: dict | None) -> tuple[int, str]:
     """key 本身有效性探针：打一个只需认证、不需订阅权益的元数据端点。
@@ -116,15 +167,22 @@ def _probe_key_valid(key: str, proxies: dict | None) -> tuple[int, str]:
 
 def probe_dual_route(doi: str, key: str, config: dict[str, Any]) -> dict[str, Any]:
     """单篇双路由探测（代理 + 直连）。返回规范行 dict。"""
-    proxy = config.get("network_proxy", "")
+    proxy = configured_proxy(config)
     proxies = {"http": proxy, "https": proxy} if proxy else None
     p_code, p_verdict = _head_probe(doi, key, proxies)
     time.sleep(0.3)
     d_code, d_verdict = _head_probe(doi, key, None)
     verdict, advice = _combine(p_verdict, d_verdict)
+    note = ""
+    if verdict == NOT_ENTITLED:
+        # HEAD 无 body，403 的解释只能 GET 读 <statusText>；META 视图守住"零正文下载"
+        text = _error_status_text_probe(doi, key, proxies)
+        if REQUESTOR_CONFIG_MSG in text.lower():
+            advice = _requestor_config_advice(bool(proxy))
+            note = f"403 statusText: {text}"
     return {"doi": doi, "sample_type": "用户样本", "proxy": f"{p_code} {p_verdict}",
             "direct": f"{d_code} {d_verdict}", "verdict": verdict,
-            "route_advice": advice, "note": ""}
+            "route_advice": advice, "note": note}
 
 
 def _combine(p: str, d: str) -> tuple[str, str]:
@@ -150,7 +208,7 @@ def check_key_profile(config: dict[str, Any]) -> tuple[list[dict[str, Any]], str
     有效 key 对未订阅的样本刊同样 403，那是权益问题不是 key 问题（#56）。
     """
     key = (config.get("elsevier_api_key") or "").strip()
-    proxy = config.get("network_proxy", "")
+    proxy = configured_proxy(config)
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     rows: list[dict[str, Any]] = []
@@ -199,6 +257,11 @@ def check_key_profile(config: dict[str, Any]) -> tuple[list[dict[str, Any]], str
         else:
             profile = "key 有效但无该刊订阅"
             advice = "该 key 未绑定机构权益或机构未订阅该样本刊——用机构身份（校园网出口）重新注册 key，或依赖 OA/灰色通道"
+            # 大刊双路由 403 时点名具体成因（403 ≠ key 无效，#56；两类成因按出口区分）
+            if any(c == 403 for _, c, _ in key_rows):
+                text = _error_status_text_probe(PREMIUM_DOI, key, proxies)
+                if REQUESTOR_CONFIG_MSG in text.lower():
+                    advice = _requestor_config_advice(bool(proxy))
     else:
         profile = "无效 key"
         advice = "重新运行 elsevier-setup --api-key 配置有效 key"

@@ -754,7 +754,7 @@ class PaperFetcher:
         logger.info("Trying Elsevier API for %s", doi)
         inst_token = self.config.get("elsevier_insttoken", "")
 
-        data = elsevier_api.fetch_fulltext(doi, api_key=api_key, inst_token=inst_token)
+        data = elsevier_api.fetch_fulltext(doi, api_key=api_key, inst_token=inst_token, config=self.config)
         if data and data.get("full_text"):
             result = Paper(
                 doi=doi,
@@ -768,7 +768,7 @@ class PaperFetcher:
             logger.info("Elsevier API XML: %d chars of full text", len(data["full_text"]))
             return result
 
-        pdf_bytes = elsevier_api.fetch_pdf(doi, api_key=api_key, inst_token=inst_token)
+        pdf_bytes = elsevier_api.fetch_pdf(doi, api_key=api_key, inst_token=inst_token, config=self.config)
         if pdf_bytes:
             _apply_pdf_bytes(paper, pdf_bytes, doi, "elsevier_api", self._save_pdf)
             logger.info("Elsevier API PDF: %d bytes", len(pdf_bytes))

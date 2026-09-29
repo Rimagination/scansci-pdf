@@ -10,6 +10,11 @@ def _patch_key_valid(verdict: str, code: int = 200):
     return patch.object(ec, "_probe_key_valid", return_value=(code, verdict))
 
 
+def _patch_diag(text: str = ""):
+    """403 GET 诊断（view=META）打桩——默认空串=未命中特定 message。"""
+    return patch.object(ec, "_error_status_text_probe", return_value=text)
+
+
 class NormalizeTests(unittest.TestCase):
     def test_mapping(self):
         self.assertEqual(ec.normalize_status(200), "ENTITLED")
@@ -92,7 +97,8 @@ class ProfileTests(unittest.TestCase):
             if not key:
                 return 406, ec.NO_KEY
             return 403, ec.NOT_ENTITLED
-        with patch.object(ec, "_head_probe", side_effect=fake), _patch_key_valid(ec.KEY_VALID):
+        with patch.object(ec, "_head_probe", side_effect=fake), \
+                _patch_key_valid(ec.KEY_VALID), _patch_diag():
             rows, profile, advice = ec.check_key_profile(self.cfg)
         self.assertEqual(profile, "key 有效但无该刊订阅")
         self.assertIn("重新注册", advice)
@@ -112,7 +118,8 @@ class ProfileTests(unittest.TestCase):
             if not key:
                 return 406, ec.NO_KEY
             return 403, ec.NOT_ENTITLED
-        with patch.object(ec, "_head_probe", side_effect=fake), _patch_key_valid(ec.KEY_VALID):
+        with patch.object(ec, "_head_probe", side_effect=fake), \
+                _patch_key_valid(ec.KEY_VALID), _patch_diag():
             rows, profile, advice = ec.check_key_profile(self.cfg)
         self.assertEqual(profile, "key 有效但无该刊订阅")
 
@@ -125,7 +132,8 @@ class ProfileTests(unittest.TestCase):
             if not key:
                 return 403, ec.NOT_ENTITLED  # 基线也非 406
             return 403, ec.NOT_ENTITLED  # 大刊无权益
-        with patch.object(ec, "_head_probe", side_effect=fake), _patch_key_valid(ec.KEY_VALID):
+        with patch.object(ec, "_head_probe", side_effect=fake), \
+                _patch_key_valid(ec.KEY_VALID), _patch_diag():
             rows, profile, advice = ec.check_key_profile(self.cfg)
         self.assertEqual(profile, "key 有效但无该刊订阅")
 
@@ -140,6 +148,64 @@ class ProfileTests(unittest.TestCase):
             rows, profile, advice = ec.check_key_profile(self.cfg)
         self.assertEqual(profile, "无效 key")
         self.assertIn("elsevier-setup", advice)
+
+
+REQUESTOR_TEXT = "Requestor configuration settings insufficient for access to this resource"
+
+
+class RequestorConfig403Tests(unittest.TestCase):
+    """403 'Requestor configuration settings insufficient'：点名 message 并按出口路由区分两种成因。"""
+
+    def test_status_text_extracts_from_namespaced_xml(self):
+        body = ('<?xml version="1.0"?><service-error xmlns="https://api.elsevier.com">'
+                '<status><statusCode>AUTHENTICATION_ERROR</statusCode>'
+                f'<statusText>{REQUESTOR_TEXT}</statusText></status></service-error>')
+        self.assertEqual(ec._status_text(body), REQUESTOR_TEXT)
+
+    def test_status_text_malformed_body(self):
+        self.assertEqual(ec._status_text("not xml"), "")
+        self.assertEqual(ec._status_text("<other><a>1</a></other>"), "")
+
+    def _dual_403(self, cfg, diag_text):
+        def fake(doi, key, px, *, http_accept=True):
+            return 403, ec.NOT_ENTITLED
+        with patch.object(ec, "_head_probe", side_effect=fake), \
+                patch.object(ec.time, "sleep"), _patch_diag(diag_text):
+            return ec.probe_dual_route("10.1016/j.geoderma.2023.116365", "K", cfg)
+
+    def test_direct_route_403_names_campus_egress_fix(self):
+        with patch.object(ec, "configured_proxy", return_value=None):
+            row = self._dual_403({}, REQUESTOR_TEXT)  # 未走校园出口
+        self.assertEqual(row["verdict"], ec.NOT_ENTITLED)
+        self.assertIn("network_proxy", row["route_advice"])
+        self.assertIn("校园出口", row["route_advice"])
+        self.assertIn("statusText", row["note"])
+
+    def test_proxy_route_403_names_admin_and_insttoken(self):
+        cfg = {"network_proxy": "http://127.0.0.1:7890"}
+        row = self._dual_403(cfg, REQUESTOR_TEXT)  # 已走配置出口仍 403
+        self.assertIn("管理员", row["route_advice"])
+        self.assertIn("insttoken", row["route_advice"])
+
+    def test_other_403_keeps_base_advice(self):
+        row = self._dual_403({}, "")  # 诊断未命中该 message
+        self.assertEqual(row["route_advice"], ec.ROUTE_ADVICE[ec.NOT_ENTITLED])
+        self.assertEqual(row["note"], "")
+
+    def test_profile_refines_advice_on_requestor_config(self):
+        cfg = {"elsevier_api_key": "K", "network_proxy": "http://127.0.0.1:7890"}
+        def fake(doi, key, px, *, http_accept=True):
+            if http_accept is False:
+                return 200, ec.ENTITLED
+            if not key:
+                return 406, ec.NO_KEY
+            return 403, ec.NOT_ENTITLED
+        with patch.object(ec, "_head_probe", side_effect=fake), \
+                _patch_key_valid(ec.KEY_VALID), _patch_diag(REQUESTOR_TEXT):
+            rows, profile, advice = ec.check_key_profile(cfg)
+        self.assertEqual(profile, "key 有效但无该刊订阅")
+        self.assertIn("管理员", advice)
+        self.assertIn("insttoken", advice)
 
 
 if __name__ == "__main__":

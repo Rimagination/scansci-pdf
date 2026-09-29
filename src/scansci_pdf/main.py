@@ -636,8 +636,13 @@ def elsevier_setup(
         print(f"  Elsevier API key:   {'set' if has_key else '(not set)'}")
         print(f"  Elsevier inst token: {'set' if has_token else '(not set, 通常不需要)'}")
         print(f"\n  Usage: scansci-pdf elsevier-setup --api-key YOUR_KEY")
-        print(f"\n  提示：insttoken 通常不需要——API key + 校园网/机构网络出口即可。")
+        print(f"\n  申请 key：机构邮箱注册 Elsevier 账号，并在校园网/学校 VPN 下创建 key"
+              f"（门户靠注册时的邮箱域 + 出口 IP 识别机构，个人邮箱/校外创建绑不上机构）。")
+        print(f"  创建后当场跑 elsevier-check：无 key 基线 406、大刊样本 200 即绑定成功。")
+        print(f"  提示：insttoken 通常不需要——API key + 校园网/机构网络出口即可（仅拿不到校园出口时申请）。")
         print(f"  NOT_ENTITLED 表示未连校园网或学校未订阅该刊，不是缺 insttoken。")
+        print(f"  403 'Requestor configuration settings insufficient'：出口不在机构注册段（配 network_proxy 走校园出口），"
+              f"或机构未给该 key 开 API 全文权限（联系机构 Elsevier 管理员）。")
 
 
 @app.command("elsevier-check")
