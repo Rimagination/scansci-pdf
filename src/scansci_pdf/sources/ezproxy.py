@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -30,12 +31,82 @@ def _get_ezproxy_base(config: dict[str, Any]) -> str:
     return config.get("ezproxy_login_url", "")
 
 
-def _make_ezproxy_url(target_url: str, config: dict[str, Any]) -> str:
-    """Convert a target URL to an EZProxy-proxied URL."""
+def _is_proxy_domain(domain: str) -> bool:
+    """True if a cookie domain / hostname belongs to the EZproxy itself.
+
+    Both proxy styles carry a marker label in every host: prefix-style
+    (``ezproxy.lib.foo.edu``) and hostname-rewriting
+    (``onlinelibrary-wiley-com.lib.ezproxy.hkust.edu.hk``, Berkeley's
+    ``*-libproxy.berkeley.edu``). Publisher hosts never do (#62).
+    """
+    d = (domain or "").lower()
+    return "ezproxy" in d or "libproxy" in d
+
+
+def _ezproxy_origin(config: dict[str, Any]) -> str:
+    """Derive the proxy origin (``scheme://host``) from the configured template.
+
+    Supported template shapes:
+    - prefix-style:      ``https://ezproxy.lib.foo.edu/login?url={url}``
+    - hostname-rewrite:  ``https://{host_dashed}.lib.ezproxy.hkust.edu.hk``
+    """
     base = _get_ezproxy_base(config)
     if not base:
         return ""
-    return base.replace("{url}", target_url)
+    if "{host_dashed}" in base:
+        # The proxy origin is the template with the rewriting label removed.
+        parsed = urlparse(base.replace("{host_dashed}", ""))
+        if not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc.lstrip('.')}"
+    parsed = urlparse(base)
+    if parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
+
+
+def _make_ezproxy_url(target_url: str, config: dict[str, Any]) -> str:
+    """Convert a target URL to an EZProxy-proxied URL.
+
+    ``{url}`` templates proxy by prefix substitution; ``{host_dashed}``
+    templates proxy by hostname rewriting — the publisher host becomes a
+    dash-separated subdomain of the proxy host, which is the only shape
+    hostname-rewriting deployments (HKUST et al.) accept (#62).
+    """
+    base = _get_ezproxy_base(config)
+    if not base:
+        return ""
+    if "{url}" in base:
+        return base.replace("{url}", target_url)
+    if "{host_dashed}" in base:
+        parsed = urlparse(target_url)
+        host = parsed.hostname or ""
+        if not host:
+            return ""
+        # Replace on the template's own origin (label still in place) — the
+        # stripped origin from _ezproxy_origin no longer carries the label.
+        parsed_base = urlparse(base)
+        if not parsed_base.netloc:
+            return ""
+        origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+        rest = parsed.path or "/"
+        if parsed.query:
+            rest += f"?{parsed.query}"
+        return origin.replace("{host_dashed}", host.replace(".", "-")) + rest
+    return ""
+
+
+def _looks_like_login_url(url: str) -> bool:
+    """True when the URL path itself is a login challenge.
+
+    Only the path/query count: hostname-rewritten proxy URLs keep
+    ``ezproxy``/``libproxy`` in the host for EVERY proxied page, so the old
+    host-token check read a fully proxied (authenticated) page as
+    "login required" (#62).
+    """
+    parsed = urlparse(url)
+    path_q = f"{parsed.path}?{parsed.query}".lower()
+    return "/login" in path_q or "wayf" in path_q or "shibboleth" in path_q
 
 
 def _validate_ezproxy_session(config: dict[str, Any]) -> bool:
@@ -51,19 +122,38 @@ def _validate_ezproxy_session(config: dict[str, Any]) -> bool:
     if not cookies:
         return False
 
+    # The session marker lives on the proxy's own domain. A jar with no
+    # proxy-domain cookie was captured off a raw publisher redirect and
+    # cannot authenticate anything — don't probe with it (#62).
+    if not any(_is_proxy_domain(c.get("domain", "")) for c in cookies):
+        return False
+
     sess = requests.Session()
     sess.trust_env = False
     for c in cookies:
         sess.cookies.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
 
-    # Test with a known URL
-    test_url = _make_ezproxy_url("https://www.sciencedirect.com", config)
-    if not test_url:
+    # Probe the proxy's own /login endpoint: with a live session EZproxy
+    # redirects away (menu / start page), while an expired session keeps the
+    # URL on /login or bounces to the SSO challenge. This works for both
+    # prefix-style and hostname-rewriting deployments — probing a {url}
+    # prefix template on a rewriting deployment only ever saw the raw
+    # publisher and misreported valid sessions as expired (#62).
+    origin = _ezproxy_origin(config)
+    if not origin:
         return False
     try:
-        resp = sess.get(test_url, timeout=15, allow_redirects=True)
-        # If redirected to login, session is invalid
-        if "login" in resp.url.lower() or "libproxy" in resp.url.lower():
+        resp = sess.get(f"{origin}/login", timeout=15, allow_redirects=True)
+        final = urlparse(resp.url)
+        final_host = (final.hostname or "").lower()
+        if "/login" in final.path.lower():
+            return False
+        if not _is_proxy_domain(final_host) and any(
+            x in final_host for x in ("idp.", "sso.", "shibboleth", "auth.")
+        ):
+            return False
+        text = resp.text[:4000].lower()
+        if "ezproxy login" in text or "shibboleth authentication request" in text:
             return False
         return resp.status_code == 200
     except Exception:
@@ -164,9 +254,9 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
         page.goto(ezproxy_url, wait_until="domcontentloaded", timeout=30000)
         time.sleep(8)
 
-        # Check if redirected to login
-        url = page.url
-        if "libproxy" in url.lower() or "login" in url.lower():
+        # Check if redirected to a login challenge (path-based: proxied hosts
+        # keep ezproxy/libproxy in every URL — see _looks_like_login_url)
+        if _looks_like_login_url(page.url):
             log.info("   [EZProxy] Login required. Please log in...")
             max_wait = 180
             elapsed = 0
@@ -177,7 +267,7 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
                     url = page.url
                 except Exception:
                     return None
-                if "libproxy" not in url.lower() and "login" not in url.lower():
+                if not _looks_like_login_url(url):
                     break
             else:
                 log.info("   [EZProxy] Login timed out.")

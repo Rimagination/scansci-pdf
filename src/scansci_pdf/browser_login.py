@@ -7,6 +7,7 @@ import time
 import atexit
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     from .browser_backend import launch
@@ -302,21 +303,27 @@ def open_login_browser(
                         pass
                 return (False, None, None, None) if keep_alive else False
 
-            if detect_login and detect_login(context, page):
-                cookies = context.cookies()
-                _save_cookies_json(cookies, cookie_file)
-                netscape_path = cookie_file.with_suffix(".txt")
-                _save_cookies_netscape(cookies, netscape_path)
-                log.info(f"   [browser] Login successful! Saved {len(cookies)} cookies.")
-                print(f"  登录成功！Cookie 已保存至 {cookie_file}")
-                if auto_import:
-                    _import_to_browser(netscape_path, config)
-                if remote:
-                    remote.stop()
-                if keep_alive:
-                    return True, context, page
-                browser.close()
-                return True
+            # A custom detector is authoritative: when it says "not yet", the
+            # generic URL-shape fallback below must NOT confirm the login —
+            # it used to bless an unauthenticated redirect to the publisher
+            # (cookie count > 3) as success for CARSI/EZProxy (#29, #62).
+            if detect_login is not None:
+                if detect_login(context, page):
+                    cookies = context.cookies()
+                    _save_cookies_json(cookies, cookie_file)
+                    netscape_path = cookie_file.with_suffix(".txt")
+                    _save_cookies_netscape(cookies, netscape_path)
+                    log.info(f"   [browser] Login successful! Saved {len(cookies)} cookies.")
+                    print(f"  登录成功！Cookie 已保存至 {cookie_file}")
+                    if auto_import:
+                        _import_to_browser(netscape_path, config)
+                    if remote:
+                        remote.stop()
+                    if keep_alive:
+                        return True, context, page
+                    browser.close()
+                    return True
+                continue
 
             url_lower = current_url.lower()
             if "login" not in url_lower and "cas" not in url_lower and "sso" not in url_lower:
@@ -370,7 +377,7 @@ def webvpn_login(config: dict[str, Any]) -> bool:
 
 
 def carsi_login(publisher: str, config: dict[str, Any], *, login_url: str, domains: list[str]) -> bool:
-    """Login to CARSI institutional access via stealth browser."""
+    """Login to CARSI federated authentication via stealth browser."""
     from .config import DATA_DIR
     cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache"))) / "carsi_cookies"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -381,7 +388,20 @@ def carsi_login(publisher: str, config: dict[str, Any], *, login_url: str, domai
             current_url = page.url
             on_publisher = any(d in current_url for d in domains)
             on_login = any(x in current_url.lower() for x in ("login", "institutional", "wayf", "saml", "cas", "idp"))
-            return on_publisher and not on_login
+            if not on_publisher or on_login:
+                return False
+            # The URL gate alone false-positives: some publishers bounce the
+            # unauthenticated visitor to their homepage, which passes the URL
+            # check before the user has seen the IdP (#29). Require a
+            # federated-auth artifact — completing CARSI always leaves a
+            # Shibboleth/SAML session cookie or an IdP-domain (.edu.cn)
+            # cookie in the context.
+            for c in context.cookies():
+                name = (c.get("name") or "").lower()
+                dom = (c.get("domain") or "").lower()
+                if "shibsession" in name or "saml" in name or "idp" in dom or dom.endswith(".edu.cn"):
+                    return True
+            return False
         except Exception:
             return False
 
@@ -390,14 +410,16 @@ def carsi_login(publisher: str, config: dict[str, Any], *, login_url: str, domai
         config,
         cookie_file=cookie_file,
         detect_login=_detect,
-        max_wait=180,
+        max_wait=600,  # IdP + 2FA is human-paced; 180s wastes the run (#62)
     )
 
 
 def ezproxy_login(config: dict[str, Any]) -> bool:
     """Login to EZProxy via stealth browser."""
-    base = config.get("ezproxy_login_url", "")
-    if not base:
+    from .sources.ezproxy import _ezproxy_origin, _is_proxy_domain
+
+    origin = _ezproxy_origin(config)
+    if not origin:
         log.info("   [EZProxy] No ezproxy_login_url configured")
         return False
 
@@ -405,12 +427,27 @@ def ezproxy_login(config: dict[str, Any]) -> bool:
     cache_dir = Path(config.get("cache_dir", str(DATA_DIR / "cache")))
     cookie_file = cache_dir / "ezproxy_cookies.json"
 
-    login_url = base.replace("{url}", "https://www.sciencedirect.com")
+    # Land on the bare /login endpoint: it is the only URL that reliably
+    # challenges. /login?url=<target> skips straight to the raw publisher on
+    # hostname-rewriting deployments and never authenticates (#62).
+    login_url = f"{origin}/login"
 
     def _detect(context: Any, page: Any) -> bool:
         try:
-            current_url = page.url
-            return "libproxy" not in current_url.lower() and "login" not in current_url.lower()
+            parsed = urlparse(page.url)
+            path_q = f"{parsed.path}?{parsed.query}".lower()
+            if "/login" in path_q or "wayf" in path_q or "shibboleth" in path_q:
+                return False
+            # The authentication signal is the proxy's own session cookie —
+            # not the URL shape. "URL is not a login page" used to pass the
+            # moment an unauthenticated visitor was redirected to the raw
+            # publisher, saving 17 publisher cookies and zero proxy
+            # cookies as a "successful" login (#62).
+            for c in context.cookies():
+                if _is_proxy_domain(c.get("domain") or ""):
+                    return True
+            host = (parsed.hostname or "").lower()
+            return _is_proxy_domain(host)
         except Exception:
             return False
 
@@ -419,5 +456,5 @@ def ezproxy_login(config: dict[str, Any]) -> bool:
         config,
         cookie_file=cookie_file,
         detect_login=_detect,
-        max_wait=180,
+        max_wait=600,  # SSO + 2FA is human-paced; 180s wastes the run (#62)
     )

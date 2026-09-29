@@ -185,6 +185,16 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 3. scansci_pdf_login(kind="ezproxy")
 ```
 
+`ezproxy_login_url` 支持两种模板：
+
+- **前缀式**（大多数学校）：`https://ezproxy.lib.xxx.edu.cn/login?url={url}`，`{url}` 会被替换成目标文章地址；
+- **域名重写式**（如港科大 `lib.ezproxy.hkust.edu.hk`）：`https://{host_dashed}.lib.ezproxy.hkust.edu.hk`，
+  `{host_dashed}` 会被替换成出版商域名的连字符形式（`onlinelibrary.wiley.com` →
+  `onlinelibrary-wiley-com`）。这类部署不认 `login?url=` 前缀，必须用域名重写。
+
+登录检测以 ezproxy/libproxy 域名下的会话 cookie 为准，不会把「被重定向到出版商原站」
+误判为登录成功；会话校验也只探测代理自身的 `/login` 端点，对两类部署都有效。
+
 <details>
 <summary><strong>支持的出版商路由表</strong>（19 家，自动生成）</summary>
 
