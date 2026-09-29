@@ -86,6 +86,34 @@ def _head_probe(doi: str, key: str, proxies: dict | None, *, http_accept: bool =
         return 0, f"{NETWORK}({type(e).__name__})"
 
 
+# _probe_key_valid 的三态判定（独立于文章权益）
+KEY_VALID = "KEY_VALID"
+KEY_INVALID = "KEY_INVALID"
+
+
+def _probe_key_valid(key: str, proxies: dict | None) -> tuple[int, str]:
+    """key 本身有效性探针：打一个只需认证、不需订阅权益的元数据端点。
+
+    serial/title 对任何有效 key 都返回 200（与机构订了哪些刊无关）——
+    大刊样本 403 只说明"无该刊权益"，过去被当成"无效 key"（#56）。
+    401/403/406 才是 key 无效；429 说明认证已通过、只是限流。
+    """
+    try:
+        r = requests.get(
+            "https://api.elsevier.com/content/serial/title",
+            params={"count": 1},
+            headers={"Accept": "application/json", "X-ELS-APIKey": key, **UA_HEADERS},
+            timeout=(8, 12), proxies=proxies,
+        )
+        if r.status_code == 200 or r.status_code == 429:
+            return r.status_code, KEY_VALID
+        if r.status_code in (401, 403, 406):
+            return r.status_code, KEY_INVALID
+        return r.status_code, NETWORK
+    except Exception as e:
+        return 0, f"{NETWORK}({type(e).__name__})"
+
+
 def probe_dual_route(doi: str, key: str, config: dict[str, Any]) -> dict[str, Any]:
     """单篇双路由探测（代理 + 直连）。返回规范行 dict。"""
     proxy = config.get("network_proxy", "")
@@ -117,13 +145,21 @@ def _combine(p: str, d: str) -> tuple[str, str]:
 def check_key_profile(config: dict[str, Any]) -> tuple[list[dict[str, Any]], str, str]:
     """固定自检样本 → (规范行, key 画像判定, 建议)。
 
-    画像四选一：广覆盖机构key / key有效但无该订阅 / 无效key / 网络不可达
+    画像四选一：广覆盖机构key / key有效但无该订阅 / 无效key / 网络不可达。
+    key 有效性由 _probe_key_valid 独立判定，不再用"大刊样本拿不到"反推——
+    有效 key 对未订阅的样本刊同样 403，那是权益问题不是 key 问题（#56）。
     """
     key = (config.get("elsevier_api_key") or "").strip()
     proxy = config.get("network_proxy", "")
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     rows: list[dict[str, Any]] = []
+
+    # 0) key 有效性（只需认证、不需权益的元数据端点）
+    key_code, key_verdict = _probe_key_valid(key, proxies)
+    rows.append({"doi": "serial/title (key 认证)", "sample_type": "自检-key有效性",
+                 "proxy": f"{key_code} {key_verdict}", "direct": "-", "verdict": key_verdict,
+                 "route_advice": "—", "note": "预期 200/KEY_VALID"})
 
     # 1) 无 key 基线（证明端点连通且权限来自 key）
     base_code, base_verdict = _head_probe(PREMIUM_DOI, "", proxies)
@@ -150,15 +186,19 @@ def check_key_profile(config: dict[str, Any]) -> tuple[list[dict[str, Any]], str
     ent = any(v == ENTITLED for _, _, v in key_rows)
     base_ok = base_verdict == NO_KEY or base_code in (401, 403, 406)
     oa_ok = verdict_oa == ENTITLED or code_oa == 200
+    key_ok = key_verdict == KEY_VALID
+    # 网络异常时 verdict 是 "NETWORK(ExcName)"——只按前缀判
+    key_reachable = not key_verdict.startswith(NETWORK) or key_code != 0
 
-    if not base_ok and not oa_ok:
+    if not key_reachable and not base_ok and not oa_ok:
         profile, advice = "网络/端点不可达", "检查代理连通性后重试"
-    elif ent:
-        profile = "广覆盖机构 key"
-        advice = "Elsevier 车道可用：API 优先，批量走快车道"
-    elif oa_ok:
-        profile = "key 有效但无该刊订阅"
-        advice = "该 key 未绑定机构权益或机构未订阅——用机构身份重新注册 key，或依赖 OA/灰色通道"
+    elif key_ok:
+        if ent:
+            profile = "广覆盖机构 key"
+            advice = "Elsevier 车道可用：API 优先，批量走快车道"
+        else:
+            profile = "key 有效但无该刊订阅"
+            advice = "该 key 未绑定机构权益或机构未订阅该样本刊——用机构身份（校园网出口）重新注册 key，或依赖 OA/灰色通道"
     else:
         profile = "无效 key"
         advice = "重新运行 elsevier-setup --api-key 配置有效 key"
