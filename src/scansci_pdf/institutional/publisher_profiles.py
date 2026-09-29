@@ -802,6 +802,44 @@ SCIENCE_PROFILE = PublisherProfile(
     supplementary_url_markers=("supplementary", "supplement", "suppl_file"),
 )
 
+OPTICA_PROFILE = PublisherProfile(
+    name="Optica",
+    article_url_template="https://doi.org/{doi}",
+    # Optica's article id (ol-48-1-57) is not derivable from the DOI, but
+    # viewmedia.cfm accepts the DOI itself as uri= (#59).
+    pdf_url_templates=(
+        "https://opg.optica.org/viewmedia.cfm?r=1&uri={doi}",
+        "https://opg.optica.org/viewmedia.cfm?r=1&uri={doi_quoted}",
+    ),
+    success_url_markers=("opg.optica.org",),
+    auth_url_markers=(
+        "login.openathens.net",
+        "opg.optica.org/login",
+        "/saml/",
+        "/sso/",
+        "/login",
+    ),
+    auth_title_markers=("OpenAthens", "Institutional Login", "Sign In", "Login", "Identity"),
+    sso_text_markers=(
+        "institutional login",
+        "sign in via your institution",
+        "log in through your institution",
+        "access through your institution",
+        "access provided by",
+        "openathens",
+    ),
+    aliases=("optica", "osa", "opg", "optica-publishing-group", "optical-society-of-america"),
+    doi_prefixes=("10.1364",),
+    sample_dois=("10.1364/ol.47.013297",),
+    base_domains=("opg.optica.org", "optica.org", "osapublishing.org"),
+    pdf_url_markers=("viewmedia.cfm", "/pdf", "download", "pdf"),
+    institution_input_selectors=(
+        "input[type='search']",
+        "input[type='text']",
+        "input",
+    ),
+)
+
 PUBLISHER_PROFILES = {
     "acs": ACS_PROFILE,
     "aip": AIP_PROFILE,
@@ -816,6 +854,7 @@ PUBLISHER_PROFILES = {
     "ieee": IEEE_PROFILE,
     "iop": IOP_PROFILE,
     "mdpi": MDPI_PROFILE,
+    "optica": OPTICA_PROFILE,
     "oxfordacademic": OXFORD_ACADEMIC_PROFILE,
     "plos": PLOS_PROFILE,
     "pnas": PNAS_PROFILE,
