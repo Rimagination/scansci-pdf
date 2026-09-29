@@ -373,13 +373,24 @@ class CARSIClient:
                     # Step 6: Try direct PDF URL
                     pii_match = re.search(r"pii/([A-Z0-9]+)", page.url)
                     pii_value = pii_match.group(1) if pii_match else ""
-                    pdf_pattern = cfg.pdf_pattern.replace("{doi}", doi).replace("{pii}", pii_value)
+                    art_match = re.search(r"/document/(\d+)", page.url)
+                    article_id = art_match.group(1) if art_match else ""
+                    doi_suffix = doi.split("/", 1)[1] if "/" in doi else ""
+                    pdf_pattern = (
+                        cfg.pdf_pattern.replace("{doi}", doi)
+                        .replace("{pii}", pii_value)
+                        .replace("{article_id}", article_id)
+                        .replace("{doi_suffix}", doi_suffix)
+                    )
                     if pdf_pattern and not pdf_pattern.startswith("http"):
                         pdf_url = f"https://{cfg.domains[0]}{pdf_pattern}"
                     else:
                         pdf_url = pdf_pattern
 
-                    if pdf_url and "{pii}" not in pdf_url:
+                    # A leftover "{...}" means a placeholder we could not fill
+                    # (e.g. {article_id} on a non-IEEE page) — the URL would be
+                    # sent with literal braces and fail downstream (#54).
+                    if pdf_url and "{" not in pdf_url:
                         log.info(f"   [CARSI-Browser] Trying PDF: {pdf_url[:80]}")
                         captured_pdf.clear()
                         try:
