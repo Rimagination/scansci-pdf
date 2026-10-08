@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import base64
 import csv
 import inspect
 import json
@@ -2464,6 +2465,14 @@ class PublisherBatchDownloader:
                     return None, str(getattr(page, "url", "") or "")
                 attempted.clear()
                 continue
+            # Firefox/Camoufox can leave the native PDF.js shell visible while
+            # the document is already available (or while its loading task is
+            # idle).  Read that document in the viewer's own realm before
+            # falling back to a second HTTP request, which may lose the
+            # authenticated browser session or signed URL.
+            viewer_body = self._capture_loaded_pdf_viewer(page, pdf_url)
+            if viewer_body:
+                return viewer_body, pdf_url
             for candidate_url in self._page_state_pdf_urls(page):
                 if candidate_url in attempted:
                     continue
@@ -2471,11 +2480,88 @@ class PublisherBatchDownloader:
                 if not self._is_pdf_candidate_url(candidate_url) or self._is_supplementary_url(candidate_url):
                     continue
                 self._event(result, "pdf_state_candidate", candidate_url)
-                body, final_url = self._fetch_pdf_url_with_browser_state(candidate_url, page)
+                body, final_url, _block_reason = self._fetch_pdf_url_with_browser_state(candidate_url, page)
                 if body:
                     return body, final_url
             time.sleep(2)
         return None, ""
+
+    def _capture_loaded_pdf_viewer(self, page: Any, source_url: str) -> bytes | None:
+        """Read a PDF already loaded by Firefox's native PDF.js viewer.
+
+        The viewer runs in a privileged native realm.  Accessing its
+        ``PDFViewerApplication`` through the automation realm can produce
+        Xray wrappers, so the script uses ``wrappedJSObject`` and native
+        ``Blob``/``FileReader`` constructors.  An initialized but idle viewer
+        is started once per source URL; a marker on the native window prevents
+        repeated ``app.open`` calls while the document loads.
+        """
+        script = r"""
+        async (sourceUrl) => {
+            try {
+                const nativeWindow = window.wrappedJSObject || window;
+                const nativeLocation = String(nativeWindow.location?.href || "");
+                const nativeDocument = nativeWindow.document;
+                const documentUri = String(nativeDocument?.documentURI || "");
+                const isNativePdfViewer = nativeLocation.startsWith("resource://pdf.js/")
+                    || documentUri.startsWith("resource://pdf.js/");
+                if (!isNativePdfViewer) return null;
+
+                const app = nativeWindow.PDFViewerApplication;
+                if (!app) return null;
+                // In some Firefox builds location.href is the signed source
+                // URL; in others it is the resource:// viewer shell.  Prefer
+                // the former and otherwise use the URL supplied by Python.
+                const target = /^https?:/i.test(nativeLocation)
+                    ? nativeLocation : String(sourceUrl || "");
+                const attempts = nativeWindow.__scansciPdfViewerOpenAttempts
+                    || (nativeWindow.__scansciPdfViewerOpenAttempts = Object.create(null));
+
+                if (!app.pdfDocument && !app.pdfLoadingTask && app.initialized === true
+                    && /^https?:/i.test(target) && !attempts[target]) {
+                    attempts[target] = true;
+                    try {
+                        const args = nativeWindow.JSON.parse(
+                            nativeWindow.JSON.stringify({url: target})
+                        );
+                        app.open(args);
+                    } catch (_) {
+                        // Keep the marker: a failed initialization must not be
+                        // retried on every polling tick.
+                    }
+                    return null;
+                }
+
+                if (!app.pdfDocument || typeof app.pdfDocument.getData !== "function") {
+                    return null;
+                }
+                const data = await app.pdfDocument.getData();
+                const blob = new nativeWindow.Blob([data], {type: "application/pdf"});
+                return await new nativeWindow.Promise((resolve) => {
+                    const reader = new nativeWindow.FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                });
+            } catch (_) {
+                return null;
+            }
+        }
+        """
+        try:
+            encoded = page.evaluate(script, source_url)
+        except Exception:
+            return None
+        if not isinstance(encoded, str) or not encoded.startswith("data:"):
+            return None
+        try:
+            _, payload = encoded.split(",", 1)
+            body = base64.b64decode(payload, validate=True)
+        except (ValueError, TypeError):
+            return None
+        if len(body) > MIN_PDF_BYTES and body.startswith(b"%PDF-"):
+            return body
+        return None
 
     def _should_use_async_pdf_navigation(self, url: str) -> bool:
         return self.profile.name.lower() == "elsevier" and self._is_pdf_candidate_url(url)

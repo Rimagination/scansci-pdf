@@ -203,7 +203,7 @@ class CARSIClient:
                             if response.status >= 400:
                                 return
                             body = response.body()
-                            if len(body) > 5000 and body[:4] == b"%PDF-":
+                            if len(body) > 5000 and body.startswith(b"%PDF-"):
                                 captured_pdf.append(body)
                                 log.info(f"   [CARSI-Browser] PDF captured: {len(body)} bytes")
                         except Exception:

@@ -212,6 +212,7 @@ _MDPI_SLUGS = {
     "applbiosci": "appliedbiosciences",
     "app": "applsci", "educsci": "education", "tourhosp": "tourismhosp",
     "d": "diversity", "a": "algorithms", "dj": "dentistry",
+    "ma": "materials", "catal": "catalysts",
 }
 
 

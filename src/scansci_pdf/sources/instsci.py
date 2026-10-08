@@ -784,7 +784,7 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 if response.status >= 400:
                     return
                 body = response.body()
-                if len(body) > 5000 and body[:4] == b"%PDF-":
+                if len(body) > 5000 and body.startswith(b"%PDF-"):
                     captured_pdf.append(body)
                     log.info(f"   [WebVPN-Browser] PDF captured: {len(body)} bytes from {url[:60]}")
             except Exception:
