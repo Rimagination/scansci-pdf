@@ -1850,19 +1850,30 @@ def _browser_download(
             from urllib.parse import urlparse as _urlparse
 
             parsed = _urlparse(pdf_url)
-            fetch_paths = [parsed.path]
+            # Keep the original host, query string, and any signed parameters.
+            # Some publishers redirect to a different CDN host and require the
+            # query signature for the request to succeed.
+            absolute_url = parsed._replace(fragment="").geturl()
+            fetch_paths = [absolute_url]
             # Also try pdfdirect variant
             if "/doi/pdf/" in parsed.path:
-                fetch_paths.append(parsed.path.replace("/doi/pdf/", "/doi/pdfdirect/"))
+                fetch_paths.append(parsed._replace(
+                    path=parsed.path.replace("/doi/pdf/", "/doi/pdfdirect/", 1),
+                    fragment="",
+                ).geturl())
             elif "/doi/epdf/" in parsed.path:
-                fetch_paths.append(parsed.path.replace("/doi/epdf/", "/doi/pdfdirect/"))
+                fetch_paths.append(parsed._replace(
+                    path=parsed.path.replace("/doi/epdf/", "/doi/pdfdirect/", 1),
+                    fragment="",
+                ).geturl())
 
             for fetch_path in fetch_paths:
                 log.info(f"   [{publisher}] trying in-browser fetch {fetch_path[:60]}")
+                fetch_arg = json.dumps(fetch_path)
                 pdf_b64 = evaluate_js(tab_id, f"""
                     (async () => {{
                         try {{
-                            const resp = await fetch('{fetch_path}', {{
+                            const resp = await fetch({fetch_arg}, {{
                                 credentials: 'include',
                                 headers: {{'Accept': 'application/pdf,*/*'}}
                             }});
@@ -1897,10 +1908,11 @@ def _browser_download(
                     log.info(f"   [{publisher}] PDF fetch returned 403 — trying institutional login...")
                     if _try_institutional_login(tab_id, config, publisher):
                         # Retry fetch after login
+                        retry_fetch_arg = json.dumps(fetch_path)
                         pdf_b64_retry = evaluate_js(tab_id, f"""
                             (async () => {{
                                 try {{
-                                    const resp = await fetch('{fetch_path}', {{
+                                    const resp = await fetch({retry_fetch_arg}, {{
                                         credentials: 'include',
                                         headers: {{'Accept': 'application/pdf,*/*'}}
                                     }});
