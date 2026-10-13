@@ -110,6 +110,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "browser_auto_upgrade": True,
     "is_campus_network": False,
     "tor_proxy": os.environ.get("TOR_PROXY", ""),
+    "tor_binary_path": "",  # Explicit tor binary; empty falls back to the embedded install and then PATH. Pinning it stops lookup order from deciding which binary runs
     "tor_use_bridges": False,
     "use_tor_for_scihub": True,
     "google_scholar_limit": 5,

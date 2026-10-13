@@ -73,7 +73,20 @@ def _tor_dir(config: dict[str, Any]) -> Path:
 
 
 def _tor_binary(config: dict[str, Any]) -> Path | None:
-    """Find the tor binary path, downloading if needed."""
+    """Find the tor binary: explicit config, then the embedded install, then PATH.
+
+    The PATH fallback stays -- people do install Tor themselves -- but it is now
+    the last resort and says so, because PATH lookup order silently deciding
+    which binary gets executed is not a decision worth leaving implicit (#71).
+    """
+    configured = str(config.get("tor_binary_path") or "").strip()
+    if configured:
+        pinned = Path(configured).expanduser()
+        if pinned.is_file():
+            return pinned
+        log.warning("tor_binary_path is set but is not a file: %s", pinned)
+        return None
+
     tor_dir = _tor_dir(config)
 
     # Check for existing binary
@@ -85,12 +98,24 @@ def _tor_binary(config: dict[str, Any]) -> Path | None:
     if tor_exe.exists():
         return tor_exe
 
-    # Check system PATH
     system_tor = shutil.which("tor")
     if system_tor:
+        log.info(
+            "Using tor found on PATH (%s); set tor_binary_path to pin which binary runs",
+            system_tor,
+        )
         return Path(system_tor)
 
     return None
+
+
+def tor_installed(config: dict[str, Any]) -> bool:
+    """Whether a tor binary is already available (pinned, embedded, or on PATH).
+
+    Starting Tor installs on demand, so this is what tells a caller whether that
+    would reach the network for the bundle (#71).
+    """
+    return _tor_binary(config) is not None
 
 
 def _download_url() -> tuple[str, str]:

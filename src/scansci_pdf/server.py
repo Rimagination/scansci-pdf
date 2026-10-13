@@ -752,13 +752,45 @@ def scansci_pdf_config_get() -> str:
     return json.dumps(get_config_safe(), ensure_ascii=False, indent=2)
 
 
-def _config_set_impl(key: str, value: str) -> str:
+# Config keys that decide where this machine's traffic is sent or which binary
+# gets executed. An agent changing one of these is a different proposition from a
+# human typing the CLI equivalent, so the MCP layer asks for confirmation and the
+# CLI does not (#71).
+TRUST_BOUNDARY_CONFIG_KEYS = frozenset({
+    "network_proxy",
+    "proxy_pool",
+    "browser_static_proxy",
+    "tor_proxy",
+    "browser_executable",
+    "tor_binary_path",
+    "flaresolverr_url",
+    "camofox_url",
+    "vpnsci_base_url",
+    "instsci_base_url",
+    "ezproxy_login_url",
+})
+
+_CONFIRMATION_REQUIRED = (
+    "this key redirects traffic or changes which binary runs; "
+    "call again with confirmed=true if that is what you intend"
+)
+
+
+def _config_set_impl(key: str, value: str, confirmed: bool = False) -> str:
     """Update a scansci-pdf configuration setting.
 
     Args:
-        key: Config key (e.g. "email", "scihub_enabled", "vpnsci_school", "vpnsci_enabled", "network_proxy", "batch_workers")
+        key: Config key (e.g. "email", "scihub_enabled", "vpnsci_school", "network_proxy", "batch_workers")
         value: New value (booleans as "true"/"false", numbers as strings)
+        confirmed: Required for the keys that redirect traffic or pick an executable
     """
+    if key in TRUST_BOUNDARY_CONFIG_KEYS and not confirmed:
+        return json.dumps({
+            "success": False,
+            "key": key,
+            "requires_confirmation": True,
+            "error": _CONFIRMATION_REQUIRED,
+        }, ensure_ascii=False)
     try:
         update_config(key, value)
         return json.dumps({"success": True, "key": key, "value": mask_config_value(key, value)})
@@ -1519,23 +1551,53 @@ def scansci_pdf_diagnostics(check: str = "health", detailed: bool = False) -> st
 
 
 @mcp_app.tool()
-def scansci_pdf_config(key: str = "", value: str = "") -> str:
-    """Get the full masked config (no key) / one key's value (key only) / set key=value (key + value)."""
+def scansci_pdf_config(key: str = "", value: str = "", confirmed: bool = False) -> str:
+    """Get config (no key) / one key (key only) / set key=value. Keys that redirect traffic or choose an executable need confirmed=true."""
     if key and value:
-        return _config_set_impl(key=key, value=value)
+        return _config_set_impl(key=key, value=value, confirmed=confirmed)
     if key:
         cfg = json.loads(scansci_pdf_config_get())
         return json.dumps({"key": key, "value": cfg.get(key, "(unset)")}, ensure_ascii=False)
     return scansci_pdf_config_get()
 
 
+def _tor_is_installed() -> bool:
+    """Whether a tor binary is already available, so starting needs no download.
+
+    Anything unknown counts as "not installed": the cost of asking for
+    confirmation is one more tool call, the cost of guessing wrong is executing
+    a bundle nobody agreed to download (#71).
+    """
+    try:
+        from .embedded_tor import tor_installed
+        return tor_installed(load_config())
+    except Exception:
+        return False
+
+
 @mcp_app.tool()
-def scansci_pdf_tor(action: str = "start", use_bridges: bool = False) -> str:
-    """Embedded Tor SOCKS5 proxy: action=install|start|stop; use_bridges enables obfs4 when Tor itself is blocked."""
+def scansci_pdf_tor(action: str = "start", use_bridges: bool = False, confirmed: bool = False) -> str:
+    """Embedded Tor SOCKS5 proxy: action=install|start|stop; use_bridges enables obfs4. Install, and a start that must download the bundle, need confirmed=true."""
+    if action == "install" and not confirmed:
+        return json.dumps({
+            "success": False,
+            "action": action,
+            "requires_confirmation": True,
+            "error": "installing downloads and executes a third-party bundle; call again with confirmed=true if that is intended",
+        }, ensure_ascii=False)
     if action == "install":
         return scansci_pdf_tor_install()
     if action == "stop":
         return scansci_pdf_tor_stop()
+    if not confirmed and not _tor_is_installed():
+        # start installs on demand, so gating only action="install" would leave
+        # the same download reachable through this path (#71).
+        return json.dumps({
+            "success": False,
+            "action": action,
+            "requires_confirmation": True,
+            "error": "no tor binary is installed, so starting would download and execute one; call again with confirmed=true if that is intended",
+        }, ensure_ascii=False)
     return scansci_pdf_tor_start(use_bridges=use_bridges)
 
 
