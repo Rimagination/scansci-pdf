@@ -933,7 +933,7 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 download = download_info.value
                 tmp = download.path()
                 pdf_bytes = tmp.read_bytes() if tmp else None
-                if pdf_bytes and pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 5000:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(pdf_bytes)
                     if is_pdf_file(output_path):
@@ -969,7 +969,7 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 download = download_info.value
                 tmp = download.path()
                 pdf_bytes = tmp.read_bytes() if tmp else None
-                if pdf_bytes and pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 5000:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(pdf_bytes)
                     if is_pdf_file(output_path):
