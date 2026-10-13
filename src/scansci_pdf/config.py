@@ -64,6 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "elsevier_api_key": "",
     "springer_api_key": "",  # Springer Nature Full Text API (TDM) — entitlement follows the institution (ORCID-affiliated key, needs a Springer subscription with TDM rights)
     "elsevier_insttoken": "",
+    "institutional_allow_self_signed": False,  # Campus connectors (EasyConnect/aTrust, and some WebVPN gateways) commonly serve self-signed certificates; this is the one place that justifies skipping TLS verification, and it is opt-in
     "connect_timeout": 15,
     "read_timeout": 30,
     "request_delay_min": 2.0,

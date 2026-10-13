@@ -6,6 +6,8 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from ...network import allow_self_signed
+
 logger = logging.getLogger(__name__)
 
 ELSEVIER_API = "https://api.elsevier.com/content"
@@ -46,7 +48,20 @@ def fetch_pdf(doi: str, api_key: str, inst_token: str = "", config: dict | None 
         session.trust_env = False
         session.proxies = _resolve_proxies(config) or {}
         resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
-    except requests.exceptions.SSLError:
+    except requests.exceptions.SSLError as exc:
+        # Self-signed campus connectors are the one legitimate cause, and they
+        # are now an explicit opt-in: retrying unverified by default turned a
+        # certificate error into a silent success (#70).
+        if not allow_self_signed(config):
+            logger.warning(
+                "Elsevier API PDF: TLS verification failed, no unverified retry "
+                "(set institutional_allow_self_signed for a self-signed campus connector): %s",
+                exc,
+            )
+            return None
+        logger.warning(
+            "Elsevier API PDF: retrying without TLS verification (institutional_allow_self_signed is on)"
+        )
         try:
             resp = session.get(url, headers=headers, timeout=30, allow_redirects=True, verify=False)
         except requests.RequestException as e:
@@ -109,7 +124,18 @@ def fetch_fulltext(doi: str, api_key: str, inst_token: str = "", config: dict | 
         session.trust_env = False
         session.proxies = _resolve_proxies(config) or {}
         resp = session.get(url, headers=headers, timeout=30, allow_redirects=True)
-    except requests.exceptions.SSLError:
+    except requests.exceptions.SSLError as exc:
+        # Same opt-in as the PDF fetch above (#70).
+        if not allow_self_signed(config):
+            logger.warning(
+                "Elsevier API: TLS verification failed, no unverified retry "
+                "(set institutional_allow_self_signed for a self-signed campus connector): %s",
+                exc,
+            )
+            return None
+        logger.warning(
+            "Elsevier API: retrying without TLS verification (institutional_allow_self_signed is on)"
+        )
         try:
             resp = session.get(url, headers=headers, timeout=30, allow_redirects=True, verify=False)
         except requests.RequestException as e:

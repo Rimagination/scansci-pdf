@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import requests
 from Crypto.Cipher import AES
 
+from .network import allow_self_signed
 from .session_store import CookieStore
 
 try:
@@ -143,9 +144,17 @@ class WebVPNAuth:
                     "Chrome/120.0.0.0 Safari/537.36"
                 )
             })
-            if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
-               os.environ.get("http_proxy") or os.environ.get("https_proxy"):
+            # Opt-in, not a side effect of a proxy being configured: this session
+            # routes through config["network_proxy"], so an ambient
+            # HTTP(S)_PROXY has nothing to do with it, yet it used to disable
+            # verification for everyone whose machine exports those variables
+            # (#70).
+            if allow_self_signed(self.config):
                 self._session.verify = False
+                logger.warning(
+                    "TLS verification disabled for the campus connector "
+                    "(institutional_allow_self_signed is on)"
+                )
             proxy = self.config.get("network_proxy", "")
             if proxy:
                 self._session.proxies = {

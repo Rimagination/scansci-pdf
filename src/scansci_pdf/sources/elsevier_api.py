@@ -371,7 +371,23 @@ def _api_request(
             timeout=30,
             allow_redirects=True,
         )
-    except requests.exceptions.SSLError:
+    except requests.exceptions.SSLError as exc:
+        # A campus proxy that terminates TLS presents its own certificate, so a
+        # retry without verification is the one legitimate case -- but it has to
+        # be asked for. Retrying unverified by default turned a certificate error
+        # into a silent success (#70).
+        from ..config import load_config
+        from ..network import allow_self_signed as _allow_self_signed
+        if not _allow_self_signed(load_config()):
+            logger.warning(
+                "Elsevier API: TLS verification failed and no retry was made "
+                "(set institutional_allow_self_signed for a self-signed campus connector): %s",
+                exc,
+            )
+            return None
+        logger.warning(
+            "Elsevier API: retrying without TLS verification (institutional_allow_self_signed is on)"
+        )
         try:
             session = requests.Session()
             session.trust_env = False

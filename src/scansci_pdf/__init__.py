@@ -7,16 +7,35 @@ import sys as _sys
 # ZCode's traffic proxy sets HTTP_PROXY/HTTPS_PROXY to 127.0.0.1:64844 and
 # SSL_CERT_FILE to its own root CA. requests' trust_env=True routes all HTTPS
 # through the proxy tunnel, but the proxy's SSL context fails to verify real
-# server certs. We disable proxy usage project-wide so HTTPS goes direct.
+# server certs. We disable proxy usage so HTTPS goes direct.
 
-# 1. Block proxy usage (must run unconditionally, before any other import)
-_os.environ["NO_PROXY"] = "*"
-_os.environ["no_proxy"] = "*"
 
-def _fix_ssl_cert_file() -> None:
-    _cert_file = _os.environ.get("SSL_CERT_FILE", "")
-    if not _cert_file or "root-ca-cert" not in _cert_file:
+def _in_ide_proxy_environment() -> bool:
+    """Whether the ZCode traffic proxy is actually in play.
+
+    That is the condition the workarounds below were written for, so it is also
+    the condition that should gate them.
+    """
+    return "root-ca-cert" in _os.environ.get("SSL_CERT_FILE", "")
+
+
+def _apply_ide_proxy_workarounds() -> None:
+    """Send this package's traffic direct and trust the IDE's proxy CA.
+
+    Both steps used to run on every import, including on machines that merely
+    export HTTP(S)_PROXY for unrelated reasons. An MCP server commonly shares
+    its process with other tooling, so `NO_PROXY=*` there silently disabled
+    proxy routing for every other library in that process — and the only signal
+    was a value nobody reads (#70). Runs before the re-exports below.
+    """
+    if not _in_ide_proxy_environment():
         return
+
+    # 1. Block proxy usage for this package's own requests.
+    _os.environ["NO_PROXY"] = "*"
+    _os.environ["no_proxy"] = "*"
+
+    _cert_file = _os.environ.get("SSL_CERT_FILE", "")
     _merged = _os.path.join(_os.path.dirname(_cert_file), "..", "..", "ca-bundle-merged.pem")
     _merged = _os.path.normpath(_merged)
     if not _os.path.exists(_merged):
@@ -43,7 +62,8 @@ def _fix_ssl_cert_file() -> None:
         self.load_verify_locations(_merged)
     _ssl.SSLContext.load_default_certs = _patched_load_default_certs
 
-_fix_ssl_cert_file()
+
+_apply_ide_proxy_workarounds()
 
 __version__ = "1.18.1"
 

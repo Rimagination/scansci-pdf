@@ -2838,7 +2838,7 @@ def _get_elsevier_pii(doi: str) -> str | None:
         from .network import USER_AGENT
         resp = requests.get(
             f"https://api.crossref.org/works/{doi}",
-            timeout=10, verify=False,
+            timeout=10,
             headers={"User-Agent": USER_AGENT},
         )
         if resp.status_code != 200:

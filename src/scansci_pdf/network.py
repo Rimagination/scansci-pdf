@@ -91,6 +91,18 @@ def proxy_dict(proxy: str | None) -> dict[str, str] | None:
     return {"http": proxy, "https": proxy}
 
 
+def allow_self_signed(config: dict[str, Any] | None) -> bool:
+    """Whether TLS verification may be skipped for campus connectors.
+
+    Self-signed certificates are a real property of campus connectors
+    (EasyConnect/aTrust, some WebVPN gateways), so the ability has to exist —
+    but as an explicit, default-off choice. Deriving it from "a proxy
+    environment variable is set" turned certificate validation off for every
+    request on the shared retry path, off-machine proxies and all (#70).
+    """
+    return bool((config or {}).get("institutional_allow_self_signed", False))
+
+
 def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False) -> str | None:
     if use_tor:
         from .tor import ensure_tor
