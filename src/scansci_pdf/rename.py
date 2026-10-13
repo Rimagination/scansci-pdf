@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -109,9 +110,24 @@ def rename_pdf(
 
     # Avoid overwriting existing files
     if target.exists() and target != file_path:
-        # Same content? Delete new file, reuse existing
+        # Reuse the existing file only when the bytes match. Size alone is not
+        # identity: two different papers from the same journal template can be
+        # within 1 KB of each other, and the freshly downloaded file used to be
+        # deleted on that basis, leaving the wrong paper in place with no sign
+        # that anything happened (#70). Equal sizes are the cheap filter before
+        # hashing.
         try:
-            if abs(target.stat().st_size - file_path.stat().st_size) < 1024:
+            identical = False
+            if target.stat().st_size == file_path.stat().st_size:
+                # Both handles must be closed before the unlink below: Windows
+                # refuses to delete a file that is still open, which would send
+                # this down the rename branch instead of reusing the file.
+                with target.open("rb") as existing, file_path.open("rb") as fresh:
+                    identical = (
+                        hashlib.file_digest(existing, "sha256").digest()
+                        == hashlib.file_digest(fresh, "sha256").digest()
+                    )
+            if identical:
                 file_path.unlink(missing_ok=True)
                 return target
         except OSError:

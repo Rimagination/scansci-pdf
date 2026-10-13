@@ -237,6 +237,12 @@ SENSITIVE_KEYS = [
     "elsevier_insttoken",
 ]
 
+# The list above is for names that do not advertise themselves. Everything else
+# is decided by name, because an exact-match list silently leaks every key that
+# is added later: springer_api_key, openalex_api_key, cookie_path and
+# carsi_cookie_dir all reached MCP clients in cleartext that way (#70).
+_SECRET_NAME_RE = re.compile(r"key|token|secret|password|cookie|credential", re.I)
+
 _PROXY_URL_CREDS_RE = re.compile(r"(//[^/@\s]+:)[^@\s]+@")
 
 
@@ -248,7 +254,7 @@ def mask_config_value(key: str, value: Any) -> Any:
     """
     if value is None:
         return value
-    if key in SENSITIVE_KEYS:
+    if key in SENSITIVE_KEYS or _SECRET_NAME_RE.search(key):
         return "***"
     if "proxy" in key.lower() and isinstance(value, str) and "@" in value:
         return _PROXY_URL_CREDS_RE.sub(r"\1***@", value)

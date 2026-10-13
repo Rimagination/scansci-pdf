@@ -42,3 +42,32 @@ def test_get_config_safe_masks_everything(monkeypatch):
     assert safe["network_proxy"] == "http://alice:***@proxy.corp:8080"
     assert safe["email"] == "me@example.com"
     assert safe["batch_workers"] == 8
+
+
+def test_credential_shaped_keys_added_later_are_masked():
+    """An exact-match list only masks what someone remembered to add: the
+    Springer and OpenAlex keys, cookie_path and carsi_cookie_dir all shipped to
+    MCP clients in cleartext that way (#70)."""
+    for key in (
+        "springer_api_key",
+        "openalex_api_key",
+        "cookie_path",
+        "carsi_cookie_dir",
+        "camofox_api_key",
+        "camofox_access_key",
+    ):
+        assert mask_config_value(key, "SENTINEL-VALUE") == "***", key
+
+
+def test_no_default_config_key_returns_a_credential_in_cleartext():
+    """Guards the whole surface rather than a hand-picked list, so adding a
+    credential-shaped key cannot leak again."""
+    import re
+
+    secret_name = re.compile(r"key|token|secret|password|cookie|credential", re.I)
+    leaked = [
+        key
+        for key in config_mod.DEFAULT_CONFIG
+        if secret_name.search(key) and mask_config_value(key, "SENTINEL-VALUE") != "***"
+    ]
+    assert not leaked, f"credential-shaped config keys returned in cleartext: {leaked}"
