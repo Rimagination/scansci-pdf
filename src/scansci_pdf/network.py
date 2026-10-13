@@ -49,7 +49,6 @@ def is_cloudflare_challenge(title: str) -> bool:
     lower = title.lower()
     return any(sig in lower for sig in CLOUDFLARE_CHALLENGE_SIGNALS)
 
-_session_pool: dict[str, requests.Session] = {}
 _thread_local = threading.local()
 
 
@@ -102,11 +101,16 @@ def thread_session(proxies: dict[str, str] | None = None) -> requests.Session:
 
 
 def _get_session(config: dict[str, Any]) -> requests.Session:
-    proxy = configured_proxy(config)
-    key = proxy or "__none__"
-    if key not in _session_pool:
-        _session_pool[key] = _new_pooled_session(proxy_dict(proxy))
-    return _session_pool[key]
+    """A pooled session for the configured proxy, owned by the calling thread.
+
+    Kept under its existing name because it is what the rest of the package
+    calls, but it no longer hands the *same* object to every caller. `fetch`
+    reaches it from the batch worker pools, so a module-level pool here meant one
+    `requests.Session` behind every worker -- the shared-session question from
+    #71 item 4. Delegating to `thread_session` fixes every caller at once,
+    including any that is not obviously concurrent today.
+    """
+    return thread_session(proxy_dict(configured_proxy(config)))
 
 
 def request_timeout(config: dict[str, Any]) -> tuple[int, int]:

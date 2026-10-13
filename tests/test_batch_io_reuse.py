@@ -152,3 +152,26 @@ def test_concurrent_updates_do_not_lose_attempts(monkeypatch, tmp_path):
         (tmp_path / "source_scores.json").read_text(encoding="utf-8")
     )["scihub"]
     assert entry["attempts"] == 80
+
+
+def test_get_session_is_per_thread_too():
+    """`fetch` reaches _get_session from the batch worker pools, so the name the
+    rest of the package calls must not be the one object shared by all of them
+    (#71 item 4)."""
+    from scansci_pdf.network import _get_session
+
+    config = {"network_proxy": ""}
+    assert _get_session(config) is _get_session(config), "still reused within a thread"
+
+    seen: dict[str, object] = {}
+
+    def grab(name: str) -> None:
+        seen[name] = _get_session(config)
+
+    threads = [threading.Thread(target=grab, args=(name,)) for name in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert seen["a"] is not seen["b"]
