@@ -1004,6 +1004,7 @@ _IDP_MAP: dict[str, str] = {
     "北京师范大学": "Beijing Normal", "南开大学": "Nankai",
     "四川大学": "Sichuan", "天津大学": "Tianjin",
     "中国人民大学": "Renmin", "北京航空航天大学": "Beihang",
+    "北京中医药大学": "Beijing University of Chinese Medicine",
     "山东大学": "Shandong", "吉林大学": "Jilin",
 }
 
