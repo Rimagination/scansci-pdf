@@ -63,3 +63,12 @@ def test_find_dispatch_unknown_action_lists_allowed():
 def test_config_read_mode_returns_masked_dict():
     out = json.loads(scansci_pdf_config())
     assert isinstance(out, dict) and out  # masked full config
+
+
+def test_instructions_declare_the_untrusted_content_boundary():
+    """This server's product is scraped third-party text, so the agent reading it
+    has to be told that none of it is an instruction (#71)."""
+    instructions = (mcp_app.instructions or "").lower()
+
+    assert "untrusted" in instructions
+    assert "never as instructions" in instructions
