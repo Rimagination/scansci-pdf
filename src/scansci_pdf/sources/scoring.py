@@ -9,6 +9,7 @@ Tracks per-source success rate and latency. Uses EMA so:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,14 @@ _ALPHA = 0.1
 # Initial score for unknown sources (neutral)
 _DEFAULT_SCORE = 0.5
 
+# Batch downloads run on a ThreadPoolExecutor, so every reader and writer here
+# is a worker thread. The table is parsed once per process instead of once per
+# call -- sort_sources alone did two reads per source per DOI, ~26 per DOI -- and
+# the read-modify-write in record_result holds this lock, so two workers cannot
+# overwrite each other's EMA update (#72).
+_LOCK = threading.Lock()
+_cache: dict[str, dict[str, Any]] | None = None
+
 
 def _load_scores() -> dict[str, dict[str, Any]]:
     if _SCORES_FILE.exists():
@@ -34,6 +43,19 @@ def _load_scores() -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _scores_locked() -> dict[str, dict[str, Any]]:
+    """The live score table, read from disk on first use.
+
+    Callers must hold _LOCK: the returned dict is mutated in place before it is
+    written back, so sharing it without the lock would reintroduce the race this
+    exists to remove.
+    """
+    global _cache
+    if _cache is None:
+        _cache = _load_scores()
+    return _cache
+
+
 def _save_scores(scores: dict[str, dict[str, Any]]) -> None:
     _SCORES_FILE.parent.mkdir(parents=True, exist_ok=True)
     with _SCORES_FILE.open("w", encoding="utf-8") as f:
@@ -42,35 +64,36 @@ def _save_scores(scores: dict[str, dict[str, Any]]) -> None:
 
 def record_result(source: str, success: bool, latency_ms: float = 0, error_type: str = "") -> None:
     """Record a download attempt result for adaptive scoring."""
-    scores = _load_scores()
-    entry = scores.get(source, {
-        "success_ema": _DEFAULT_SCORE,
-        "latency_ema": 5000.0,
-        "attempts": 0,
-        "last_error": "",
-        "last_update": 0,
-    })
+    with _LOCK:
+        scores = _scores_locked()
+        entry = scores.get(source, {
+            "success_ema": _DEFAULT_SCORE,
+            "latency_ema": 5000.0,
+            "attempts": 0,
+            "last_error": "",
+            "last_update": 0,
+        })
 
-    # Update success EMA
-    success_val = 1.0 if success else 0.0
-    entry["success_ema"] = _ALPHA * success_val + (1 - _ALPHA) * entry["success_ema"]
+        # Update success EMA
+        success_val = 1.0 if success else 0.0
+        entry["success_ema"] = _ALPHA * success_val + (1 - _ALPHA) * entry["success_ema"]
 
-    # Update latency EMA (only on success)
-    if success and latency_ms > 0:
-        entry["latency_ema"] = _ALPHA * latency_ms + (1 - _ALPHA) * entry["latency_ema"]
+        # Update latency EMA (only on success)
+        if success and latency_ms > 0:
+            entry["latency_ema"] = _ALPHA * latency_ms + (1 - _ALPHA) * entry["latency_ema"]
 
-    entry["attempts"] = entry.get("attempts", 0) + 1
-    entry["last_error"] = error_type if not success else ""
-    entry["last_update"] = int(time.time())
+        entry["attempts"] = entry.get("attempts", 0) + 1
+        entry["last_error"] = error_type if not success else ""
+        entry["last_update"] = int(time.time())
 
-    scores[source] = entry
-    _save_scores(scores)
+        scores[source] = entry
+        _save_scores(scores)
 
 
 def get_score(source: str) -> float:
     """Get adaptive score for a source (0.0-1.0, higher = better)."""
-    scores = _load_scores()
-    entry = scores.get(source)
+    with _LOCK:
+        entry = _scores_locked().get(source)
     if not entry:
         return _DEFAULT_SCORE
     return entry.get("success_ema", _DEFAULT_SCORE)
@@ -78,8 +101,8 @@ def get_score(source: str) -> float:
 
 def get_latency(source: str) -> float:
     """Get EMA latency for a source in ms."""
-    scores = _load_scores()
-    entry = scores.get(source)
+    with _LOCK:
+        entry = _scores_locked().get(source)
     if not entry:
         return 5000.0
     return entry.get("latency_ema", 5000.0)

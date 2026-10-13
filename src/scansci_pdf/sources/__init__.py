@@ -838,6 +838,7 @@ def download(
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
+    _validated: bool = False,
     strategy: str | None = None,
 ) -> dict[str, Any]:
     key = identifier.strip()
@@ -864,6 +865,7 @@ def download(
             bibtex=bibtex,
             rename=rename,
             _institutional=_institutional,
+            _validated=_validated,
             strategy=strategy,
         )
     finally:
@@ -881,6 +883,7 @@ def _download_impl(
     bibtex: bool = False,
     rename: bool = True,
     _institutional: bool = True,
+    _validated: bool = False,
     strategy: str | None = None,
 ) -> dict[str, Any]:
     race_failures: list[dict[str, str]] = []
@@ -914,8 +917,10 @@ def _download_impl(
     # Scan output dir for existing file with same rename pattern
     doi = normalize_doi(identifier) if not is_arxiv_identifier(identifier) else identifier
 
-    # Validate DOI before attempting download
-    if not is_arxiv_identifier(identifier):
+    # Validate DOI before attempting download. A batch has already validated
+    # every identifier before scheduling it, so it passes _validated=True instead
+    # of paying for a second HEAD per DOI (#72).
+    if not _validated and not is_arxiv_identifier(identifier):
         from ..identifiers import validate_doi
         valid, msg = validate_doi(doi)
         if not valid:
@@ -1592,12 +1597,14 @@ def batch_download(
     num_invalid = len(invalid_results)
 
     def _staggered_download(ident: str) -> dict[str, Any]:
+        # Everything reaching here was validated above, so the per-DOI check in
+        # _download_impl would be a second HEAD for the same identifier (#72).
         with delay_lock:
             elapsed = time.time() - last_download_time[0]
             if elapsed < delay_between:
                 time.sleep(delay_between - elapsed)
             last_download_time[0] = time.time()
-        return download(ident, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, _institutional=False)
+        return download(ident, output_dir, scihub_enabled=scihub_enabled, use_tor=use_tor, use_vpnsci=use_vpnsci, _institutional=False, _validated=True)
 
     results: list[dict[str, Any] | None] = [None] * total
     total_budget = float(config.get("batch_total_timeout", 600))

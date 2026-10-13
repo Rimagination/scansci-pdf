@@ -823,11 +823,14 @@ def _download_url(
     proxies: dict[str, str] | None,
 ) -> Path | None:
     """Stream a URL to disk, accepting only real PDFs (magic bytes, >=10KB)."""
-    import requests
+    from .network import thread_session
 
+    resp = None
     try:
-        s = requests.Session()
-        s.trust_env = False
+        # Session reuse, one per worker thread: a fresh session per PDF paid a
+        # TCP + TLS handshake for every file even when ten workers were pulling
+        # from the same publisher (#72).
+        s = thread_session(proxies)
         resp = s.get(url, headers=headers, proxies=proxies, timeout=30, stream=True, allow_redirects=True)
         if resp.status_code != 200:
             return None
@@ -845,6 +848,12 @@ def _download_url(
         return path
     except Exception:
         return None
+    finally:
+        # A streamed response that was not read to the end holds its connection;
+        # with a pooled session that would exhaust the pool instead of leaking
+        # one socket.
+        if resp is not None:
+            resp.close()
 
 
 def _safe_name(identifier: str) -> str:
