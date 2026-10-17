@@ -7,6 +7,7 @@ Supports obfs4 bridges for restricted networks.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import platform
@@ -16,9 +17,10 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .log import get_logger
@@ -41,16 +43,61 @@ TOR_DOWNLOAD_MIRRORS = [
 ]
 
 # Tor Browser version shipping the Expert Bundle. Bump when torproject.org
-# cuts a new stable release. Verified 2026-07-04 (15.0.17, tor 0.4.9.11).
-TOR_VERSION = "15.0.17"
+# cuts a new stable release -- together with TOR_HASHES, in the same change:
+# the pins are what make a download verifiable, not the version string.
+# 15.0.25 verified 2026-10-14 against the signed manifest at
+# https://dist.torproject.org/torbrowser/15.0.25/sha256sums-signed-build.txt
+# (fetched over HTTPS; the manifest's GPG signature was not verified locally).
+# 15.0.17 has since been dropped from the dist mirror root, leaving
+# archive.torproject.org as its only surviving mirror.
+TOR_VERSION = "15.0.25"
+
+# SHA-256 of each Expert Bundle archive for TOR_VERSION, keyed by the os-arch
+# slug used in the archive filename. A release upgrade must update these
+# source-controlled pins, never fetch new ones at runtime (#71 item 1).
+TOR_HASHES = {
+    "linux-x86_64": "19cf18726eecb362e0f21d27afa9ea9efe5da928bfdfbb1ceb5fe54519e87f4a",
+    "macos-aarch64": "a3febb6179152b0b4f56a0f5cc57bf5cc8ecef7db35e7c3e9d5a044c8158c26c",
+    "macos-x86_64": "e1ae4d4a734d28bb590839188511deb3cebc26fcbce9df66d01b2c452060fe95",
+    "windows-x86_64": "c1988c701de2f24f7d098d1d6d7f507b58f27740d097f29c246e0524d639b252",
+}
+
+# Name under which the verified archive is kept inside an installed bundle
+# directory, so the pins stay checkable against what is on disk.
+_BUNDLE_ARCHIVE = ".bundle.tar.gz"
+
+# Sanity ceiling for a download: pinned Expert Bundles are tens of MB, so
+# anything this size is a compromised mirror trying to fill the disk before
+# the digest check ever runs.
+_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+
+# Windows reserved device basenames (stem before the first extension dot);
+# writing such a member would create or hit a device instead of a real file.
+_RESERVED_BASENAMES = (
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+# So the pre-verification layout notice logs once per process, not per probe.
+_legacy_layout_warned = False
+
+
+class TorIntegrityError(RuntimeError):
+    """A Tor bundle failed pinned verification; nothing from it may be run."""
 
 
 def _download_url() -> tuple[str, str]:
     """Get the download URL path and filename for the Tor Expert Bundle.
 
-    Returns ``(url_path, filename)`` where ``url_path`` is relative to a
-    mirror root (e.g. ``"15.0.17"``) and ``filename`` is the archive name.
-    All Expert Bundle archives are .tar.gz on every platform since 0.4.7.x.
+    Returns ``(url_path, filename)`` where ``url_path`` is the relative path
+    under a mirror root (the Tor Browser version) and ``filename`` is the
+    archive name. All Expert Bundle archives are .tar.gz on every platform
+    (the legacy .zip was retired with 0.4.7.x).
+
+    Raises ValueError for platforms with no pinned bundle: this release ships
+    no linux-aarch64 Expert Bundle, and downloading an archive we cannot
+    verify is worse than failing with a clear message (#71 item 1).
     """
     system = platform.system()
     machine = platform.machine().lower()
@@ -60,8 +107,13 @@ def _download_url() -> tuple[str, str]:
         os_arch = "windows-x86_64"  # i686 build retired; x86_64 covers all supported Windows
     elif system == "Darwin":
         os_arch = "macos-aarch64" if machine in ("arm64", "aarch64") else "macos-x86_64"
+    elif machine in ("aarch64", "arm64"):
+        raise ValueError(
+            "No Tor Expert Bundle is published for linux-aarch64 in this release; "
+            "set tor_binary_path or put your own tor on PATH"
+        )
     else:
-        os_arch = "linux-aarch64" if machine in ("aarch64", "arm64") else "linux-x86_64"
+        os_arch = "linux-x86_64"
 
     filename = f"tor-expert-bundle-{os_arch}-{TOR_VERSION}.tar.gz"
     return TOR_VERSION, filename
@@ -72,12 +124,28 @@ def _tor_dir(config: dict[str, Any]) -> Path:
     return Path(config.get("cache_dir", str(DATA_DIR / "cache"))).parent / "tor"
 
 
+def _bundle_dir(config: dict[str, Any]) -> Path:
+    """The version-scoped directory a verified bundle is installed into."""
+    return _tor_dir(config) / f"bundle-{TOR_VERSION}"
+
+
+def _runtime_dir(config: dict[str, Any]) -> Path:
+    """Generated state (torrc) lives here, outside the verified bundle."""
+    return _tor_dir(config) / "runtime"
+
+
 def _tor_binary(config: dict[str, Any]) -> Path | None:
     """Find the tor binary: explicit config, then the embedded install, then PATH.
 
     The PATH fallback stays -- people do install Tor themselves -- but it is now
     the last resort and says so, because PATH lookup order silently deciding
     which binary gets executed is not a decision worth leaving implicit (#71).
+
+    The embedded install is trusted only after `_verify_bundle` re-checks it
+    against the pinned archive; a bundle that fails verification raises instead
+    of returning None, so a tampered cache can never fall through to PATH (#71
+    item 1). The pre-verification layout (``<tor>/tor/tor``) is ignored for
+    the same reason: those files were never verified.
     """
     configured = str(config.get("tor_binary_path") or "").strip()
     if configured:
@@ -88,15 +156,19 @@ def _tor_binary(config: dict[str, Any]) -> Path | None:
         return None
 
     tor_dir = _tor_dir(config)
+    legacy = tor_dir / "tor" / ("tor.exe" if platform.system() == "Windows" else "tor")
+    global _legacy_layout_warned
+    if legacy.exists() and not _legacy_layout_warned:
+        _legacy_layout_warned = True
+        log.info(
+            "Ignoring Tor at %s: installed by an older version and never verified; "
+            "a pinned bundle takes its place on the next install",
+            legacy,
+        )
 
-    # Check for existing binary
-    if platform.system() == "Windows":
-        tor_exe = tor_dir / "tor" / "tor.exe"
-    else:
-        tor_exe = tor_dir / "tor" / "tor"
-
-    if tor_exe.exists():
-        return tor_exe
+    bundle = _bundle_dir(config)
+    if bundle.exists():
+        return _verify_bundle(bundle)
 
     system_tor = shutil.which("tor")
     if system_tor:
@@ -118,78 +190,214 @@ def tor_installed(config: dict[str, Any]) -> bool:
     return _tor_binary(config) is not None
 
 
-def _download_url() -> tuple[str, str]:
-    """Get the download URL path and filename for the Tor Expert Bundle.
+def _bundle_digest(filename: str) -> str:
+    slug = filename.removeprefix("tor-expert-bundle-").removesuffix(f"-{TOR_VERSION}.tar.gz")
+    return TOR_HASHES[slug]
 
-    Returns ``(version_path, filename)`` where ``version_path`` is the
-    relative path under a mirror root (the Tor Browser version) and
-    ``filename`` is the archive name. All Expert Bundle archives are
-    .tar.gz on every platform (the legacy .zip was retired with 0.4.7.x).
+
+def _check_member_name(staging: Path, name: str) -> Path:
+    """Resolve one archive member name inside `staging`, or refuse it."""
+    member = PurePosixPath(name)
+    if member.is_absolute() or ".." in member.parts:
+        raise TorIntegrityError(f"Archive member escapes the install directory: {name}")
+    parts = [p for p in member.parts if p not in ("", ".")]
+    if not parts:
+        raise TorIntegrityError(f"Archive member has an empty name: {name!r}")
+    for part in parts:
+        if len(part) == 2 and part[1] == ":" and part[0].isalpha():
+            # "C:/x" resolves inside staging on POSIX hosts but replaces the
+            # drive on Windows; no legitimate archive member looks like this.
+            raise TorIntegrityError(f"Archive member looks like a Windows drive path: {name}")
+        stem = part.split(".", 1)[0].rstrip(" ").upper()
+        if stem in _RESERVED_BASENAMES:
+            raise TorIntegrityError(f"Archive member uses a reserved device name: {name}")
+    target = staging.joinpath(*parts)
+    if not target.resolve().is_relative_to(staging.resolve()):
+        raise TorIntegrityError(f"Archive member escapes the install directory: {name}")
+    return target
+
+
+def _extract_verified(archive_path: Path, staging: Path, expected_digest: str) -> None:
+    """Extract into `staging` from the archive, verifying it as it is read.
+
+    The archive is read into memory and hashed here, and extraction runs from
+    that same in-memory copy: the bytes that get extracted are exactly the
+    bytes that matched the pin, leaving no disk-resident gap between the
+    download's streaming digest and what tarfile opens (#71 item 1). Only
+    regular files are written; directories are implied by their parents, and
+    any other member type (symlink, device, hard link) is refused rather than
+    followed.
     """
-    system = platform.system()
-    machine = platform.machine().lower()
+    data = archive_path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        raise TorIntegrityError("Archive on disk does not match its pinned digest")
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise TorIntegrityError(f"Archive member is not a regular file: {member.name}")
+            target = _check_member_name(staging, member.name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(member) as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
 
-    if system == "Windows":
-        os_arch = "windows-x86_64"
-    elif system == "Darwin":
-        os_arch = "macos-aarch64" if machine in ("arm64", "aarch64") else "macos-x86_64"
-    else:
-        os_arch = "linux-aarch64" if machine in ("aarch64", "arm64") else "linux-x86_64"
 
-    filename = f"tor-expert-bundle-{os_arch}-{TOR_VERSION}.tar.gz"
-    return TOR_VERSION, filename
+def _verify_bundle(bundle: Path) -> Path:
+    """Re-verify an installed bundle against the pinned archive.
+
+    Checks the cached archive digest, every installed file (SHA-256) against
+    the archive member it came from, and that the directory holds nothing
+    else. Returns the tor executable; raises TorIntegrityError on any
+    mismatch so the caller never falls through to a different binary.
+    """
+    archive_path = bundle / _BUNDLE_ARCHIVE
+    if archive_path.is_symlink() or not archive_path.is_file():
+        raise TorIntegrityError(f"Verified bundle is missing its archive: {archive_path}")
+    try:
+        _, filename = _download_url()
+    except ValueError as e:
+        raise TorIntegrityError(str(e)) from e
+    digest = hashlib.sha256()
+    with archive_path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != _bundle_digest(filename):
+        raise TorIntegrityError("Cached Tor archive failed pinned verification")
+
+    expected = {_BUNDLE_ARCHIVE}
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        for member in archive:
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise TorIntegrityError(f"Archive member is not a regular file: {member.name}")
+            target = _check_member_name(bundle, member.name)
+            if target.is_symlink() or not target.is_file():
+                raise TorIntegrityError(f"Installed bundle file is missing or not regular: {member.name}")
+            with archive.extractfile(member) as original:
+                if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(original.read()).digest():
+                    raise TorIntegrityError(f"Installed file differs from the verified archive: {member.name}")
+            expected.add(str(target.relative_to(bundle)).replace("\\", "/"))
+
+    actual = {
+        str(path.relative_to(bundle)).replace("\\", "/")
+        for path in bundle.rglob("*")
+        if path.is_symlink() or not path.is_dir()
+    }
+    if actual != expected:
+        raise TorIntegrityError("Unexpected or missing file in the Tor bundle directory")
+
+    executable = bundle / "tor" / ("tor.exe" if platform.system() == "Windows" else "tor")
+    if not executable.is_file():
+        raise TorIntegrityError("Verified bundle lacks the Tor executable")
+    return executable
 
 
 def download_tor(config: dict[str, Any]) -> Path | None:
-    """Download and extract Tor Expert Bundle. Returns path to tor binary."""
+    """Download and install the pinned Tor Expert Bundle. Returns path to tor binary.
+
+    The archive digest must match TOR_HASHES before anything is extracted, and
+    extraction lands in a staging directory that is renamed into place only
+    after every member checks out -- a partial or tampered download never
+    becomes the binary we execute (#71 item 1).
+    """
+    try:
+        version_path, filename = _download_url()
+    except ValueError as e:
+        log.error(str(e))
+        return None
+
+    bundle = _bundle_dir(config)
+    if bundle.exists():
+        try:
+            return _verify_bundle(bundle)
+        except TorIntegrityError as e:
+            log.error("Existing Tor bundle failed verification: %s", e)
+            return None
+
     tor_dir = _tor_dir(config)
     tor_dir.mkdir(parents=True, exist_ok=True)
-
-    version_path, filename = _download_url()
-    # Try mirrors, using proxy if configured
-    import requests as req
-    proxies = {}
-    proxy = os.environ.get("SCANSCI_PDF_PROXY") or os.environ.get("HTTPS_PROXY") or config.get("network_proxy")
-    if proxy:
-        proxies = {"http": proxy, "https": proxy}
-    # Expert Bundle archives are .tar.gz on every platform now.
-    for mirror in TOR_DOWNLOAD_MIRRORS:
-        url = f"{mirror}/{version_path}/{filename}"
+    now = time.time()
+    for leftover in tor_dir.glob(f"bundle-{TOR_VERSION}.staging-*"):
+        # Stale only: a fresh staging directory may belong to a concurrent
+        # download in another process.
         try:
-            log.info(f"Downloading Tor from {url}")
-            resp = req.get(url, timeout=300, stream=True, proxies=proxies)
-            if resp.status_code != 200:
+            if now - leftover.stat().st_mtime > 3600:
+                shutil.rmtree(leftover, ignore_errors=True)
+        except OSError:
+            pass
+    staging = Path(tempfile.mkdtemp(dir=tor_dir, prefix=f"bundle-{TOR_VERSION}.staging-"))
+    try:
+        from .network import configured_proxy, thread_session
+
+        proxy = configured_proxy(config)
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        session = thread_session(proxies)
+
+        for mirror in TOR_DOWNLOAD_MIRRORS:
+            url = f"{mirror}/{version_path}/{filename}"
+            try:
+                log.info(f"Downloading Tor from {url}")
+                digest = hashlib.sha256()
+                archive_path = staging / _BUNDLE_ARCHIVE
+                with session.get(url, stream=True, timeout=(10, 300)) as resp:
+                    if resp.status_code != 200:
+                        log.warning(f"Mirror returned {resp.status_code}: {url}")
+                        continue
+                    total = int(resp.headers.get("content-length", 0))
+                    downloaded = 0
+                    with archive_path.open("wb") as fh:
+                        for chunk in resp.iter_content(64 * 1024):
+                            fh.write(chunk)
+                            digest.update(chunk)
+                            downloaded += len(chunk)
+                            if downloaded > _MAX_ARCHIVE_BYTES:
+                                raise TorIntegrityError(
+                                    "Tor archive exceeds any plausible pinned bundle size"
+                                )
+                            if total and downloaded % (1024 * 1024) < 65536:
+                                log.info(f"  Downloaded {downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB")
+
+                if digest.hexdigest() != _bundle_digest(filename):
+                    log.warning(f"Digest mismatch, discarding download from {url}")
+                    archive_path.unlink(missing_ok=True)
+                    continue
+
+                # Re-reads and re-hashes the file before extracting from the
+                # same in-memory copy, so the promoted bytes are the pinned
+                # bytes.
+                _extract_verified(archive_path, staging, _bundle_digest(filename))
+
+                try:
+                    bundle = staging.rename(_bundle_dir(config))
+                except OSError:
+                    # Another process won the install race; use its result.
+                    winner = _verify_bundle(_bundle_dir(config))
+                    log.info(f"Tor bundle already installed by another process: {winner}")
+                    return winner
+
+                executable = bundle / "tor" / ("tor.exe" if platform.system() == "Windows" else "tor")
+                if platform.system() != "Windows":
+                    executable.chmod(executable.stat().st_mode | stat.S_IEXEC)
+                log.info(f"Tor installed: {executable}")
+                return executable
+
+            except TorIntegrityError as e:
+                # A digest-matching archive that fails structural verification
+                # means the pin itself points at hostile bytes -- that is a
+                # release compromise, not a flaky mirror, and must not be
+                # retried elsewhere or parked in the failure backoff.
+                log.error(f"Pinned Tor archive from {url} failed structural verification: {e}")
+                return None
+            except Exception as e:
+                log.warning(f"Failed to download from {mirror}: {e}")
                 continue
 
-            total = int(resp.headers.get("content-length", 0))
-            data = io.BytesIO()
-            downloaded = 0
-            for chunk in resp.iter_content(8192):
-                data.write(chunk)
-                downloaded += len(chunk)
-                if total and downloaded % (1024 * 1024) < 8192:
-                    log.info(f"  Downloaded {downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB")
-
-            data.seek(0)
-            log.info(f"Extracting Tor to {tor_dir}")
-
-            with tarfile.open(fileobj=data, mode="r:gz") as tf:
-                tf.extractall(tor_dir)
-
-            # Find and set executable permission on non-Windows
-            binary = _tor_binary(config)
-            if binary and binary.exists():
-                if platform.system() != "Windows":
-                    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
-                log.info(f"Tor installed: {binary}")
-                return binary
-
-        except Exception as e:
-            log.warning(f"Failed to download from {mirror}: {e}")
-            continue
-
-    log.error("Failed to download Tor from all mirrors")
-    return None
+        log.error("Failed to download a verifiable Tor bundle from all mirrors")
+        return None
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _write_torrc(tor_dir: Path, socks_port: int, use_bridges: bool = False) -> Path:
@@ -210,6 +418,7 @@ def _write_torrc(tor_dir: Path, socks_port: int, use_bridges: bool = False) -> P
         for bridge in DEFAULT_OBFS4_BRIDGES:
             lines.append(f"Bridge {bridge}")
 
+    torrc_path.parent.mkdir(parents=True, exist_ok=True)
     torrc_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return torrc_path
 
@@ -261,8 +470,9 @@ class EmbeddedTor:
         except OSError:
             pass
 
-        tor_dir = self._binary.parent
-        torrc = _write_torrc(tor_dir.parent, self.socks_port, self.use_bridges)
+        # torrc is generated state; it lives outside the verified bundle so
+        # _verify_bundle's strict directory check keeps holding (#71 item 1).
+        torrc = _write_torrc(_runtime_dir(self.config), self.socks_port, self.use_bridges)
 
         cmd = [str(self._binary), "-f", str(torrc)]
         log.info(f"Starting Tor: {' '.join(cmd[:2])}")
@@ -386,7 +596,15 @@ def is_tor_installed(config: dict[str, Any]) -> bool:
 
 def install_tor(config: dict[str, Any]) -> dict[str, Any]:
     """Download and install Tor. Returns status dict."""
-    binary = _tor_binary(config)
+    try:
+        binary = _tor_binary(config)
+    except TorIntegrityError as e:
+        log.error("Existing Tor bundle failed verification: %s", e)
+        return {
+            "installed": False,
+            "error": f"Installed Tor bundle failed verification ({e}); "
+            f"remove {_bundle_dir(config)} and install again",
+        }
     if binary:
         return {"installed": True, "path": str(binary), "message": "Tor already installed"}
 
