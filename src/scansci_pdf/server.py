@@ -905,11 +905,12 @@ def scansci_pdf_paper_metadata(doi: str) -> str:
 
 
 @mcp_app.tool()
-def scansci_pdf_zotero_push(identifier: str) -> str:
+def scansci_pdf_zotero_push(identifier: str, zotero_key: str | None = None) -> str:
     """Push a downloaded paper to Zotero.
 
     Args:
         identifier: DOI or arXiv ID of a previously downloaded paper
+        zotero_key: retry a failed PDF upload against this existing item
     """
     from .identifiers import normalize_doi
     from .zotero import push_to_zotero
@@ -927,7 +928,7 @@ def scansci_pdf_zotero_push(identifier: str) -> str:
     from .citation import fetch_metadata
     metadata = fetch_metadata(doi, config)
 
-    result = push_to_zotero(doi, pdf_path, config, metadata)
+    result = push_to_zotero(doi, pdf_path, config, metadata, zotero_key=zotero_key)
     return json.dumps(result, ensure_ascii=False)
 
 

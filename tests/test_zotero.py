@@ -15,11 +15,11 @@ class FakeResponse:
 def test_push_to_zotero_posts_item_as_raw_json_array(monkeypatch):
     calls = []
 
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
         return FakeResponse(payload={"success": {"0": "ITEMKEY"}})
 
-    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("requests.request", fake_request)
 
     result = zotero.push_to_zotero(
         doi="10.1234/example",
@@ -31,10 +31,13 @@ def test_push_to_zotero_posts_item_as_raw_json_array(monkeypatch):
         },
     )
 
-    assert result == {"success": True, "zotero_key": "ITEMKEY"}
-    assert calls[0][0] == "https://api.zotero.org/users/123456/items"
-    assert isinstance(calls[0][1]["json"], list)
-    assert calls[0][1]["json"][0]["DOI"] == "10.1234/example"
+    assert result["success"] is True
+    assert result["zotero_key"] == "ITEMKEY"
+    assert result["attachment"]["requested"] is False
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "https://api.zotero.org/users/123456/items"
+    assert isinstance(calls[0][2]["json"], list)
+    assert calls[0][2]["json"][0]["DOI"] == "10.1234/example"
 
 
 def test_upload_attachment_posts_item_as_raw_json_array(monkeypatch, tmp_path):
@@ -42,13 +45,15 @@ def test_upload_attachment_posts_item_as_raw_json_array(monkeypatch, tmp_path):
     pdf_path = tmp_path / "paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
+    def fake_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
         if url.endswith("/items"):
             return FakeResponse(payload={"success": {"0": "ATTKEY"}})
-        return FakeResponse(status_code=204)
+        # The authorization call: answer that the file already exists so the
+        # upload short-circuits and this test stays about the item contract.
+        return FakeResponse(payload={"exists": 1})
 
-    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("requests.request", fake_request)
 
     ok = zotero._upload_attachment(
         base_url="https://api.zotero.org/users/123456",
@@ -57,8 +62,9 @@ def test_upload_attachment_posts_item_as_raw_json_array(monkeypatch, tmp_path):
         pdf_path=Path(pdf_path),
     )
 
-    assert ok is True
-    assert calls[0][0] == "https://api.zotero.org/users/123456/items"
-    assert isinstance(calls[0][1]["json"], list)
-    assert calls[0][1]["json"][0]["parentItem"] == "PARENTKEY"
-    assert calls[1][0] == "https://api.zotero.org/users/123456/items/ATTKEY/file"
+    assert ok["status"] == "uploaded"
+    assert ok["already_attached"] is True
+    assert calls[0][1] == "https://api.zotero.org/users/123456/items"
+    assert isinstance(calls[0][2]["json"], list)
+    assert calls[0][2]["json"][0]["parentItem"] == "PARENTKEY"
+    assert calls[1][1] == "https://api.zotero.org/users/123456/items/ATTKEY/file"
