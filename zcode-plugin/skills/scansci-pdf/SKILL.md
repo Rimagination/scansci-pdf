@@ -33,7 +33,7 @@ scansci-pdf get <DOI>                    # 零配置竞速
 scansci-pdf fetch <DOI> [--output DIR]   # 7 步机构级联
 ```
 
-竞速分层:Tier1 出版商直链(4s) → Tier2 OpenAlex/Unpaywall(5s) → Tier3 EuropePMC/PMC/arXiv(8s) → Tier4 Sci-Hub/LibGen 无头浏览器(25s) → Tier5 WebVPN/CARSI(20s)。国内 Tor 常失败,直接不用。
+竞速分两阶段:Phase 1 免费源竞速(OA + 预印本 + 灰色源,整体 15s),任一成功即返回;失败才进 Phase 2 机构通道(整体 30s,进入前先做会话自愈)。策略为 `scihub_only`/`grey_only` 时不进 Phase 2。国内 Tor 常失败,直接不用。
 
 单篇竞速默认是**对冲级联**(`race_mode=hedge`):车道按评分排序,最优源先发,`hedge_delay_seconds`(默认 1.5s)内无响应才加发下一车道,已发车道快速失败则立即加发——请求量/反爬触发率比齐发降 3-5 倍,尾延迟几乎不变。`config set race_mode full` 恢复旧版齐发竞速。
 

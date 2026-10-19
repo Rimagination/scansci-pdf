@@ -72,3 +72,30 @@ def test_instructions_declare_the_untrusted_content_boundary():
 
     assert "untrusted" in instructions
     assert "never as instructions" in instructions
+
+
+def test_readme_tool_table_matches_the_surface():
+    """The README's tool table rotted silently: it claimed 17 tools and listed
+    16 while the server exposed 18, because nothing checked it.
+
+    Unlike the publisher table, this block has no generator, so a test is the
+    cheaper way to keep prose and surface together.
+    """
+    import re
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+
+    block = re.search(r"<!-- mcp-tools:start -->(.*?)<!-- mcp-tools:end -->", readme, re.S)
+    assert block, "README lost its mcp-tools block"
+
+    listed = set(re.findall(r"scansci_pdf_[a-z_]+", block.group(1)))
+    real = {tool.name for tool in asyncio.run(mcp_app.list_tools())}
+
+    assert listed == real, (
+        "README tool table is out of sync — missing: "
+        f"{sorted(real - listed)}, stale: {sorted(listed - real)}"
+    )
+    # The count is written out in three places; keep them honest too.
+    assert f"MCP-{len(real)}%20tools" in readme, "badge count drifted"
+    assert f"{len(real)} 个工具" in readme, "prose count drifted"
