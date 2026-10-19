@@ -8,7 +8,7 @@
 
   让 Agent 替你下载学术论文 —— 20+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
 
-  [能力](#能力) · [客户端兼容性](#客户端兼容性) · [快速开始](#快速开始) · [怎么用](#怎么用) · [机构通道](#机构通道) · [社区](#交流群--community) · [致谢](#致谢)
+  [能力](#能力) · [客户端兼容性](#客户端兼容性) · [浏览器](#浏览器成功率的最大单一变量) · [快速开始](#快速开始) · [怎么用](#怎么用) · [机构通道](#机构通道) · [社区](#交流群--community) · [致谢](#致谢)
 </div>
 
 ## 能力
@@ -48,6 +48,30 @@ scansci-pdf config-cmd download_strategy legal_only
 ```
 
 在允许灰源的宿主里不需要任何设置。想反过来只走灰源，用 `scihub_only`；只走灰源竞速但不要 OA，用 `grey_only`。
+
+## 浏览器：成功率的最大单一变量
+
+同一篇论文、同一台机器，换个浏览器内核，能不能下下来可以完全不同。很多人不在意自己跑的是哪个浏览器，但**成功率差别很大**，原因有四条，都很具体：
+
+- **登录态只来自工具打开的那个浏览器。** `scansci_pdf_login` 会打开工具自带的可见浏览器，cookie 是从**那个上下文**抓取并落盘的。用你的日常 Chrome / Safari / Edge 登录、或让窗口无头运行，都拿不到会话——症状是"我明明登录成功了"，下载却仍然失败。
+- **Cloudflare / CAPTCHA 能不能过，取决于内核。** 内核过旧或指纹不对，验证页直接把请求挡掉。`patchright` 1.56–1.61 有一个 Turnstile 组件空白页的已知 bug，表现就是"验证框根本没出现"。
+- **出版商看 TLS / HTTP 指纹。** 同样的 cookie，Python HTTP 客户端可能 403，而真实浏览器能过——所以机构通道的最后一公里常常只能交给浏览器去取字节。
+- **浏览器看到的出口 IP，就是出版商看到的 IP。** 一旦开了系统/全局代理，出口变成代理机房，机构 IP 授权当场失效（见下方 Elsevier 一节的 CPE 说明）。
+
+**建议设置。** 代码默认是 `patchright`，而它恰好在 Turnstile 上有上面那个 bug，所以值得显式改掉：
+
+| 配置项 | 建议 | 说明 |
+|---|---|---|
+| `browser_backend` | `cloakbrowser` 或 `camoufox` | 回退顺序为 `patchright → cloakbrowser → camoufox`；cloakbrowser 低于 0.5.9 会被**硬拒绝**（内核过旧会被出版商标记并拒绝服务），camoufox 是反指纹 Firefox 内核 |
+| `browser_headless` | `false` | 机构登录 / CAPTCHA / Cloudflare 都需要可见窗口 |
+| `browser_executable` | 你装的 Chrome 路径 | **坚持用自己的浏览器就用这一条**：让工具拿你装的 Chrome 当内核，而不是把登录态留在工具外面 |
+
+```bash
+scansci-pdf config-cmd browser_backend cloakbrowser
+scansci-pdf config-cmd browser_headless false
+```
+
+另外两条兜底：把内核指向你自己的 Chrome（`config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"`），或直接导入 cookie（`scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")`；CARSI 还会自动读取本机 Chrome 的 cookie 库）。用 `scansci-pdf browser-status` 可查看当前实际生效的内核。
 
 ## 快速开始
 
@@ -185,6 +209,8 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 2. 配置 Key：`scansci_pdf_elsevier_setup`（MCP 会打开浏览器引导）或 `scansci_pdf_config(key="elsevier_api_key", value="...")`
 
 > **权益跟随出口 IP。** API key 的机构身份靠 key + 请求源 IP 一起判定，所以离校使用要经 `network_proxy` 或 `SCANSCI_PDF_PROXY` 走校园出口。回 403 `Requestor configuration settings insufficient` 就是这个原因——不是缺 insttoken。
+>
+> 网页通道同理：`pdf.sciencedirectassets.com` 返回 **"There was a problem providing the content you requested"（带 `CPE` 码）**，多数情况是请求出口不在机构网段。那个页面上会打印它看到的 IP，**先拿这个 IP 核对是否属于机构网段，再下"学校没订阅"的结论**——最常见的触发就是开了系统/全局代理，出口变成了代理机房。工具只认 `network_proxy` / `SCANSCI_PDF_PROXY`，**忽略** `HTTP_PROXY` / `HTTPS_PROXY`。
 
 ### Springer TDM（无需浏览器）
 
@@ -367,7 +393,9 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 |---|---|
 | 下载失败 | `scansci-pdf check`，会话问题再跑 `scansci-pdf session-doctor` |
 | 装完提示 `pycryptodome required for WebVPN` | 基础安装不含该依赖：`pip install "scansci-pdf[vpnsci]"` |
-| 机构登录弹不出浏览器 / 登录后仍失败 | `pip install "scansci-pdf[cloakbrowser]"`，并确认 `browser_headless=false` |
+| 机构登录弹不出浏览器 / 登录后仍失败 | `pip install "scansci-pdf[cloakbrowser]"`，并确认 `browser_headless=false`；若要继续用自己的浏览器，见[浏览器](#浏览器成功率的最大单一变量)那一节的 `browser_executable` / cookie 导入 |
+| Cloudflare 验证框不出现 / 一直转 | 内核问题：`scansci-pdf browser-status` 看当前内核，换 `config-cmd browser_backend cloakbrowser`（或 `camoufox`）——`patchright` 1.56–1.61 有 Turnstile 空白页 bug |
+| 签名 PDF 报 "There was a problem providing the content"（带 CPE 码） | 先看该页打印的 IP 是否属于机构网段，再判断订阅：多半是系统/全局代理把出口带离校园。核对 `network_proxy`（工具忽略 `HTTP_PROXY`/`HTTPS_PROXY`） |
 | 校园连接器报 SSL 证书错误 | 自签名证书：`scansci-pdf config-cmd institutional_allow_self_signed true`（确认连接器可信后再开） |
 | 灰源通道在宿主里被拦 | 宿主平台策略所致，见[客户端兼容性](#客户端兼容性)；可固定 `download_strategy=legal_only` 与策略对齐 |
 | Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可（insttoken 仅拿不到校园出口时申请）；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
