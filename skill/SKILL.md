@@ -101,6 +101,25 @@ scansci-pdf 是一个 MCP 服务器，提供 **17 个高层工具**，覆盖学�
 2. scansci_pdf_batch_download(identifiers=entries)（或 resolve_and_download 的等价组合）
 ```
 
+### 流程 2.5：先定机构认证方式与浏览器（流程 3/4/5 的前置判断）
+
+机构失败大多不是"下不下来"，而是这两件事没定：
+
+**① 浏览器**：`scansci_pdf_login` 打开的是工具自带的可见反检测浏览器，**cookie 是从那个上下文抓取并落盘的**——用户在自带的 Safari/Edge/日常 Chrome 里登录、或用无头模式，登录态都拿不到。要求：`browser_headless=false`（机构登录/CAPTCHA/Cloudflare 都需要可见窗口）；后端用 `camoufox` 或 `cloakbrowser`（`patchright` 1.56~1.61 有 Turnstile 空白页 bug）。用户坚持用自己的浏览器时不必硬拦，两条兜底：`config-cmd browser_executable "<他的 Chrome 路径>"` 把内核指过去；或 `scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")` 导入 Netscape cookie（CARSI 另会自动读本机 Chrome 的 cookie 库）。
+
+**② 出口 IP**：出版商（尤其 Elsevier）按请求源 IP 判权益。机器一旦开系统/全局代理，**工具与浏览器的出口就变成代理出口，机构授权当场失效**——典型症状是 `pdf.sciencedirectassets.com` 返回 "There was a problem providing the content you requested"（带 `CPE` 码，页面上会打印它看到的 IP）。**先拿那个 IP 核对是否属于机构网段，再判断"学校没订阅"。** 工具只认 `network_proxy`/`SCANSCI_PDF_PROXY`，**忽略** `HTTP_PROXY`/`HTTPS_PROXY`。
+
+| 你的情况 | 走哪条 | 怎么配 |
+|---|---|---|
+| 在校内（IP 认证） | 直连 | `is_campus_network=true` |
+| 校外 + 出版商支持联邦认证 | **CARSI 优先于 WebVPN** | `config-cmd carsi_idp_name <学校>` |
+| 校外 + 学校有 WebVPN 网关 | WebVPN | 流程 3 |
+| 学校只给 EasyConnect/aTrust | SOCKS5 连接器 | `network_proxy=socks5://…`；自签名证书需 `institutional_allow_self_signed` |
+| 学校给图书馆代理 | EZProxy | `ezproxy_login_url`（前缀式 / 域名重写式） |
+| 有 Elsevier/Springer key | API 车道，1–2 s/篇且无需浏览器 | 流程 5 / Springer TDM |
+
+**不要替用户猜学校名**——`scansci_pdf_schools(action="search")` 让他确认；项目策略明确"不要默认任何学校"。
+
 ### 流程 3：WebVPN 机构代理
 
 ```
