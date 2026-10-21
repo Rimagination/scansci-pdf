@@ -30,7 +30,7 @@ scansci-pdf check
 | Claude Code | `.claude/skills/` + the standard MCP configuration |
 | Codex App | `.codex-plugin/plugin.json`, `.mcp.json`, `skills/` |
 | ZCode | `zcode-plugin/` (marketplace package, skills, `/scansci` commands) |
-| DeepSeek Harness | `dsh-plugin/` (bundle: MCP client row + runtime skill registration) |
+| DeepSeek Harness | `dsh-plugin/` (npm: `scansci-pdf`; bundle: MCP client row + runtime skill registration) |
 
 ## Skills
 

@@ -2,19 +2,25 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// The bundle is installed from this repository, so its skill files stay next to
-// the code instead of being duplicated into the package.
+// A repository checkout reads the canonical skill files first; an npm tarball
+// falls back to the copies that scripts/sync-skills.mjs writes during prepack.
 const packageRoot = dirname(fileURLToPath(import.meta.url))
 
 const DEFAULT_SKILLS = [
   {
     name: 'scansci-pdf',
-    file: '../skill/SKILL.md',
+    files: ['../skill/SKILL.md', './skills/scansci-pdf/SKILL.md'],
     note:
       '> DeepSeek Harness exposes these MCP tools as ' +
       '`mcp__scansci__<tool>` — for example `mcp__scansci__scansci_pdf_download`.\n\n',
   },
-  { name: 'scansci-sort', file: '../skills/scansci-sort/SKILL.md' },
+  {
+    name: 'scansci-sort',
+    files: [
+      '../zcode-plugin/skills/scansci-sort/SKILL.md',
+      './skills/scansci-sort/SKILL.md',
+    ],
+  },
 ]
 
 export const inject = ['skills']
@@ -26,23 +32,41 @@ export function apply(ctx, config = {}) {
       : DEFAULT_SKILLS
 
   for (const entry of entries) {
-    if (!entry || typeof entry.file !== 'string') continue
+    if (!entry) continue
 
-    const file = resolve(packageRoot, entry.file)
+    const candidates =
+      Array.isArray(entry.files)
+        ? entry.files
+        : typeof entry.file === 'string'
+          ? [entry.file]
+          : []
+    if (candidates.length === 0) continue
+
+    let file
     let raw
-    try {
-      raw = readFileSync(file, 'utf8')
-    } catch (error) {
-      // A missing reference must not take the MCP connection down with it.
-      console.warn(`[scansci-pdf-dsh] cannot read skill ${file}: ${error.message}`)
-      continue
+    for (const candidate of candidates) {
+      const resolved = resolve(packageRoot, candidate)
+      try {
+        raw = readFileSync(resolved, 'utf8')
+        file = resolved
+        break
+      } catch (error) {
+        // A repo checkout falls back from source files to the copies that
+        // prepack writes into the npm tarball.
+        if (candidate === candidates[candidates.length - 1]) {
+          console.warn(
+            `[scansci-pdf] cannot read any skill file for ${entry.name ?? 'unknown'}: ${error.message}`,
+          )
+        }
+      }
     }
+    if (!file) continue
 
     const { meta, body } = parseFrontmatter(raw)
     const name = entry.name ?? meta.name
     const description = entry.description ?? meta.description
     if (!name || !description) {
-      console.warn(`[scansci-pdf-dsh] skill ${file} has no name or description`)
+      console.warn(`[scansci-pdf] skill ${file} has no name or description`)
       continue
     }
 

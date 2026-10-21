@@ -9,12 +9,12 @@ DSH 与 Claude Code、Codex、ZCode 共用同一份 Python 包与同一个 MCP s
 
 ## 前置条件
 
-需要 Python 3.11+，并在同一个 Python 环境里安装本仓库：
+需要 Python 3.11+，并在同一个 Python 环境里安装 ScanSci PDF：
 
 ```bash
+python -m pip install "scansci-pdf[cloakbrowser,vpnsci]"
+# 从本仓库开发时：
 python -m pip install -e <本仓库路径>
-# 机构登录 / WebVPN / CARSI 建议带 extras：
-python -m pip install -e "<本仓库路径>[cloakbrowser,vpnsci]"
 ```
 
 确认 CLI 可用：
@@ -23,9 +23,40 @@ python -m pip install -e "<本仓库路径>[cloakbrowser,vpnsci]"
 scansci-pdf run --help
 ```
 
-> MCP 由 DSH 启动，不需要手动常驻。`scansci-pdf` 必须在 DSH 进程的 `PATH` 上；若使用虚拟环境，见下方“CLI 不在 PATH”。
+> MCP 由 DSH 启动，不需要手动常驻。`scansci-pdf` 必须在 DSH 进程的 `PATH` 上；若使用虚拟环境，见下方“CLI 不在 PATH”。npm 只安装 DSH 注册层，不会安装 Python CLI。
 
-## 安装 bundle
+## 从 npm 安装（推荐）
+
+DSH 的 **Add plugin** 接受 npm 包名。本包的发布名是 `scansci-pdf`（与 PyPI 的 Python 包同名，两个生态互不冲突）：
+
+1. 侧边栏 **Plugins** → **Add plugin**
+2. 输入 `scansci-pdf`（或固定版本 `scansci-pdf@1.18.2`）
+3. **Install**，安装完成后确认 bundle 为 **On**
+
+等价命令：
+
+```bash
+dsh plugin add scansci-pdf
+```
+
+升级时先 **Remove** 再安装新版本；**Update** 只出现在 DSH 官方 bundle 上。
+
+如果 registry 上还没有该版本（例如刚改完包名、尚未发布），或者你的网络访问不了 npmjs.com，可以先用下面的本地目录方式。另一个不依赖 npm 账号的办法：`npm pack` 生成 `scansci-pdf-1.18.2.tgz`，上传到 GitHub Release，然后在 **Add plugin** 里直接填 tarball 的 URL（DSH 支持 package、Git、tarball、本地目录四种来源）。
+
+## 发布到 npm（维护者）
+
+发布名固定为 `scansci-pdf`，版本与仓库的 `pyproject.toml` 保持一致。
+
+```bash
+cd dsh-plugin
+npm publish --access public
+```
+
+`prepack` 会把 `../skill/SKILL.md` 和 `../zcode-plugin/skills/scansci-sort/SKILL.md` 复制进 tarball，因此 npm 包是自包含的。发布前可先用 `npm pack --dry-run` 检查文件清单（应包含 `cordis.patch.yml`、`index.js`、`icon.png`、`locale/`、`skills/`、`README.md`、`LICENSE`）。
+
+也可以走 GitHub Actions：**Publish DSH bundle to npm** → Run workflow → 填版本号。仓库需要配置 secret `NPM_TOKEN`（npm granular access token，至少对 `scansci-pdf` 有 publish 权限）。
+
+## 从本地目录安装（开发或尚未发布时）
 
 DSH 的插件管理会把本地目录以 `link:` 方式装进当前 profile，因此**本仓库目录需要保留在原位**（不要只复制 `dsh-plugin/`）。
 

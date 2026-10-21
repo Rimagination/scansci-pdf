@@ -122,9 +122,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command '$p=Join-Path $HOME "plug
 
 ZCode：插件市场搜 `scansci-pdf` 一键安装，MCP、skills、快捷命令一次带齐。
 
-DeepSeek Harness（DSH）：侧边栏 **Plugins → Add plugin**，填本仓库 `dsh-plugin/` 的绝对路径；bundle 会自动注册 stdio MCP server 和 `scansci-pdf` / `scansci-sort` 两个 skill，无需重启。也可以直接对 agent 说“安装这个 DSH bundle：<仓库路径>/dsh-plugin”。详见 [`dsh-plugin/README.md`](./dsh-plugin/README.md)。
+DeepSeek Harness（DSH）：**Plugins → Add plugin** 填 npm 包名 `scansci-pdf`（与 PyPI 包同名，发布后可用；开发时填本仓库 `dsh-plugin/` 的绝对路径）。bundle 会自动注册 stdio MCP server 和 `scansci-pdf` / `scansci-sort` 两个 skill，无需重启。也可以直接对 agent 说“安装这个 DSH bundle：<仓库路径>/dsh-plugin”。详见 [`dsh-plugin/README.md`](./dsh-plugin/README.md)。
 
-**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置；DeepSeek Harness = [`dsh-plugin/`](./dsh-plugin/)（bundle：MCP client + skills + locale/icon）。
+**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置；DeepSeek Harness = npm 包 `scansci-pdf` 或 [`dsh-plugin/`](./dsh-plugin/)（bundle：MCP client + skills + locale/icon）。
 
 手动安装（Codex）：仓库放到 `%USERPROFILE%\plugins\scansci-pdf` → `python -m pip install -e .` → 插件管理页刷新个人 marketplace；Codex CLI 可用时执行 `codex plugin add scansci-pdf@local-plugins`。
 

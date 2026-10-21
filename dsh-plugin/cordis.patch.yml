@@ -14,5 +14,5 @@
         failOnStartupError: false
 
     - id: scansci-pdf-skills
-      name: scansci-pdf-dsh
+      name: scansci-pdf
       config: {}
