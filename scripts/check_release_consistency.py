@@ -8,6 +8,7 @@ Asserts that the version is identical across:
 - .codex-plugin/plugin.json
 - zcode-plugin/.zcode-plugin/plugin.json
 - zcode-plugin/marketplace.json
+- dsh-plugin/package.json
 
 and that the MCP tool surface is still 18 tools and the skill no longer
 references retired tool names. Exit code 1 with a diff report on any mismatch.
@@ -72,6 +73,7 @@ def _read_version_sources() -> list[tuple[str, str]]:
     for rel in (
         ".codex-plugin/plugin.json",
         "zcode-plugin/.zcode-plugin/plugin.json",
+        "dsh-plugin/package.json",
     ):
         data = json.loads((ROOT / rel).read_text(encoding="utf-8"))
         sources.append((rel, str(data.get("version", ""))))

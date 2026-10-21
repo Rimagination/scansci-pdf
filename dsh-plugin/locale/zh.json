@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "ScanSci PDF 文献工具",
+    "description": "接入 scansci-pdf MCP 服务器：检索文献、导出引文，并通过开放获取、出版商 API 或机构权限下载论文。"
+  }
+}

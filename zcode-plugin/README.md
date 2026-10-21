@@ -36,4 +36,5 @@ Settings → Plugin Management → Discover → 添加本地目录(本目录)→
 
 - **Codex App**：使用仓库根目录的 `.codex-plugin/plugin.json`、`.mcp.json` 和 `skills/`；本目录保留为 ZCode 专属适配层。
 - **Claude Code**：使用仓库内 `.claude/skills/` 与标准 MCP 配置；也可以用 shared-skill-installer 同步 `skills/` 下两个 skill。
+- **DeepSeek Harness**：使用仓库内 `dsh-plugin/` bundle（MCP client + skills），安装方式见 [`../dsh-plugin/README.md`](../dsh-plugin/README.md)。
 - **ZCode**：继续使用本目录的 `.zcode-plugin/`、commands、skills 和 marketplace 配置。

@@ -19,10 +19,11 @@
 - **清单，整批拿下** — APA / BibTeX / DOI 列表直接喂，自动补全缺失 DOI；上千篇先分「OA / 灰色源 / 需机构」三桶再分批下载，不瞎跑不浪费。
 - **付费墙，走你的学校** — 100+ 高校 WebVPN、CARSI 联邦认证、EZProxy，加上 Elsevier API 与 Springer TDM 两条 API 车道（1–2 秒/篇）；登录在你自己的浏览器完成，密码不经过工具。
 - **对抗与自愈全自动** — Cloudflare / CAPTCHA / SSO 分层处理；出版商封 IP 自动停损；机构会话过期自动重登，登录一次全程复用。
-- **Agent 原生** — 标准 MCP 服务器、18 个工具即装即用；Codex App、ZCode、Claude Code 都有现成的插件或配置。
+- **Agent 原生** — 标准 MCP 服务器、18 个工具即装即用；Codex App、ZCode、Claude Code、DeepSeek Harness 都有现成的插件或配置。
 
 ### 近期更新
 
+- **DeepSeek Harness 适配** — 新增 `dsh-plugin/` bundle：一次注册 stdio MCP server 与 `scansci-pdf` / `scansci-sort` 两个 skill，批量调用超时放宽到 30 分钟。
 - **统一任务管线** — 任意输入（xlsx/csv 表格、文献清单、检索结果、文章页 URL）自动归一成带渠道预测的下载队列；`batch --lanes` 分车道调度：快车道（Elsevier API + OA + Springer TDM）并行，灰色源竞速与机构级联接续，失败逐级溢流。
 - **SI 附件下载** — `get <DOI> --si` 把补充材料一并拉下来；被 Cloudflare 挡住的 Elsevier 自动切隐身浏览器通道。
 - **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
@@ -38,6 +39,7 @@
 | 宿主 | 灰色源（Sci-Hub / LibGen） | 说明 |
 |---|---|---|
 | ZCode、Claude Code | 可用 | 灰源正常参与竞速；`fastest`（默认）下自动作为付费墙兜底 |
+| DeepSeek Harness（DSH） | 可用 | 通过 `dsh-plugin/` bundle 以 stdio 接入同一 MCP server；宿主策略与原 MCP 客户端一致 |
 | Codex、workbuddy | 被平台拦截 | 宿主策略限制该类请求；OA 与机构通道不受影响，付费墙论文仍可走学校订阅 |
 | 其他标准 MCP 客户端 | 取决于客户端 | 工具本身不做宿主判断，只看客户端是否允许该类请求 |
 
@@ -120,7 +122,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command '$p=Join-Path $HOME "plug
 
 ZCode：插件市场搜 `scansci-pdf` 一键安装，MCP、skills、快捷命令一次带齐。
 
-**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置。
+DeepSeek Harness（DSH）：侧边栏 **Plugins → Add plugin**，填本仓库 `dsh-plugin/` 的绝对路径；bundle 会自动注册 stdio MCP server 和 `scansci-pdf` / `scansci-sort` 两个 skill，无需重启。也可以直接对 agent 说“安装这个 DSH bundle：<仓库路径>/dsh-plugin”。详见 [`dsh-plugin/README.md`](./dsh-plugin/README.md)。
+
+**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置；DeepSeek Harness = [`dsh-plugin/`](./dsh-plugin/)（bundle：MCP client + skills + locale/icon）。
 
 手动安装（Codex）：仓库放到 `%USERPROFILE%\plugins\scansci-pdf` → `python -m pip install -e .` → 插件管理页刷新个人 marketplace；Codex CLI 可用时执行 `codex plugin add scansci-pdf@local-plugins`。
 

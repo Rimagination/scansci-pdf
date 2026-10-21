@@ -21,8 +21,9 @@ tool routing or configuration guidance.
 镜像健康存储曾被重复造过三代）。
 ## Route by intent
 
-- Search or identify papers: `scansci_pdf_search`, `scansci_pdf_verify_identifiers`,
-  and `scansci_pdf_parse_list` for list files.
+- Search or identify papers: `scansci_pdf_search`,
+  `scansci_pdf_prepare_queue(action="verify")` for identifiers, and
+  `scansci_pdf_parse_list` for list files.
 - Resolve open-access locations: `scansci_pdf_prepare_queue(action="resolve_oa")`.
 - Download one paper: `scansci_pdf_download` with an explicit strategy when the
   user has a source preference.

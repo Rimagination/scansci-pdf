@@ -1,0 +1,31 @@
+{
+  "name": "scansci-pdf-dsh",
+  "version": "1.18.2",
+  "private": true,
+  "description": "DeepSeek Harness bundle for ScanSci PDF: connects the scansci-pdf MCP server and registers its academic-literature skills.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.png"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.png",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "mcp",
+    "academic-papers",
+    "literature"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

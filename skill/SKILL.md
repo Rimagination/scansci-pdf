@@ -4,7 +4,7 @@ description: >
   Use this skill whenever the user wants to download academic papers, search for research literature,
   get citations (BibTeX/RIS/EndNote), manage WebVPN institutional proxy for paper access,
   import .bib files, or batch-download papers. This skill orchestrates the scansci-pdf MCP server
-  which exposes 17 high-level tools covering download (OA/grey/institutional channels),
+  which exposes 18 high-level tools covering download (OA/grey/institutional channels),
   discovery, queue preparation, diagnostics, and login.
   TRIGGER when: user mentions downloading papers, DOI, arXiv ID, Sci-Hub, paper search,
   literature review, citation export, WebVPN, institutional access, "帮我下载论文", "搜索文献",
@@ -18,14 +18,16 @@ description: >
 
 ## ⚠️ 修改反爬/嗅探/镜像相关代码前必读
 
-先读 [`docs/PLAYBOOK.md`](../../docs/PLAYBOOK.md)：镜像健康唯一存储（domain_db wall_state 表）、
+先读 [`docs/PLAYBOOK.md`](../docs/PLAYBOOK.md)：镜像健康唯一存储（domain_db wall_state 表）、
 结构性失败签名表、节奏参数、已知死镜像清单、以及六条铁律（含"造轮子前先 grep 家底"——
 镜像健康存储曾被重复造过三代）。
 ## 概述
 
-scansci-pdf 是一个 MCP 服务器，提供 **17 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 灰色源 / 机构渠道）、发现与队列准备、引文导出和诊断排障。下载引擎支持 13+ 数据源并行竞速、100+ 中国高校 WebVPN。
+scansci-pdf 是一个 MCP 服务器，提供 **18 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 灰色源 / 机构渠道）、发现与队列准备、引文导出和诊断排障。下载引擎支持 13+ 数据源并行竞速、100+ 中国高校 WebVPN。
 
-## MCP 工具参考（17 个）
+> 工具名可能带宿主的 MCP 命名空间前缀（`mcp__<server>__<tool>`）；以当前工具列表中实际注册的名称为准。
+
+## MCP 工具参考（18 个）
 
 ### 下载
 
@@ -79,6 +81,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **17 个高层工具**，覆盖学�
 |------|------|----------|
 | `scansci_pdf_login` | 统一登录：`kind=publisher\|webvpn\|carsi\|ezproxy\|custom\|cookie_import` | `kind`（默认 publisher）、`identifier`、`publisher`、`custom_url`、`cookie_file` |
 | `scansci_pdf_elsevier_setup` | Elsevier API Key 配置向导（免费，无需机构邮箱） | `test`（验证 key） |
+| `scansci_pdf_springer_setup` | Springer TDM 全文 API Key 配置与权益探测 | `test`（验证 key / 机构订阅） |
 
 ## 工作流编排
 
