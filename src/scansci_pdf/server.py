@@ -127,6 +127,31 @@ def scansci_pdf_download(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _result_key(result: dict[str, Any]) -> str:
+    """Identity of the paper a lane result refers to ('' when unrecognizable)."""
+    return ((result.get("doi") or result.get("identifier") or "") or "").strip().lower()
+
+
+def _merge_lane_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse lane retry rows so each paper appears once, success winning.
+
+    The lane scheduler emits one row per attempt: a paper that misses the fast
+    lane and lands in the grey lane leaves both a failed row and a success row.
+    Counting rows therefore reports a failure for a paper that was downloaded.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    unrecognized: list[dict[str, Any]] = []
+    for result in raw:
+        key = _result_key(result)
+        if not key:
+            unrecognized.append(result)
+            continue
+        previous = merged.get(key)
+        if previous is None or (not previous.get("success") and result.get("success")):
+            merged[key] = result
+    return list(merged.values()) + unrecognized
+
+
 def _batch_download_impl(
     identifiers: list[str],
     output_dir: str | None = None,
@@ -192,19 +217,21 @@ def _batch_download_impl(
              "error": "unrecognized identifier (lane mode)"}
             for e in dropped
         ]
-        succeeded = sum(1 for r in raw if r.get("success"))
+        rows = _merge_lane_results(raw)
+        succeeded = sum(1 for r in rows if r.get("success"))
         summary = {
             "total": len(identifiers),
             "unique": len(all_entries),
             "succeeded": succeeded,
-            "failed": len(raw) - succeeded,
-            "results": raw,
+            "failed": len(rows) - succeeded,
+            "retried": len(raw) - len(rows),
+            "results": rows,
             "failed_dois": [r.get("doi") or r.get("identifier", "")
-                            for r in raw if not r.get("success")],
+                            for r in rows if not r.get("success")],
             "batch_id": batch_id or "lanes",
             "mode": "lanes",
         }
-        _write_download_results(raw, out_dir)
+        _write_download_results(rows, out_dir)
         return json.dumps(summary, ensure_ascii=False)
 
     result = batch_download(
