@@ -14,8 +14,6 @@ dependencies = [
     "mcp[cli]>=1.12,<3.0",
     "typer>=0.15",
     "uvicorn>=0.34",
-    "fastapi>=0.115",
-    "jinja2>=3.1",
     "pymupdf>=1.24",
     "openpyxl>=3.1",
     # Capped below 2.0: upstream ships pymupdf4llm 2.0 as an *empty* shim for
@@ -33,7 +31,6 @@ vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
 cloakbrowser = ["cloakbrowser>=0.5.9"]
 camoufox = ["camoufox[geoip]>=0.4.11"]
-web = ["fastapi>=0.115", "jinja2>=3.1"]
 patchright = ["patchright>=1.61"]
 dev = ["pytest>=8.0"]
 compile = ["cython>=3.0"]
@@ -49,7 +46,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scansci_pdf = ["data/*.json", "_core/*.pyx", "templates/*.html"]
+scansci_pdf = ["data/*.json", "_core/*.pyx"]
 
 [tool.pytest.ini_options]
 # Manual network/browser scripts in the repo root (e.g. test_download_pnas.py)

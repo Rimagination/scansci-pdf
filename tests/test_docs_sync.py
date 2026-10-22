@@ -1,4 +1,4 @@
-"""Docs must list every tool exposed by the canonical MCP surface."""
+"""Technical docs must list every tool exposed by the canonical MCP surface."""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ def _exposed_tools() -> set[str]:
     return {tool.name for tool in asyncio.run(mcp_app.list_tools())}
 
 
-def test_readme_lists_every_mcp_tool():
-    missing = _exposed_tools() - _documented_tools(ROOT / "README.md")
-    assert not missing, f"README.md is missing MCP tools: {sorted(missing)}"
+def test_reference_lists_every_mcp_tool():
+    missing = _exposed_tools() - _documented_tools(ROOT / "docs" / "REFERENCE.md")
+    assert not missing, f"docs/REFERENCE.md is missing MCP tools: {sorted(missing)}"
 
 
 def test_skill_lists_every_mcp_tool():
