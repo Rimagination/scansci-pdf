@@ -1,8 +1,8 @@
-"""CLI package — commands grouped by domain.
+"""CLI package — legacy import path.
 
-The actual command implementations live in ``_cli_core.py`` (for now).
-This package exists so future command modules can be added under ``cli/``
-without changing the public import path.
+The canonical CLI is :mod:`scansci_pdf.main` (entry point ``scansci-pdf``).
+This package re-exports the older InstSci-era app in ``_cli_core.py`` for
+compatibility; new commands belong in ``main.py``.
 """
 
 # Re-export the Typer app and all commands from the core module

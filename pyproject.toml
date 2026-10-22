@@ -45,7 +45,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyx", "templates/*.html"]
+scansci_pdf = ["data/*.json", "_core/*.pyx", "templates/*.html"]
 
 [tool.pytest.ini_options]
 # Manual network/browser scripts in the repo root (e.g. test_download_pnas.py)

@@ -226,6 +226,9 @@ def _search_sciverse(
             year_from=year_from,
             year_to=year_to,
             config=config,
+            # Discovery/download scenario: spend one extra meta call to make
+            # evidence hits DOI-ready. Disabling the meta lane disables this.
+            enrich_dois=bool(config.get("sciverse_meta_search_enabled", True)),
         )
     except SciverseError as exc:
         logger.warning("search: sciverse failed (%s: %s)", exc.code or exc.status_code, exc)
@@ -405,11 +408,12 @@ def _search_ncpssd(
 def _merge_search_results(
     base: list[dict[str, Any]], extra: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Merge result lists across DOI and title, preserving source provenance.
+    """Merge result lists across doc_id, DOI and title, preserving provenance.
 
-    DOI-bearing and DOI-less duplicates of the same paper (common for Chinese
-    records and Sciverse hits) are unified by normalized title. Sciverse-only
-    fields (``doc_id``/``evidence``) are carried onto the surviving record.
+    ``doc_id`` is Sciverse's full-text content hash: when the agentic and
+    meta lanes return the same paper under different titles, this joins them
+    so the DOI-less evidence hit inherits the meta hit's DOI/`unique_id`.
+    DOI-bearing and DOI-less duplicates are then unified by DOI/title.
     """
     try:
         from .chinese import normalize_title_for_match
@@ -418,13 +422,17 @@ def _merge_search_results(
             return (value or "").lower()
 
     records: list[dict[str, Any]] = []
+    by_doc_id: dict[str, dict[str, Any]] = {}
     by_doi: dict[str, dict[str, Any]] = {}
     by_title: dict[str, dict[str, Any]] = {}
 
     for item in [*base, *extra]:
+        doc_id = str(item.get("doc_id") or "").strip()
         doi = str(item.get("doi") or "").strip().lower()
         title_key = normalize_title_for_match(str(item.get("title") or ""))
-        existing = by_doi.get(doi) if doi else None
+        existing = by_doc_id.get(doc_id) if doc_id else None
+        if existing is None:
+            existing = by_doi.get(doi) if doi else None
         if existing is None and title_key:
             candidate = by_title.get(title_key)
             # Never collapse two records that carry different DOIs merely
@@ -448,8 +456,10 @@ def _merge_search_results(
             if item.get("cited_by_count", 0) > existing.get("cited_by_count", 0):
                 existing["cited_by_count"] = item["cited_by_count"]
             for field in (
-                "doc_id", "snippet", "primary_topic", "primary_topic_domain",
-                "journal", "venue_type", "score", "ncpssd_id", "arxiv_id",
+                "doc_id", "unique_id", "snippet", "primary_topic",
+                "primary_topic_domain", "journal", "venue_type", "score",
+                "language", "fwci", "influential_citation_count", "year",
+                "ncpssd_id", "arxiv_id",
             ):
                 if not existing.get(field) and item.get(field):
                     existing[field] = item[field]
@@ -472,6 +482,8 @@ def _merge_search_results(
                 sources.append(new_source)
                 existing["source"] = "+".join(sources)
 
+        if doc_id:
+            by_doc_id[doc_id] = existing
         if doi:
             by_doi[doi] = existing
         if title_key:

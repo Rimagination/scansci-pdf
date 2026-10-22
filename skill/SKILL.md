@@ -57,14 +57,14 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 | `scansci_pdf_expand_citations` | 引文追踪（Semantic Scholar/OpenCitations） | `query`、`rounds`（≤5）、`citation_source` |
 | `scansci_pdf_prepare_queue` | 准备下载队列：`action=verify\|resolve_oa\|build\|full` | `candidates_json`、`query`、`limit` |
 | `scansci_pdf_search` | 关键词/作者搜索（OpenAlex；中文并入 NCPSSD；配置 Key 后并入 Sciverse） | `query`/`author`/`author_id`、`limit`、`year_from`、`year_to`、`sort` |
-| `scansci_pdf_sciverse` | Sciverse 全能力分发：`search`（agentic 片段）/ `content`（读全文）/ `meta_search`（元数据）/ `relations`（引文图谱）/ `catalog`（字段目录）/ `resource`（图表附件） | `query`、`doc_id`、`unique_id`、`relation`、`top_k`、`page`/`page_size`、`offset`/`limit`、`file_name`、`filters_json`、`sort_json`、`fields`、年份/语言/期刊/主题/作者/DOI/引用数字段 |
+| `scansci_pdf_sciverse` | Sciverse 全能力分发：`search`（agentic 片段）/ `content`（读全文）/ `meta_search`（元数据）/ `relations`（引文图谱）/ `catalog`（字段目录）/ `resource`（图表附件） | `query`、`doc_id`、`unique_id`、`relation`、`top_k`、`page`/`page_size`、`offset`/`limit`、`file_name`、`filters_json`、`sort_json`、`fields`、`enrich_dois`、年份/语言/期刊/主题/作者/DOI/引用数字段 |
 | `scansci_pdf_parse_list` | 解析论文列表文件（APA/BibTeX/DOI 列表/表格） | `file_path`（必需） |
 | `scansci_pdf_citation` | 导出引文 | `identifier`（必需）、`format`（bibtex/ris/endnote/metadata） |
 | `scansci_pdf_zotero_push` | 推送已下载论文到 Zotero | `identifier`（必需，需先下载） |
 
 **重要**：`verify`/`resolve_oa` 是轻量操作，预算 45 秒内返回；超时会返回结构化错误（`stage`/`timeout_seconds`/`retryable`），不会无反馈地等 180 秒。`resolve_oa` 依赖 Unpaywall 邮箱配置（`scansci_pdf_config(key='email', ...)`），缺失时直接返回 `blocked_configuration` 而不是逐条失败。
 
-**Sciverse 能力**：配置 `sciverse_api_key`（https://sciverse.space/tokens）后，`scansci_pdf_search` 会自动并入 agentic-search 证据片段和 meta-search 元数据（记录带 `doc_id`/`unique_id`/`evidence`/页码）；需要原始 chunk、精确元数据、引文图谱或图表时用 `scansci_pdf_sciverse`。agentic 的 `filters_json` 是对象（字段间 AND、同字段列表内 OR，`doc_ids` 硬范围 ≤1000）；meta-search 的 `filters_json` 是 `{field, operator, value}` 数组，算子用 `FILTER_OP_*`。`sciverse_meta_search_enabled=false` 可省掉每次 search 的第二路 Sciverse 配额。
+**Sciverse 能力**：配置 `sciverse_api_key`（https://sciverse.space/tokens）后，`scansci_pdf_search` 会自动并入 agentic-search 证据片段和 meta-search 元数据（记录带 `doc_id`/`unique_id`/`evidence`/页码）；需要原始 chunk、精确元数据、引文图谱或图表时用 `scansci_pdf_sciverse`。**分场景**：统一 `search` 默认补 DOI（多 1 次 doc_id 定向 meta-search）；单独 `action="search"` 默认不补，需要下载时传 `enrich_dois=true`。`action="relations"` 的 `REFERENCES` 可能只返回 OpenAlex ID、标题为空；实测这些 ID 在 OpenAlex 不可解析，保留 ID 由调用方处理。`meta-search` 的 `total_count` 到 10000 是上限，返回 `total_count_capped=true`。agentic 的 `filters_json` 是对象（字段间 AND、同字段列表内 OR，`doc_ids` 硬范围 ≤1000）；meta-search 的 `filters_json` 是 `{field, operator, value}` 数组，算子用 `FILTER_OP_*`。`sciverse_meta_search_enabled=false` 可省掉每次 search 的第二路 Sciverse 配额（同时关闭统一 search 的 DOI 补全）。
 
 ### 配置、通道与诊断
 

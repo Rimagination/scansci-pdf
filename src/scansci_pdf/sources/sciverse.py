@@ -36,6 +36,15 @@ TOKEN_URL = "https://sciverse.space/tokens"
 MAX_QUERY_CHARS = 4096
 MAX_TOP_K = 100
 MAX_SUB_QUERIES = 4
+# meta-search caps total_count at this value; it is an upper bound, not exact.
+META_TOTAL_CAP = 10000
+# Fields needed to make an evidence hit download-ready without re-querying.
+_METADATA_FIELDS = (
+    "doc_id", "doi", "unique_id", "title", "publication_published_year",
+    "citation_count", "author", "publication_venue_name_unified",
+    "publication_venue_type", "primary_topic", "language",
+    "access_is_oa", "access_oa_url", "influential_citation_count", "fwci",
+)
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_ATTEMPTS = 3
 
@@ -389,7 +398,12 @@ def content(
             limit = 700
         params["limit"] = max(1, limit)
 
-    return _request_json("GET", "/content", config=cfg, params=params)
+    payload = _request_json("GET", "/content", config=cfg, params=params)
+    # The live API sometimes omits chars_returned; keep the documented shape
+    # so callers can always page by length without special-casing None.
+    if payload.get("chars_returned") is None and isinstance(payload.get("text"), str):
+        payload["chars_returned"] = len(payload["text"])
+    return payload
 
 
 def _filter_operator(operator: str) -> str:
@@ -572,7 +586,25 @@ def meta_search(
         if normalized in ("NONE", "MILD", "STRONG"):
             body[key] = normalized
 
-    return _request_json("POST", "/meta-search", config=cfg, body=body)
+    payload = _request_json("POST", "/meta-search", config=cfg, body=body)
+    total = payload.get("total_count")
+    if (
+        isinstance(total, (int, float))
+        and not isinstance(total, bool)
+        and total >= META_TOTAL_CAP
+    ):
+        payload["total_count_capped"] = True
+    return payload
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    """Coerce OpenAlex-backed numeric fields, which may arrive as floats."""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def meta_search_results(
@@ -606,7 +638,7 @@ def meta_search_results(
             "url": f"https://doi.org/{doi}" if doi else "",
             "authors": _as_list(row.get("author"))[:5],
             "year": _hit_year(row),
-            "cited_by_count": row.get("citation_count") or 0,
+            "cited_by_count": _as_int(row.get("citation_count")),
             "abstract": str(row.get("abstract") or "")[:500],
             "is_oa": bool(is_oa) if is_oa is not None else bool(oa_url),
             "oa_url": oa_url,
@@ -618,10 +650,112 @@ def meta_search_results(
             "primary_topic": topic_name,
             "primary_topic_domain": domain_name,
             "language": str(row.get("language") or ""),
-            "influential_citation_count": row.get("influential_citation_count") or 0,
+            "influential_citation_count": _as_int(row.get("influential_citation_count")),
             "fwci": row.get("fwci"),
         })
     return results[:limit] if limit is not None else results
+
+
+def _metadata_by_doc_id(
+    doc_ids: Iterable[str],
+    config: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Fetch DOI/unique_id metadata for Sciverse full-text doc_ids."""
+    ids = list(dict.fromkeys(
+        str(doc_id).strip() for doc_id in doc_ids if str(doc_id).strip()
+    ))[:200]
+    if not ids:
+        return {}
+    payload = meta_search(
+        config=config,
+        filters=[{"field": "doc_id", "operator": "FILTER_OP_IN", "value": ids}],
+        fields=_METADATA_FIELDS,
+        page_size=min(200, len(ids)),
+    )
+    return {
+        record["doc_id"]: record
+        for record in meta_search_results(payload)
+        if record.get("doc_id")
+    }
+
+
+def enrich_records_with_meta(
+    records: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Fill missing DOI/unique_id metadata on evidence records via doc_id.
+
+    Scenario: unified paper search / download selection. Agentic hits carry a
+    doc_id but no DOI; one doc_id-scoped meta-search call makes them
+    download-ready. Standalone evidence search can skip this to save quota.
+    """
+    cfg = config if config is not None else load_config()
+    missing = [
+        record for record in records
+        if record.get("doc_id") and not record.get("doi")
+    ]
+    if not missing:
+        return records
+    try:
+        by_doc_id = _metadata_by_doc_id(
+            (record["doc_id"] for record in missing), cfg
+        )
+    except SciverseError as exc:
+        logger.warning("sciverse: doc_id metadata enrichment failed: %s", exc)
+        return records
+    for record in missing:
+        metadata = by_doc_id.get(str(record.get("doc_id") or ""))
+        if not metadata:
+            continue
+        for field in (
+            "doi", "url", "unique_id", "journal", "venue_type", "year",
+            "cited_by_count", "is_oa", "oa_url", "primary_topic",
+            "primary_topic_domain", "language", "fwci",
+            "influential_citation_count",
+        ):
+            if not record.get(field) and metadata.get(field):
+                record[field] = metadata[field]
+    return records
+
+
+def enrich_hits_with_metadata(
+    hits: list[dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Annotate raw agentic hits with DOI/unique_id when the caller asks.
+
+    Keeps the raw hit shape; adds ``doi``/``unique_id`` and fills
+    ``publication_published_year``/``citation_count`` when missing.
+    """
+    cfg = config if config is not None else load_config()
+    missing = [
+        hit for hit in hits
+        if hit.get("doc_id") and not hit.get("doi")
+    ]
+    if not missing:
+        return hits
+    try:
+        by_doc_id = _metadata_by_doc_id(
+            (hit["doc_id"] for hit in missing), cfg
+        )
+    except SciverseError as exc:
+        logger.warning("sciverse: hit metadata enrichment failed: %s", exc)
+        return hits
+    for hit in missing:
+        metadata = by_doc_id.get(str(hit.get("doc_id") or ""))
+        if not metadata:
+            continue
+        if metadata.get("doi") and not hit.get("doi"):
+            hit["doi"] = metadata["doi"]
+        if metadata.get("unique_id") and not hit.get("unique_id"):
+            hit["unique_id"] = metadata["unique_id"]
+        if metadata.get("year") and not hit.get("publication_published_year"):
+            hit["publication_published_year"] = metadata["year"]
+        if metadata.get("cited_by_count") and not hit.get("citation_count"):
+            hit["citation_count"] = metadata["cited_by_count"]
+        if metadata.get("journal") and not hit.get("publication_venue_name_unified"):
+            hit["publication_venue_name_unified"] = metadata["journal"]
+    return hits
 
 
 def meta_search_papers(
@@ -875,8 +1009,13 @@ def _as_list(value: Any) -> list[str]:
 
 def _hit_year(hit: dict[str, Any]) -> Any:
     year = hit.get("publication_published_year")
-    if isinstance(year, int):
-        return year
+    if isinstance(year, (int, float)) and not isinstance(year, bool):
+        return int(year)
+    if isinstance(year, str):
+        try:
+            return int(float(year.strip()))
+        except (TypeError, ValueError):
+            pass
     date = str(hit.get("publication_published_date") or "")
     if len(date) >= 4 and date[:4].isdigit():
         return int(date[:4])
@@ -940,7 +1079,7 @@ def to_search_results(
                 "url": f"https://doi.org/{doi}" if doi else "",
                 "authors": _as_list(hit.get("author"))[:5],
                 "year": year,
-                "cited_by_count": hit.get("citation_count") or 0,
+                "cited_by_count": _as_int(hit.get("citation_count")),
                 "abstract": str(hit.get("abstract") or "")[:500],
                 "is_oa": False,
                 "oa_url": "",
@@ -974,8 +1113,14 @@ def search_sciverse(
     config: dict[str, Any] | None = None,
     filters: dict[str, Any] | None = None,
     sub_queries: int | None = None,
+    enrich_dois: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search Sciverse and return unified paper records (empty when unconfigured)."""
+    """Search Sciverse and return unified paper records (empty when unconfigured).
+
+    ``enrich_dois`` is scenario-specific: unified download-oriented search
+    enables it (one extra doc_id-scoped meta-search), while raw evidence
+    retrieval leaves it off by default.
+    """
     cfg = config if config is not None else load_config()
     if not is_configured(cfg):
         return []
@@ -999,7 +1144,10 @@ def search_sciverse(
         sub_queries=sub_queries,
         filters=merged_filters,
     )
-    return to_search_results(payload, limit=limit)
+    results = to_search_results(payload, limit=limit)
+    if enrich_dois:
+        results = enrich_records_with_meta(results, cfg)
+    return results
 
 
 __all__ = [

@@ -167,14 +167,14 @@ scansci-pdf check                              # 依赖与服务配置体检
 
 ## 能力
 
-- **单篇，一句话的事** — DOI / arXiv 进，`作者_年份_标题.pdf` 出；BibTeX / RIS / EndNote 引文顺手导出，可直推 Zotero。
-- **清单，整批拿下** — APA / BibTeX / DOI 列表直接喂，自动补全缺失 DOI；上千篇先分「OA / 灰色源 / 需机构」三桶再分批下载，不瞎跑不浪费。
-- **检索与发现** — 关键词/作者检索（OpenAlex / Crossref / Semantic Scholar / NCPSSD），前向/后向引文追踪，系统性检索协议与队列准备。
-- **付费墙，走你的学校** — 100+ 高校 WebVPN、CARSI 联邦认证、EZProxy、Elsevier API 快速通道（1–2 秒/篇）；登录在你自己的浏览器完成，密码不经过工具。
-- **中文文献也能下** — NCPSSD 免费全文、中文期刊官网直链、知网/万方/维普校园网或 CARSI 机构订阅；支持 `10.3969` 中文 DOI、全角括号标题归一化与 CAJ 格式提示。
-- **语义检索与证据定位** — 配置 Sciverse 后，自然语言问题直接返回带页码/偏移量的正文证据片段，检索结果自动并入现有数据源；还支持元数据筛选、引文图谱和图表下载。不配置不影响下载。
-- **对抗与自愈全自动** — Cloudflare / CAPTCHA / SSO 分层处理；出版商封 IP 自动停损；机构会话过期自动重登，登录一次全程复用。
-- **Agent 原生** — 标准 MCP 服务器、20 个工具即装即用；Codex App、ZCode、Claude Code 都有现成的插件或配置。
+| 能力 | 说明 |
+|---|---|
+| 单篇 / 批量 | DOI / arXiv / URL / 清单 → 自动选路 → 规整命名 PDF；BibTeX / RIS / EndNote / Zotero |
+| 检索与发现 | OpenAlex / Crossref / S2 / NCPSSD + 引文追踪 + 检索协议 + 队列准备 |
+| 机构与中文 | Elsevier API、100+ 高校 WebVPN、CARSI、EZProxy；NCPSSD / 知网 / 万方 / 维普 |
+| 语义证据（可选） | Sciverse 正文片段、元数据、引文图谱、图表下载 |
+| 整理输出 | SI 附件、Markdown、引用导出、批量结果 JSON |
+| 稳定性 | 反爬、会话自愈、封 IP 停损、负缓存、断点续传、20 个 MCP 工具 |
 
 ## 检索与发现
 
@@ -216,6 +216,9 @@ MCP 等价写法：`scansci_pdf_sciverse_setup(token="YOUR_TOKEN", test=true)`�
 
 3. 之后 `scansci-pdf search` 自动并入 Sciverse；配额紧张时执行 `scansci-pdf config-cmd sciverse_meta_search_enabled false` 只保留语义路。
 
+<details>
+<summary><strong>Sciverse 能力表、场景行为与命令</strong></summary>
+
 | 能力 | MCP `scansci_pdf_sciverse` | CLI | 用途 |
 |---|---|---|---|
 | 语义证据 | `action="search"` | `sciverse-search` | 自然语言 → 正文证据片段，适合综述取证 |
@@ -225,19 +228,24 @@ MCP 等价写法：`scansci_pdf_sciverse_setup(token="YOUR_TOKEN", test=true)`�
 | 字段目录 | `action="catalog"` | `sciverse-catalog` | 查看 meta-search 可用字段、算子与样例值 |
 | 图表附件 | `action="resource"` | `sciverse-resource` | 下载正文里的图/表/附件二进制 |
 
-- **自动合并**：`scansci-pdf search` 会把 agentic-search 的语义片段和 meta-search 的元数据一起并入 OpenAlex/Crossref/S2/NCPSSD 结果（按 DOI/标题去重）。语义命中带 `evidence`，meta 命中补 `doi`/`unique_id`。
-- **配额开关**：每次检索默认跑两路 Sciverse 请求（agentic + meta）。配额紧张时执行 `scansci-pdf config-cmd sciverse_meta_search_enabled false` 只保留语义路。
+- **自动合并**：`scansci-pdf search` 会把 agentic-search 的语义片段和 meta-search 的元数据一起并入 OpenAlex/Crossref/S2/NCPSSD 结果（按 `doc_id`/DOI/标题去重）。语义命中带 `evidence`，meta 命中补 `doi`/`unique_id`。
+- **场景化补 DOI**：统一 `search` 会自动补 DOI（多 1 次 doc_id 定向 meta-search）；单独的 `sciverse-search` 默认不补，适合纯证据检索。需要下载时加 `--enrich-dois`（MCP `enrich_dois=true`）。
+- **REFERENCES 标题限制**：`REFERENCES` 可能只返回 OpenAlex ID、`title` 为空；实测这些 ID 在 OpenAlex 里不可解析，客户端无法可靠补标题，保留 ID 供调用方处理。
+- **总数上限**：`meta-search` 的 `total_count` 到 10000 就是上限，此时返回 `total_count_capped: true`，不要当精确总数。
 - **高级过滤**：agentic 用 `filters_json`（对象，字段间 AND、同字段列表内 OR）；meta-search 用 `filters_json`（`{field, operator, value}` 数组，算子 `FILTER_OP_EQ/GTE/IN/MATCH_PHRASE/...`）+ `sort_json` + `fields`。
 - `paper-schema BETA` 是独立的 18 个子操作结构化阅读 API（Entity/Relation/Evidence/引用图谱），目前未接入。
 
 ```bash
 scansci-pdf sciverse-search "graphene battery cycle stability" --top-k 10 --year-from 2020
+scansci-pdf sciverse-search "graphene battery cycle stability" --top-k 10 --enrich-dois
 scansci-pdf sciverse-meta-search "graphene" --year-from 2020 --sort citation_count:desc --page-size 20
 scansci-pdf sciverse-relations paper:10.1038/s41586-021-03819-2 --relation CITATIONS
 scansci-pdf sciverse-content <doc_id> --offset 0 --limit 700
 scansci-pdf sciverse-resource "dt=xxx/p_yyy/f3.png" --output-dir ./figures
 scansci-pdf sciverse-catalog --samples
 ```
+
+</details>
 
 ## 机构通道
 
@@ -257,7 +265,8 @@ scansci-pdf elsevier-setup --api-key YOUR_KEY
 scansci-pdf elsevier-check --doi 10.1016/j.example
 ```
 
-### WebVPN（高校代理）
+<details>
+<summary><strong>WebVPN（高校代理）</strong></summary>
 
 ```text
 1. scansci_pdf_schools(action="search", query="北京")  → 搜你的学校
@@ -268,7 +277,10 @@ scansci-pdf elsevier-check --doi 10.1016/j.example
 
 支持 100+ 所中国高校，命令行等价：`scansci-pdf schools 北京` / `scansci-pdf setup 北京航空航天大学`。
 
-### CARSI（出版商联邦认证）
+</details>
+
+<details>
+<summary><strong>CARSI（出版商联邦认证）</strong></summary>
 
 ```text
 1. scansci_pdf_config(key="carsi_enabled", value="true")
@@ -280,7 +292,10 @@ scansci-pdf elsevier-check --doi 10.1016/j.example
 `scansci_pdf_login(kind="carsi", publisher="sage-cn")` 登录；之后下载会复用已保存会话，
 从文章页解析实际 `articleId` 并请求站点自身的 PDF 下载接口，无需反复开启浏览器。
 
-### 中文文献（NCPSSD / 知网 / 万方 / 维普）
+</details>
+
+<details>
+<summary><strong>中文文献（NCPSSD / 知网 / 万方 / 维普）</strong></summary>
 
 中文 DOI（`10.3969/...`、`10.16235/j.cnki...` 等）不走 Crossref，ScanSci PDF 会自动切换到中文通道，按顺序尝试：
 
@@ -303,7 +318,10 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 - **CAJ 格式**：知网部分论文只提供 `.caj`。下载器会保留 `.caj` 扩展名（不会伪装成 `.pdf`），并返回 CAJViewer / `caj2pdf` 转换提示；详情页有「PDF下载」时优先取 PDF。
 - **关闭开关**：`ncpssd_enabled`、`cn_journal_direct`、`cn_databases_enabled`（默认均开启）。
 
-### EZProxy（图书馆代理）
+</details>
+
+<details>
+<summary><strong>EZProxy（图书馆代理）</strong></summary>
 
 ```text
 1. scansci_pdf_config(key="ezproxy_enabled", value="true")
@@ -320,6 +338,8 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 
 登录检测以 ezproxy/libproxy 域名下的会话 cookie 为准，不会把「被重定向到出版商原站」
 误判为登录成功；会话校验也只探测代理自身的 `/login` 端点，对两类部署都有效。
+
+</details>
 
 <details>
 <summary><strong>支持的出版商路由表</strong>（19 条路由，18 家出版商 + Generic，自动生成）</summary>
@@ -391,6 +411,20 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 </details>
 
 <details>
+<summary><strong>常用场景配置</strong>（直接照抄）</summary>
+
+| 场景 | 推荐配置 / 命令 |
+|---|---|
+| 只要合法来源 | `scansci-pdf config-cmd download_strategy legal_only` + `scansci-pdf config-cmd scihub_enabled false` |
+| 校园网批量下载 | `batch_workers 2`、`request_delay_min 5`、`request_delay_max 12`，降低被封概率 |
+| 机构订阅优先 | 配置 `vpnsci_*` / `carsi_*` 后 `scansci-pdf setup <学校>` 或 `scansci-pdf login`，再用 `download_strategy oa_first` |
+| 纯语义证据检索 | `scansci-pdf sciverse-setup --token <TOKEN> --test` → `scansci-pdf sciverse-search "研究问题"` |
+| 中文文献 | 保持 `ncpssd_enabled` / `cn_journal_direct` / `cn_databases_enabled` 为 true；校外配 CARSI 或校园网 |
+| 只查元数据 / DOI | `scansci-pdf sciverse-meta-search "关键词" --year-from 2020 --sort citation_count:desc` |
+
+</details>
+
+<details>
 <summary><strong>配置参考</strong>（完整表）</summary>
 
 通过 `scansci_pdf_config` 或 `scansci-pdf config-cmd` 修改：
@@ -415,6 +449,7 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 | `cn_databases_enabled` | `true` | 知网/万方/维普（校园网 IP 或 CARSI） |
 | `auto_relogin` | `true` | 机构会话自愈：下载前自动校验 WebVPN 会话，明确过期才弹浏览器重登 |
 | `cache_ttl_hours` | `168` | 下载缓存 TTL（小时），设 0 禁用 |
+| `openalex_api_key` | 空 | OpenAlex API Key（可选，用于 OpenAlex Content API 与更高请求配额） |
 | `elsevier_api_key` | 空 | Elsevier / ScienceDirect API Key |
 | `elsevier_insttoken` | 空 | Elsevier institutional token，仅拿不到校园出口时需要（找机构管理员申请） |
 | `springer_api_key` | 空 | Springer TDM API Key（机构订阅 + ORCID 关联；JATS XML 全文） |
@@ -583,19 +618,22 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 
 更偏好异步交流？欢迎直接在 [Issues](https://github.com/Rimagination/scansci-pdf/issues) 或 [Discussions](https://github.com/Rimagination/scansci-pdf/discussions) 区开贴。
 
-## 赞助者
+<details>
+<summary><strong>赞助者、贡献者与致谢</strong></summary>
+
+### 赞助者
 
 <a href="https://github.com/qwlei328-maker"><img src="https://avatars.githubusercontent.com/u/257463305?v=4" width="50" height="50" alt="qwlei328-maker" title="Natasha"/></a>
 <a href="https://github.com/jingqingqiu1"><img src="https://avatars.githubusercontent.com/u/87510394?v=4" width="50" height="50" alt="jingqingqiu1" title="jingqingqiu1"/></a>
 <a href="https://github.com/minqifeng"><img src="https://avatars.githubusercontent.com/u/61303605?v=4" width="50" height="50" alt="minqifeng" title="minqifeng"/></a>
 
-## 贡献者
+### 贡献者
 
 <a href="https://github.com/annsyun"><img src="https://avatars.githubusercontent.com/u/151621087?v=4" width="50" height="50" alt="annsyun" title="annsyun"/></a>
 
 - **[annsyun](https://github.com/annsyun)** — SAGE 中国站（sage.cnpereading.com）机构授权下载通道：CARSI 会话复用、`articleId` 解析与站点原生下载接口（[#58](https://github.com/Rimagination/scansci-pdf/pull/58)）
 
-## 致谢
+### 致谢
 
 本项目在开发过程中参考和借鉴了以下开源项目：
 
@@ -606,6 +644,8 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 - **[cloakbrowser](https://github.com/CloakHQ/CloakBrowser)** — Chromium stealth 浏览器引擎
 
 感谢以上项目作者的开源贡献。
+
+</details>
 
 ## 许可证
 

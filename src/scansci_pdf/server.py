@@ -334,9 +334,16 @@ def _sciverse_search_impl(
     citation_max: int | None = None,
     doc_ids: list[str] | None = None,
     filters_json: str = "",
+    enrich_dois: bool = False,
 ) -> str:
     """Semantic evidence search via Sciverse agentic-search."""
-    from .sources.sciverse import SciverseError, agentic_search, build_filters, is_configured
+    from .sources.sciverse import (
+        SciverseError,
+        agentic_search,
+        build_filters,
+        enrich_hits_with_metadata,
+        is_configured,
+    )
 
     config = load_config()
     if not is_configured(config):
@@ -377,8 +384,18 @@ def _sciverse_search_impl(
         return json.dumps(exc.to_dict(), ensure_ascii=False)
 
     hits = payload.get("hits") if isinstance(payload.get("hits"), list) else []
+    doi_before = sum(1 for hit in hits if hit.get("doi"))
+    if enrich_dois and hits:
+        hits = enrich_hits_with_metadata(hits, config)
+    doi_added = sum(1 for hit in hits if hit.get("doi")) > doi_before
     return json.dumps(
-        {"success": True, "source": "sciverse", "count": len(hits), "hits": hits},
+        {
+            "success": True,
+            "source": "sciverse",
+            "count": len(hits),
+            "doi_enriched": doi_added,
+            "hits": hits,
+        },
         ensure_ascii=False,
     )
 
@@ -514,6 +531,7 @@ def _sciverse_meta_search_impl(
             "collection": collection,
             "count": len(results),
             "total_count": payload.get("total_count") or payload.get("total"),
+            "total_count_capped": bool(payload.get("total_count_capped")),
             "page": payload.get("page"),
             "page_size": payload.get("page_size"),
             "next_cursor": payload.get("next_cursor"),
@@ -633,6 +651,7 @@ def scansci_pdf_sciverse(
     output_dir: str = "",
     collection: str = "papers",
     include_sample_values: bool = False,
+    enrich_dois: bool = False,
 ) -> str:
     """Sciverse: action=search|content|meta_search|relations|resource|catalog (evidence, metadata, citations, figures; needs key)."""
     if action == "search":
@@ -651,6 +670,7 @@ def scansci_pdf_sciverse(
             citation_max=citation_max,
             doc_ids=doc_ids,
             filters_json=filters_json,
+            enrich_dois=enrich_dois,
         )
     if action == "content":
         return _sciverse_content_impl(doc_id=doc_id, offset=offset, limit=limit)

@@ -1,4 +1,8 @@
-"""MCP server exposing scansci-pdf tools for Claude Code."""
+"""Legacy MCP surface (4-tool PaperFetcher server).
+
+Canonical MCP surface: :mod:`scansci_pdf.server`, launched by
+``scansci-pdf run``. This module is kept for old Claude Code configs.
+"""
 
 import logging
 import sys

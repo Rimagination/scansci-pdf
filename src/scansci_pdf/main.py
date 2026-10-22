@@ -1017,17 +1017,24 @@ def sciverse_search_cmd(
     citation_max: int = typer.Option(None, help="Maximum citation count"),
     doc_ids: str = typer.Option("", "--doc-ids", help="Comma-separated doc_id hard scope"),
     filters_json: str = typer.Option("", help="Advanced Sciverse filters JSON (merged last)"),
+    enrich_dois: bool = typer.Option(False, "--enrich-dois", help="Resolve DOI/unique_id for hits (one extra meta-search call)"),
     json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
 ) -> None:
     """Semantic evidence search via Sciverse agentic-search (needs sciverse_api_key).
 
     Returns citable chunks with doc_id/chunk_id/offset/page_no. Read more
     context with 'scansci-pdf sciverse-content <doc_id> --offset N'.
+    Use --enrich-dois when the hits will be fed into download/selection.
 
     Setup:
       scansci-pdf config-cmd sciverse_api_key <token>   # https://sciverse.space/tokens
     """
-    from .sources.sciverse import SciverseError, agentic_search, build_filters
+    from .sources.sciverse import (
+        SciverseError,
+        agentic_search,
+        build_filters,
+        enrich_hits_with_metadata,
+    )
 
     config = _sciverse_config_or_exit()
 
@@ -1066,8 +1073,15 @@ def sciverse_search_cmd(
         raise typer.Exit(1) from None
 
     hits = payload.get("hits") if isinstance(payload.get("hits"), list) else []
+    doi_before = sum(1 for hit in hits if hit.get("doi"))
+    if enrich_dois and hits:
+        hits = enrich_hits_with_metadata(hits, config)
+    doi_added = sum(1 for hit in hits if hit.get("doi")) > doi_before
     if json_output:
-        print(json.dumps({"count": len(hits), "hits": hits}, indent=2, ensure_ascii=False))
+        print(json.dumps(
+            {"count": len(hits), "doi_enriched": doi_added, "hits": hits},
+            indent=2, ensure_ascii=False,
+        ))
         return
     if not hits:
         print("No results. Broadening the query or relaxing filters can help (EMPTY_RESULT).")
@@ -1088,6 +1102,8 @@ def sciverse_search_cmd(
             loc.append(f"offset {hit['offset']}")
         if hit.get("score") is not None:
             loc.append(f"score {hit['score']}")
+        if hit.get("doi"):
+            loc.append(f"doi {hit['doi']}")
         loc.append(f"doc_id {hit.get('doc_id') or '?'}")
         print(f"    {'  '.join(loc)}")
         chunk = str(hit.get("chunk") or "").strip().replace("\n", " ")
@@ -1196,7 +1212,8 @@ def sciverse_meta_search_cmd(
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     total = payload.get("total_count") or payload.get("total") or len(results)
-    print(f"Sciverse meta-search: {len(results)} result(s), total={total}\n")
+    total_label = f">={total}" if payload.get("total_count_capped") else str(total)
+    print(f"Sciverse meta-search: {len(results)} result(s), total={total_label}\n")
     for i, row in enumerate(results, 1):
         title = str(row.get("title") or "Untitled")
         authors = row.get("author")

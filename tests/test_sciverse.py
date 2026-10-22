@@ -156,7 +156,9 @@ def test_content_omits_limit_without_offset(monkeypatch):
     session = FakeSession(FakeResponse(payload={"text": "full", "more": False}))
     monkeypatch.setattr(sciverse_mod, "_get_session", lambda cfg: session)
 
-    assert content("d_abc", config=_config())["text"] == "full"
+    payload = content("d_abc", config=_config())
+    assert payload["text"] == "full"
+    assert payload["chars_returned"] == 4  # live API may omit it; fallback fills it
     method, url, kwargs = session.calls[0]
     assert method == "GET"
     assert url == "https://sciverse.test/content"
@@ -355,6 +357,93 @@ def test_meta_search_builds_body_and_cursor(monkeypatch):
     assert "page" not in cursor_body and "page_size" not in cursor_body
 
 
+def test_meta_search_marks_capped_total(monkeypatch):
+    from scansci_pdf.sources.sciverse import meta_search
+
+    session = FakeSession(FakeResponse(payload={"results": [], "total_count": 10000}))
+    monkeypatch.setattr(sciverse_mod, "_get_session", lambda cfg: session)
+    payload = meta_search("q", config=_config())
+    assert payload["total_count_capped"] is True
+
+    session = FakeSession(FakeResponse(payload={"results": [], "total_count": 9999}))
+    monkeypatch.setattr(sciverse_mod, "_get_session", lambda cfg: session)
+    payload = meta_search("q", config=_config())
+    assert "total_count_capped" not in payload
+
+
+def test_enrich_records_with_meta_fills_doi(monkeypatch):
+    from scansci_pdf.sources.sciverse import enrich_records_with_meta
+
+    records = [{
+        "doc_id": "d_1",
+        "title": "agentic title",
+        "doi": "",
+        "year": "",
+        "cited_by_count": 0,
+        "journal": "",
+        "source": "sciverse",
+    }]
+    monkeypatch.setattr(
+        sciverse_mod,
+        "_metadata_by_doc_id",
+        lambda ids, cfg: {
+            "d_1": {
+                "doi": "10.1/x",
+                "unique_id": "paper:10.1/x",
+                "year": 2022,
+                "cited_by_count": 11,
+                "journal": "Nature",
+            }
+        },
+    )
+    out = enrich_records_with_meta(records, _config())
+    assert out[0]["doi"] == "10.1/x"
+    assert out[0]["unique_id"] == "paper:10.1/x"
+    assert out[0]["year"] == 2022
+    assert out[0]["cited_by_count"] == 11
+    assert out[0]["journal"] == "Nature"
+
+
+def test_enrich_hits_with_metadata_fills_raw_fields(monkeypatch):
+    from scansci_pdf.sources.sciverse import enrich_hits_with_metadata
+
+    hits = [{"doc_id": "d_1", "title": "t"}]
+    monkeypatch.setattr(
+        sciverse_mod,
+        "_metadata_by_doc_id",
+        lambda ids, cfg: {
+            "d_1": {
+                "doi": "10.1/x",
+                "unique_id": "paper:10.1/x",
+                "year": 2022,
+                "cited_by_count": 11,
+                "journal": "Nature",
+            }
+        },
+    )
+    out = enrich_hits_with_metadata(hits, _config())
+    assert out[0]["doi"] == "10.1/x"
+    assert out[0]["unique_id"] == "paper:10.1/x"
+    assert out[0]["publication_published_year"] == 2022
+    assert out[0]["citation_count"] == 11
+    assert out[0]["publication_venue_name_unified"] == "Nature"
+
+
+def test_search_sciverse_enriches_doi_when_requested(monkeypatch):
+    from scansci_pdf.sources.sciverse import search_sciverse
+
+    session = FakeSession(FakeResponse(payload={"hits": [_hit()]}))
+    monkeypatch.setattr(sciverse_mod, "_get_session", lambda cfg: session)
+    monkeypatch.setattr(
+        sciverse_mod,
+        "_metadata_by_doc_id",
+        lambda ids, cfg: {"d_abc": {"doi": "10.1/x", "unique_id": "paper:10.1/x"}},
+    )
+    results = search_sciverse("q", limit=1, config=_config(), enrich_dois=True)
+    assert results[0]["doi"] == "10.1/x"
+    assert results[0]["unique_id"] == "paper:10.1/x"
+
+
 def test_meta_search_requires_query_or_filters():
     from scansci_pdf.sources.sciverse import meta_search
 
@@ -411,6 +500,37 @@ def test_meta_search_results_maps_metadata():
         "influential_citation_count": 3,
         "fwci": 1.5,
     }]
+
+
+def test_meta_search_results_coerces_float_year_and_counts():
+    from scansci_pdf.sources.sciverse import meta_search_results
+
+    payload = {
+        "results": [{
+            "title": "A paper",
+            "publication_published_year": 2022.0,
+            "citation_count": 11.0,
+            "influential_citation_count": 3.0,
+        }]
+    }
+    row = meta_search_results(payload)[0]
+    assert row["year"] == 2022
+    assert row["cited_by_count"] == 11
+    assert row["influential_citation_count"] == 3
+
+
+def test_to_search_results_coerces_float_year_and_counts():
+    from scansci_pdf.sources.sciverse import to_search_results
+
+    payload = {
+        "hits": [_hit(
+            publication_published_year=2022.0,
+            citation_count=11.0,
+        )]
+    }
+    row = to_search_results(payload)[0]
+    assert row["year"] == 2022
+    assert row["cited_by_count"] == 11
 
 
 def test_meta_search_papers_builds_year_filters(monkeypatch):
@@ -574,6 +694,29 @@ def test_merge_preserves_sciverse_fields_on_title_duplicate():
     assert record["evidence"][0]["chunk_id"] == "c_x"
     assert record["cited_by_count"] == 9
     assert set(record["source"].split("+")) == {"ncpssd", "sciverse"}
+
+
+def test_merge_uses_doc_id_when_titles_differ():
+    from scansci_pdf.search import _merge_search_results
+
+    base = [{
+        "title": "agentic title",
+        "doc_id": "d_x",
+        "source": "sciverse",
+        "evidence": [{"chunk_id": "c_x", "chunk": "evidence"}],
+    }]
+    extra = [{
+        "title": "metadata title",
+        "doc_id": "d_x",
+        "doi": "10.1/x",
+        "unique_id": "paper:10.1/x",
+        "source": "sciverse-meta",
+    }]
+    merged = _merge_search_results(base, extra)
+    assert len(merged) == 1
+    assert merged[0]["doi"] == "10.1/x"
+    assert merged[0]["unique_id"] == "paper:10.1/x"
+    assert merged[0]["evidence"][0]["chunk_id"] == "c_x"
 
 
 def test_merge_does_not_collapse_different_dois():
