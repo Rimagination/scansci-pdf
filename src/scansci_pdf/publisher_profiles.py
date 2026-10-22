@@ -1,4 +1,21 @@
-"""Publisher profiles for deterministic browser workflows."""
+"""Publisher profiles for deterministic browser workflows.
+
+INSTITUTION RECIPE SYSTEM
+=========================
+Each publisher profile has GENERIC markers that work for ANY institution (auth_url_markers,
+auth_title_markers, sso_text_markers, institution_input_selectors). These are used for
+detecting SSO pages, searching for institutions, and clicking generic UI elements.
+
+Additionally, profiles may have institution_result_selectors -- these are Tsinghua-specific
+overrides that supplement the generic text-based selectors. They are ONLY activated when
+the user's configured institution IS Tsinghua University (gated by
+_institution_query_is_tsinghua() in publisher_batch.py).
+
+To add support for another institution's specialized selectors, follow the same pattern:
+1. Add the institution-specific selectors to the profile's institution_result_selectors
+2. Add a gating condition in publisher_batch.py (e.g., _institution_query_is_peking())
+3. The generic text-based selectors will still work for unrecognized institutions
+"""
 
 from __future__ import annotations
 
@@ -103,11 +120,15 @@ ACS_PROFILE = PublisherProfile(
         "/sso/",
         "/login",
     ),
+    # "Tsinghua" must not be a title marker: an entitled Tsinghua article page
+    # carries it in its <title>, and matching it there would classify the page
+    # as logged out before the body-based session check can run. The IdP pages
+    # that really need detecting are caught by auth_url_markers above.
     auth_title_markers=(
-        "Tsinghua",
         "OpenAthens",
         "Identity",
         "Login",
+        "Sign In",
     ),
     sso_text_markers=(
         "access through",
@@ -782,6 +803,44 @@ SCIENCE_PROFILE = PublisherProfile(
     supplementary_url_markers=("supplementary", "supplement", "suppl_file"),
 )
 
+OPTICA_PROFILE = PublisherProfile(
+    name="Optica",
+    article_url_template="https://doi.org/{doi}",
+    # Optica's article id (ol-48-1-57) is not derivable from the DOI, but
+    # viewmedia.cfm accepts the DOI itself as uri= (#59).
+    pdf_url_templates=(
+        "https://opg.optica.org/viewmedia.cfm?r=1&uri={doi}",
+        "https://opg.optica.org/viewmedia.cfm?r=1&uri={doi_quoted}",
+    ),
+    success_url_markers=("opg.optica.org",),
+    auth_url_markers=(
+        "login.openathens.net",
+        "opg.optica.org/login",
+        "/saml/",
+        "/sso/",
+        "/login",
+    ),
+    auth_title_markers=("OpenAthens", "Institutional Login", "Sign In", "Login", "Identity"),
+    sso_text_markers=(
+        "institutional login",
+        "sign in via your institution",
+        "log in through your institution",
+        "access through your institution",
+        "access provided by",
+        "openathens",
+    ),
+    aliases=("optica", "osa", "opg", "optica-publishing-group", "optical-society-of-america"),
+    doi_prefixes=("10.1364",),
+    sample_dois=("10.1364/ol.47.013297",),
+    base_domains=("opg.optica.org", "optica.org", "osapublishing.org"),
+    pdf_url_markers=("viewmedia.cfm", "/pdf", "download", "pdf"),
+    institution_input_selectors=(
+        "input[type='search']",
+        "input[type='text']",
+        "input",
+    ),
+)
+
 PUBLISHER_PROFILES = {
     "acs": ACS_PROFILE,
     "aip": AIP_PROFILE,
@@ -796,6 +855,7 @@ PUBLISHER_PROFILES = {
     "ieee": IEEE_PROFILE,
     "iop": IOP_PROFILE,
     "mdpi": MDPI_PROFILE,
+    "optica": OPTICA_PROFILE,
     "oxfordacademic": OXFORD_ACADEMIC_PROFILE,
     "plos": PLOS_PROFILE,
     "pnas": PNAS_PROFILE,

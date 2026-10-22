@@ -1,57 +1,34 @@
-"""Shared HTTP utilities with retry logic."""
+"""Re-export the shared HTTP retry helpers from the root package.
 
-import logging
-import os
-import time
-import urllib3
+The publisher stack shipped in two copies that drifted apart; this module is
+now a re-export shim over the single implementation in
+``scansci_pdf.http_utils``
+(#71 item 5). Keep the implementation there, not here.
 
-import requests
+Nothing is bound at import time. A reload of the canonical module replaces its
+function objects, and a shim that captured them at import time would keep
+handing back the stale ones -- so every name is resolved through
+``__getattr__`` instead, and ``__all__`` is derived from the canonical module
+on demand.
+"""
 
-logger = logging.getLogger(__name__)
-
-# Auto-detect local HTTP connector and disable SSL verification warnings.
-if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
-   os.environ.get("http_proxy") or os.environ.get("https_proxy"):
-    _SSL_VERIFY = False
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-else:
-    _SSL_VERIFY = True
+from .. import http_utils as _canonical
 
 
-def request_with_retry(
-    method: str,
-    url: str,
-    *,
-    max_retries: int = 3,
-    retry_backoff: float = 2.0,
-    **kwargs,
-) -> requests.Response:
-    """HTTP request with exponential backoff retry on 429/5xx/network errors."""
-    kwargs.setdefault("timeout", 30)
-    kwargs.setdefault("verify", _SSL_VERIFY)
+def __getattr__(name: str):
+    """Resolve every name through the canonical module.
 
-    for attempt in range(max_retries + 1):
-        try:
-            resp = requests.request(method, url, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < max_retries:
-                    wait = retry_backoff ** attempt
-                    logger.warning(
-                        "HTTP %d for %s, retrying in %.1fs (attempt %d/%d)",
-                        resp.status_code, url, wait, attempt + 1, max_retries,
-                    )
-                    time.sleep(wait)
-                    continue
-            return resp
-        except requests.RequestException as e:
-            if attempt < max_retries:
-                wait = retry_backoff ** attempt
-                logger.warning(
-                    "Request error for %s: %s, retrying in %.1fs (attempt %d/%d)",
-                    url, e, wait, attempt + 1, max_retries,
-                )
-                time.sleep(wait)
-            else:
-                raise
+    The old copy exposed the canonical module''s own imported names as its
+    attributes too (``requests``, ``time`` and friends), and code that patched
+    or read one of them through this path must keep working.
+    """
+    if name == "__all__":
+        return [n for n in dir(_canonical) if not n.startswith("_")]
+    try:
+        return getattr(_canonical, name)
+    except AttributeError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
 
-    return requests.request(method, url, **kwargs)
+
+def __dir__() -> list[str]:
+    return sorted(set(dir(_canonical)) | {"__getattr__", "__dir__", "__all__"})

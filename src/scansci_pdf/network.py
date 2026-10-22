@@ -49,36 +49,68 @@ def is_cloudflare_challenge(title: str) -> bool:
     lower = title.lower()
     return any(sig in lower for sig in CLOUDFLARE_CHALLENGE_SIGNALS)
 
-_session_pool: dict[str, requests.Session] = {}
+_thread_local = threading.local()
 
 
 def configured_proxy(config: dict[str, Any] | None = None) -> str:
     """The one explicit proxy setting: SCANSCI_PDF_PROXY env > network_proxy config.
 
-    HTTP_PROXY/HTTPS_PROXY are ignored project-wide (NO_PROXY='*' in the
-    package __init__, sessions run trust_env=False — the ZCode proxy CA
-    workaround). Campus-bound traffic (Elsevier/Springer TDM entitlement is
+    HTTP_PROXY/HTTPS_PROXY are ignored: sessions run trust_env=False, and the
+    package __init__ adds NO_PROXY='*' only in the IDE-proxy situation it was
+    written for. Campus-bound traffic (Elsevier/Springer TDM entitlement is
     IP-based) must go through THIS setting or it egresses off-campus.
     """
     return os.environ.get("SCANSCI_PDF_PROXY") or (config or {}).get("network_proxy") or ""
 
 
+def _new_pooled_session(proxies: dict[str, str] | None) -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"User-Agent": USER_AGENT})
+    if proxies:
+        if not HAS_SOCKS and any(v.startswith("socks") for v in proxies.values()):
+            log.warning("SOCKS proxy configured but PySocks not installed. Install: pip install requests[socks]")
+        session.proxies = dict(proxies)
+    return session
+
+
+def thread_session(proxies: dict[str, str] | None = None) -> requests.Session:
+    """A pooled Session owned by the calling thread.
+
+    Batch downloads and batch validation run on a ThreadPoolExecutor.
+    requests.Session is not documented as thread-safe, so handing every worker
+    one shared session is not right -- but building a fresh session per request
+    costs a TCP + TLS handshake per PDF, measured at 40 connections for a 40-PDF
+    loopback run against 4 when the session is reused (#72).
+
+    One session per thread gets both: connections are reused within a worker,
+    and no session state is shared across workers.
+    """
+    key = tuple(sorted((proxies or {}).items())) or ("__direct__",)
+    sessions = getattr(_thread_local, "sessions", None)
+    if sessions is None:
+        sessions = _thread_local.sessions = {}
+    session = sessions.get(key)
+    if session is None:
+        session = _new_pooled_session(proxies)
+        sessions[key] = session
+    return session
+
+
 def _get_session(config: dict[str, Any]) -> requests.Session:
-    proxy = configured_proxy(config)
-    key = proxy or "__none__"
-    if key not in _session_pool:
-        s = requests.Session()
-        s.trust_env = False
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
-        s.mount("https://", adapter)
-        s.mount("http://", adapter)
-        s.headers.update({"User-Agent": USER_AGENT})
-        if proxy:
-            if proxy.startswith("socks") and not HAS_SOCKS:
-                log.warning("SOCKS proxy configured but PySocks not installed. Install: pip install requests[socks]")
-            s.proxies = {"http": proxy, "https": proxy}
-        _session_pool[key] = s
-    return _session_pool[key]
+    """A pooled session for the configured proxy, owned by the calling thread.
+
+    Kept under its existing name because it is what the rest of the package
+    calls, but it no longer hands the *same* object to every caller. `fetch`
+    reaches it from the batch worker pools, so a module-level pool here meant one
+    `requests.Session` behind every worker -- the shared-session question from
+    #71 item 4. Delegating to `thread_session` fixes every caller at once,
+    including any that is not obviously concurrent today.
+    """
+    return thread_session(proxy_dict(configured_proxy(config)))
 
 
 def request_timeout(config: dict[str, Any]) -> tuple[int, int]:
@@ -89,6 +121,18 @@ def proxy_dict(proxy: str | None) -> dict[str, str] | None:
     if not proxy:
         return None
     return {"http": proxy, "https": proxy}
+
+
+def allow_self_signed(config: dict[str, Any] | None) -> bool:
+    """Whether TLS verification may be skipped for campus connectors.
+
+    Self-signed certificates are a real property of campus connectors
+    (EasyConnect/aTrust, some WebVPN gateways), so the ability has to exist —
+    but as an explicit, default-off choice. Deriving it from "a proxy
+    environment variable is set" turned certificate validation off for every
+    request on the shared retry path, off-machine proxies and all (#70).
+    """
+    return bool((config or {}).get("institutional_allow_self_signed", False))
 
 
 def select_proxy_for_url(url: str, config: dict[str, Any], use_tor: bool = False) -> str | None:

@@ -1,0 +1,18 @@
+- insert:
+    - id: scansci-pdf-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: scansci
+        transport: stdio
+        command: scansci-pdf
+        args:
+          - run
+        # Batch downloads of hundreds of papers outlive the 60 s MCP default.
+        toolCallTimeoutMs: 1800000
+        # A missing Python CLI must not stop the harness from booting; the
+        # scansci-pdf skill can then report the setup steps to the user.
+        failOnStartupError: false
+
+    - id: scansci-pdf-skills
+      name: scansci-pdf
+      config: {}

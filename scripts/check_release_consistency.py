@@ -8,6 +8,7 @@ Asserts that the version is identical across:
 - .codex-plugin/plugin.json
 - zcode-plugin/.zcode-plugin/plugin.json
 - zcode-plugin/marketplace.json
+- dsh-plugin/package.json
 
 and that the MCP tool surface is still 18 tools and the skill no longer
 references retired tool names. Exit code 1 with a diff report on any mismatch.
@@ -72,6 +73,7 @@ def _read_version_sources() -> list[tuple[str, str]]:
     for rel in (
         ".codex-plugin/plugin.json",
         "zcode-plugin/.zcode-plugin/plugin.json",
+        "dsh-plugin/package.json",
     ):
         data = json.loads((ROOT / rel).read_text(encoding="utf-8"))
         sources.append((rel, str(data.get("version", ""))))
@@ -117,6 +119,32 @@ def _check_skill_docs() -> list[str]:
     return problems
 
 
+def _check_dsh_skill_copies() -> list[str]:
+    """The npm bundle ships copies; keep them byte-identical to the sources."""
+    problems = []
+    pairs = (
+        ("skill/SKILL.md", "dsh-plugin/skills/scansci-pdf/SKILL.md"),
+        (
+            "zcode-plugin/skills/scansci-sort/SKILL.md",
+            "dsh-plugin/skills/scansci-sort/SKILL.md",
+        ),
+    )
+    for source_rel, copy_rel in pairs:
+        source = (ROOT / source_rel).read_text(encoding="utf-8").replace("\r\n", "\n")
+        copy_path = ROOT / copy_rel
+        if not copy_path.exists():
+            problems.append(
+                f"{copy_rel}: missing; run node dsh-plugin/scripts/sync-skills.mjs"
+            )
+            continue
+        copy = copy_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        if copy != source:
+            problems.append(
+                f"{copy_rel}: stale; run node dsh-plugin/scripts/sync-skills.mjs"
+            )
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expect", help="Require this exact version (e.g. 1.12.0)")
@@ -133,6 +161,7 @@ def main() -> int:
 
     problems += _check_mcp_tool_count()
     problems += _check_skill_docs()
+    problems += _check_dsh_skill_copies()
 
     if problems:
         print("RELEASE CONSISTENCY FAILED:")

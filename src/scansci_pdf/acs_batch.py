@@ -5,6 +5,7 @@ high-volume publishers can reuse the same deterministic browser state machine.
 """
 
 from .publisher_batch import (
+    ACSCloakBatchDownloader,
     DownloadResult,
     PaperRecord,
     PublisherBatchDownloader,
@@ -13,6 +14,7 @@ from .publisher_batch import (
 )
 
 __all__ = [
+    "ACSCloakBatchDownloader",
     "DownloadResult",
     "PaperRecord",
     "PublisherBatchDownloader",

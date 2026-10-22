@@ -23,8 +23,8 @@ tool routing or configuration guidance.
 
 - Search or identify papers: `scansci_pdf_search`, `scansci_pdf_sciverse`
   (`search`/`content`/`meta_search`/`relations`/`catalog`/`resource`; requires
-  `sciverse_api_key`), `scansci_pdf_verify_identifiers`, and
-  `scansci_pdf_parse_list` for list files.
+  `sciverse_api_key`), `scansci_pdf_prepare_queue(action="verify")` for
+  identifiers, and `scansci_pdf_parse_list` for list files.
 - Configure Sciverse (optional semantic evidence/metadata): `scansci_pdf_sciverse_setup`
   with `token` and `test=true`; without it, search still works and returns a `config_hint`.
 - Resolve open-access locations: `scansci_pdf_prepare_queue(action="resolve_oa")`.
@@ -40,6 +40,14 @@ tool routing or configuration guidance.
   every download result.
 - Prefer open-access, publisher API, and institution-authorized routes when no
   source preference is given.
+- Institutional access turns on two things users routinely get wrong, so state
+  them rather than let the attempt fail: the login has to happen in the browser
+  the tool opens (`scansci_pdf_login`) because cookies are captured from that
+  context — a headless window, or the user's own browser, yields no session —
+  and the **egress IP is what the publisher sees**, so a system-wide proxy moves
+  it off campus and silently voids IP-based entitlement. When a publisher
+  refuses a PDF that should be entitled, read the IP on the publisher's error
+  page before concluding the institution lacks a subscription.
 - Ask before opening an interactive login, importing cookies, or changing access
   configuration.
 - Treat API keys, cookies, proxy credentials, and institution details as secrets;

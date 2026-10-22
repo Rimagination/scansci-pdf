@@ -71,23 +71,31 @@ def test_download_pdf_sets_referer_header(monkeypatch, tmp_path: Path):
     """download_pdf sends the Referer header on the cookie session path."""
     seen: dict = {}
 
+    import scansci_pdf.network as network
     import scansci_pdf.pdf_utils as pu
 
     class _S:
-        headers: dict = {}
+        headers: dict = {"User-Agent": "engine"}
         cookies: dict = {}
 
         def get(self, url, **kwargs):
-            seen["headers"] = dict(self.headers)
+            # What actually goes out: session headers overridden by the
+            # request's. download_pdf sets Referer/UA/cookies per request, so a
+            # session reused by the next PDF in this worker does not carry them.
+            effective = dict(self.headers)
+            effective.update(kwargs.get("headers") or {})
+            seen["headers"] = effective
+            seen["cookies"] = kwargs.get("cookies")
             return _Resp()
 
-    monkeypatch.setattr("requests.Session", lambda: _S())
+    monkeypatch.setattr(network, "thread_session", lambda *a, **k: _S())
 
     pu.download_pdf("https://sci.bban.top/pdf/10.1/x.pdf", tmp_path / "o.pdf",
                     {}, "test", require_pdf_like_url=False,
                     cookies={"a": "b"}, referer="https://sci-hub.vg/10.1/x")
 
     assert seen["headers"].get("Referer") == "https://sci-hub.vg/10.1/x"
+    assert seen["cookies"] == {"a": "b"}
 
 
 def test_download_pdf_browser_ua(monkeypatch, tmp_path: Path):
@@ -95,18 +103,21 @@ def test_download_pdf_browser_ua(monkeypatch, tmp_path: Path):
     UA even with Referer) — and the CHROME_UA import must not NameError."""
     seen: dict = {}
 
+    import scansci_pdf.network as network
     import scansci_pdf.pdf_utils as pu
     from scansci_pdf.network import CHROME_UA
 
     class _S:
-        headers: dict = {}
+        headers: dict = {"User-Agent": "engine"}
         cookies: dict = {}
 
         def get(self, url, **kwargs):
-            seen["headers"] = dict(self.headers)
+            effective = dict(self.headers)
+            effective.update(kwargs.get("headers") or {})
+            seen["headers"] = effective
             return _Resp()
 
-    monkeypatch.setattr("requests.Session", lambda: _S())
+    monkeypatch.setattr(network, "thread_session", lambda *a, **k: _S())
 
     r = pu.download_pdf("https://sci.bban.top/pdf/10.1/x.pdf", tmp_path / "o.pdf",
                         {}, "test", require_pdf_like_url=False,

@@ -33,7 +33,7 @@ scansci-pdf get <DOI>                    # 零配置竞速
 scansci-pdf fetch <DOI> [--output DIR]   # 7 步机构级联
 ```
 
-竞速分层:Tier1 出版商直链(4s) → Tier2 OpenAlex/Unpaywall(5s) → Tier3 EuropePMC/PMC/arXiv(8s) → Tier4 Sci-Hub/LibGen 无头浏览器(25s) → Tier5 WebVPN/CARSI(20s)。国内 Tor 常失败,直接不用。
+竞速分两阶段:Phase 1 免费源竞速(OA + 预印本 + 灰色源,整体 15s),任一成功即返回;失败才进 Phase 2 机构通道(整体 30s,进入前先做会话自愈)。策略为 `scihub_only`/`grey_only` 时不进 Phase 2。国内 Tor 常失败,直接不用。
 
 单篇竞速默认是**对冲级联**(`race_mode=hedge`):车道按评分排序,最优源先发,`hedge_delay_seconds`(默认 1.5s)内无响应才加发下一车道,已发车道快速失败则立即加发——请求量/反爬触发率比齐发降 3-5 倍,尾延迟几乎不变。`config set race_mode full` 恢复旧版齐发竞速。
 
@@ -75,7 +75,24 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 
 队列文件格式(机器可读,人也能手编):`identifier<TAB>channel<TAB>oa_url`,channel ∈ oa/elsevier/grey/institution/auto;`search --out` 与 csv/xlsx 解析自动打标(10.1016→elsevier)。`batch --lanes` 按车道调度:Elsevier API/OA 快车道并行 HTTP → 灰色源竞速 → 机构级联串行,失败逐级溢流。
 
-## 机构渠道(按 DOI 前缀路由,先快后慢)
+## 机构渠道(先定走哪条,再按 DOI 前缀路由)
+
+⚠️ **两件事占了机构失败的大多数,先确认再谈能不能下:**
+
+**1. 浏览器要用工具自己开的那一个。** `scansci_pdf_login` 打开的是工具自带的可见反检测浏览器,cookie 是从**那个上下文**抓取并落盘的——用户在别的浏览器里登录、或用无头模式,登录态都拿不到。所以:`browser_headless` 保持 `false`(机构登录/CAPTCHA/Cloudflare 都要可见窗口);后端用 `camoufox` 或 `cloakbrowser`(`patchright` 1.56~1.61 有 Turnstile 空白页 bug)。**用户坚持用自己的浏览器时不要硬拦**,有两条兜底:把内核指到他自己装的 Chrome(`config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"`),或导入 cookie(`scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")`;CARSI 还会自动读本机 Chrome 的 cookie 库)。
+
+**2. 出口 IP 决定机构权限。** 出版商(尤其 Elsevier)按请求源 IP 判权益。机器一旦开系统/全局代理,**工具和浏览器看到的出口就变成代理出口,机构授权当场失效**——典型症状是 `pdf.sciencedirectassets.com` 返回 "There was a problem providing the content you requested"(带 CPE 码,页面上会打印它看到的那个 IP)。**拿那个 IP 去核对是否属于机构网段,再下"学校没订阅"的结论。** 工具只认 `network_proxy`/`SCANSCI_PDF_PROXY`,**忽略** `HTTP_PROXY`/`HTTPS_PROXY`。
+
+| 你的情况 | 走哪条 | 怎么配 |
+|---|---|---|
+| 在校内(IP 认证) | 直连 | `is_campus_network=true`,跳过 HTTP 预检 |
+| 校外 + 出版商支持联邦认证 | **CARSI 优先** | `config-cmd carsi_idp_name <学校>`;策略明确"联邦优先于 WebVPN" |
+| 校外 + 学校有 WebVPN 网关 | WebVPN | `schools` 搜索 → `setup <学校>` → `login`(CAS) |
+| 学校只给 EasyConnect/aTrust | SOCKS5 连接器 | `network_proxy=socks5://…`(自签名证书另需 `institutional_allow_self_signed`) |
+| 学校给图书馆代理 | EZProxy | `ezproxy_login_url`(前缀式 / 域名重写式两种模板) |
+| 有 Elsevier/Springer key | 下方 1、2 两条 API 车道,最快且无需浏览器 | — |
+
+**学校名不要替用户猜**:用 `scansci_pdf_schools(action="search")` 让他确认,项目策略明确"不要默认任何学校"。
 
 1. **`10.1016`(Elsevier)→ Elsevier API**:key + 校园网 IP 即可,**无需 insttoken**,1–2 s/篇(需机构桶里常占一半以上)。
    ```bash

@@ -1,31 +1,34 @@
-"""HTML extraction router - dispatches to publisher-specific adapters."""
+"""Re-export the HTML extraction router from the root package.
 
-import logging
+The publisher stack shipped in two copies that drifted apart; this module is
+now a re-export shim over the single implementation in
+``scansci_pdf.extractors.html_extractor``
+(#71 item 5). Keep the implementation there, not here.
 
-from .publisher_adapters import acs, elsevier, generic, nature, rsc, tandfonline, wiley
+Nothing is bound at import time. A reload of the canonical module replaces its
+function objects, and a shim that captured them at import time would keep
+handing back the stale ones -- so every name is resolved through
+``__getattr__`` instead, and ``__all__`` is derived from the canonical module
+on demand.
+"""
 
-logger = logging.getLogger(__name__)
-
-# Ordered list of publisher adapters (checked in order)
-_ADAPTERS = [nature, elsevier, wiley, acs, rsc, tandfonline]
+from ...extractors import html_extractor as _canonical
 
 
-def extract(html: str, url: str = "") -> dict:
-    """Extract paper content from HTML, routing to the best adapter.
+def __getattr__(name: str):
+    """Resolve every name through the canonical module.
 
-    Args:
-        html: Raw HTML content.
-        url: The URL the HTML was fetched from (used for publisher detection).
-
-    Returns:
-        Dict with title, authors, abstract, full_text, figures, references.
+    The old copy exposed the canonical module''s own imported names as its
+    attributes too (``requests``, ``time`` and friends), and code that patched
+    or read one of them through this path must keep working.
     """
-    # Try publisher-specific adapters first
-    for adapter in _ADAPTERS:
-        if adapter.can_handle(url):
-            logger.info("Using %s adapter for %s", adapter.__name__, url)
-            return adapter.extract(html, url)
+    if name == "__all__":
+        return [n for n in dir(_canonical) if not n.startswith("_")]
+    try:
+        return getattr(_canonical, name)
+    except AttributeError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
 
-    # Fallback to generic
-    logger.info("Using generic adapter for %s", url)
-    return generic.extract(html, url)
+
+def __dir__() -> list[str]:
+    return sorted(set(dir(_canonical)) | {"__getattr__", "__dir__", "__all__"})

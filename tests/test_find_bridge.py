@@ -136,6 +136,10 @@ class TestDiscoveryGate:
         def slow_run(cmd, *a, **kw):
             raise subprocess.TimeoutExpired(cmd, timeout=kw.get("timeout", 45))
 
+        # Stub the PATH lookup: the gate would otherwise fail with
+        # DiscoveryUnavailableError wherever scansci-find is not installed
+        # (e.g. CI), masking the timeout path under test.
+        monkeypatch.setattr(discovery, "_cli_path", lambda: "/fake/bin/scansci-find")
         monkeypatch.setattr(discovery.subprocess, "run", slow_run)
         with pytest.raises(DiscoveryTimeoutError) as excinfo:
             discovery.verify([{"doi": "10.1000/x"}])
@@ -151,6 +155,7 @@ class TestDiscoveryGate:
         def slow_run(cmd, *a, **kw):
             raise subprocess.TimeoutExpired(cmd, timeout=kw.get("timeout", 45))
 
+        monkeypatch.setattr(discovery, "_cli_path", lambda: "/fake/bin/scansci-find")
         monkeypatch.setattr(discovery.subprocess, "run", slow_run)
         payload = json.loads(server.scansci_pdf_verify_identifiers('[{"doi": "10.1000/x"}]'))
         assert payload.get("stage") == "discovery"

@@ -1,21 +1,23 @@
 """Shared HTTP utilities with retry logic."""
 
 import logging
-import os
 import time
-import urllib3
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-# Auto-detect local HTTP connector and disable SSL verification warnings.
-if os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
-   os.environ.get("http_proxy") or os.environ.get("https_proxy"):
-    _SSL_VERIFY = False
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-else:
-    _SSL_VERIFY = True
+# Certificate verification stays on. "A proxy environment variable is set" is
+# not evidence that the network is trusted: those variables are commonly set
+# machine-wide on Windows, and reading them as a licence to skip validation
+# turned off certificate checking for every request on this shared retry path
+# -- the same path institutional cookies and publisher API keys travel over.
+# Suppressing InsecureRequestWarning hid the only signal that said so (#70).
+#
+# The single case that genuinely needs an exception is a self-signed campus
+# connector. That is now explicit and opt-in per call site via
+# network.allow_self_signed(config), and it logs when it applies.
+_SSL_VERIFY = True
 
 
 def request_with_retry(

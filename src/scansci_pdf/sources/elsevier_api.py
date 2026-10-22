@@ -105,38 +105,411 @@ def _article_eid_to_main_pdf(value: str) -> str:
     return f"{candidate}-main.pdf"
 
 
-def _attachment_container(el: ET.Element, parent_map: dict[ET.Element, ET.Element]) -> ET.Element:
-    node = parent_map.get(el, el)
+# Maximum characters of attachment metadata handed to the scorer. The scorer
+# pattern-matches that string, so a container that resolved to a shared
+# ancestor contributes every sibling attachment's markers -- and the
+# ancestor's own tag name, "full-text-retrieval-response" among them, reads
+# as a version-of-record claim (#89). A few KB is far more than one
+# attachment's own metadata needs.
+_ATTACHMENT_METADATA_WINDOW = 4096
+
+# Maximum characters taken from a single element's text. Without it one long
+# element (a 5,000-character label) fills the whole window and pushes the
+# block's *own* markers out of it -- which costs the version of record its
+# own "full-text" claim.
+_ATTACHMENT_METADATA_PART_CAP = 512
+
+# Elements that name an object id rather than hold attachment content.
+_ATTACHMENT_ID_TAGS = frozenset({"attachment-eid", "object-eid", "eid", "identifier"})
+
+# Elements that describe one attachment. The loose "attachment" in the tag
+# name would also match "attachment-size" and "attachment-metadata", which
+# describe nothing, so the index uses this explicit list.
+_ATTACHMENT_BLOCK_TAGS = frozenset({
+    "attachment", "attachments", "object", "objects", "web-pdf",
+})
+
+
+def _attachment_key(eid: str) -> str:
+    """Normalise an object id to the identity of the attachment it names.
+
+    ``1-s2.0-X-main.pdf`` and the bare article id ``1-s2.0-X`` name the same
+    version of record and share a key; ``1-s2.0-X-am.pdf`` and
+    ``1-s2.0-X-author_2017.pdf`` are different attachments and do not.
+    """
+    key = eid.strip().lower()
+    if key.endswith(".pdf"):
+        key = key[:-4]
+    if key.endswith("-main"):
+        key = key[:-5]
+    return key
+
+
+def _eids_in(el: ET.Element) -> list[str]:
+    """Object ids carried by one element: its own eid text, plus eid attributes."""
+    found: list[str] = []
+    local = _local_name(str(el.tag))
+    if local in {"attachment-eid", "object-eid"}:
+        text = _element_text(el)
+        if _looks_like_pdf_eid(text):
+            found.append(text)
+    elif local in {"eid", "identifier"}:
+        main_pdf = _article_eid_to_main_pdf(_element_text(el))
+        if main_pdf:
+            found.append(main_pdf)
+
+    for attr_name, attr_value in el.attrib.items():
+        attr_local = _local_name(str(attr_name))
+        if attr_local in {"attachment-eid", "object-eid", "eid"}:
+            value = str(attr_value).strip()
+            if _looks_like_pdf_eid(value):
+                found.append(value)
+            else:
+                main_pdf = _article_eid_to_main_pdf(value)
+                if main_pdf:
+                    found.append(main_pdf)
+    return found
+
+
+def _is_attachment_block(node: ET.Element) -> bool:
+    """True for a node that holds attachment content rather than naming an id.
+
+    ``<attachment-eid>`` and ``<object-eid>`` name an object; they do not
+    hold one, and treating them as blocks would stop the walk at an element
+    whose metadata is nothing but the id.
+    """
+    local = _local_name(str(node.tag))
+    if local in _ATTACHMENT_ID_TAGS:
+        return False
+    return "attachment" in local or "object" in local or local == "web-pdf"
+
+
+def _is_block_element(node: ET.Element) -> bool:
+    """True for the element that describes one attachment.
+
+    The loose test above would also match ``<attachment-size>`` and
+    ``<attachment-metadata>``, which describe nothing, so the block index
+    uses this explicit list instead.
+    """
+    return _local_name(str(node.tag)) in _ATTACHMENT_BLOCK_TAGS
+
+
+def _has_block_descendant(node: ET.Element) -> bool:
+    """True when the node holds another block: it is a holder, not a block.
+
+    ``<attachments><attachment>...</attachment></attachments>`` is a holder.
+    Its metadata belongs to every attachment inside it, so it must never be
+    used as the container of one of them (#89).
+    """
+    for sub in node.iter():
+        if sub is node:
+            continue
+        if _is_block_element(sub):
+            return True
+    return False
+
+
+def _declared_eids(node: ET.Element) -> list[str]:
+    """Every object id declared inside ``node``."""
+    found: list[str] = []
+    for sub in node.iter():
+        found.extend(_eids_in(sub))
+    return found
+
+
+def _declares_file_id(node: ET.Element) -> bool:
+    """True when the node names a file id itself.
+
+    The article id (``<eid>1-s2.0-X</eid>``) is turned into ``-main.pdf`` on
+    the way in, so a block that only carries the article id describes the
+    file less precisely than one that names the file id itself.
+    """
+    for sub in node.iter():
+        local = _local_name(str(sub.tag))
+        if local in {"attachment-eid", "object-eid"}:
+            if _looks_like_pdf_eid(_element_text(sub)):
+                return True
+        for attr_name, attr_value in sub.attrib.items():
+            attr_local = _local_name(str(attr_name))
+            if attr_local not in {"attachment-eid", "object-eid"}:
+                continue
+            if _looks_like_pdf_eid(str(attr_value).strip()):
+                return True
+    return False
+
+
+def _block_is_tight(node: ET.Element) -> bool:
+    """True when the node declares exactly one attachment.
+
+    Declarations are counted, not normalised keys: the article-level id and
+    the ``-main.pdf`` id name the same version of record, so a holder of two
+    blocks that normalise to one key would pass a key count while still
+    carrying the sibling's metadata.
+    """
+    return len(_declared_eids(node)) == 1
+
+
+def _block_is_scoped(node: ET.Element, key: str) -> bool:
+    """True when the node declares no attachment other than ``key``.
+
+    A holder of several attachments -- the plural ``attachments`` element, or
+    an ancestor spanning the whole article -- carries every sibling's
+    metadata, so a sibling's markers leak into this attachment's score (#89).
+    """
+    for eid in _declared_eids(node):
+        if _attachment_key(eid) != key:
+            return False
+    return True
+
+
+def _block_declares(node: ET.Element, key: str) -> bool:
+    """True when the node declares the attachment ``key``.
+
+    Unlike :func:`_block_is_scoped` this tolerates a block that also
+    holds something else -- a nested ``<object>``, say. The block's own label
+    still names the file, and losing it would turn an accepted manuscript
+    back into an ordinary candidate.
+    """
+    for eid in _declared_eids(node):
+        if _attachment_key(eid) == key:
+            return True
+    return False
+
+
+def _attachment_blocks(root: ET.Element) -> tuple[dict[str, ET.Element], dict[str, ET.Element]]:
+    """Index the tight attachment blocks by the attachment they declare.
+
+    Two indexes come back:
+
+    - by the exact object id a block declares, which names the file itself
+      and is therefore the strongest match;
+    - by the normalised attachment key, for the blocks that declare the
+      article id instead of a file id.
+
+    Only *tight* blocks are indexed, and never a holder: a node that
+    declares more than one attachment describes more than one attachment,
+    and a node that holds other blocks describes all of them (#89). A block
+    that names the file id wins over one that merely carries the article
+    id, because it describes the file more precisely.
+    """
+    found: list[tuple[str, ET.Element, bool]] = []
+    for node in root.iter():
+        if not _is_block_element(node):
+            continue
+        if _has_block_descendant(node):
+            continue
+        eids = _declared_eids(node)
+        if len(eids) != 1:
+            continue
+        found.append((eids[0], node, _declares_file_id(node)))
+
+    by_eid: dict[str, ET.Element] = {}
+    by_key: dict[str, ET.Element] = {}
+    for names_file in (True, False):
+        for eid, node, is_file_id in found:
+            if is_file_id != names_file:
+                continue
+            by_eid.setdefault(eid.strip().lower(), node)
+            by_key.setdefault(_attachment_key(eid), node)
+    return by_eid, by_key
+
+
+def _attachment_container(
+    el: ET.Element,
+    parent_map: dict[ET.Element, ET.Element],
+    eid: str,
+    blocks: tuple[dict[str, ET.Element], dict[str, ET.Element]],
+) -> ET.Element:
+    """The node whose metadata describes the attachment named by ``eid``.
+
+    Five candidates, in order of how well they describe *this* attachment:
+
+    1. the tight block that declares this exact object id -- the strongest
+       match, because it names the file rather than the article;
+    2. the nearest ancestor of the element that carried the id which holds
+       exactly one attachment, and that one;
+    3. the nearest ancestor that declares this attachment at all -- the block
+       may also hold a nested object, but its own label still names the file;
+    4. the tight block that declares this attachment's key, for the article
+       id that sits outside every attachment block;
+    5. the element that carried the id, which is the tightest scope there is.
+
+    Falling back to the id's *parent*, as this used to, was the defect: the
+    parent can be a node spanning the whole article, and the metadata of such
+    a node belongs to every attachment in it (#89).
+    """
+    key = _attachment_key(eid)
+
+    by_eid, by_key = blocks
+    block = by_eid.get(eid.strip().lower())
+    if block is not None:
+        return block
+
+    node = el
     while node is not None:
-        local = _local_name(str(node.tag))
-        if "attachment" in local or "object" in local or local == "web-pdf":
+        if (
+            _is_attachment_block(node)
+            and _block_is_tight(node)
+            and _block_is_scoped(node, key)
+        ):
             return node
         node = parent_map.get(node)
-    return parent_map.get(el, el)
+
+    node = el
+    while node is not None:
+        if _is_attachment_block(node) and _block_declares(node, key):
+            return node
+        node = parent_map.get(node)
+
+    block = by_key.get(key)
+    if block is not None:
+        return block
+    return el
+
+
+_ATTACHMENT_METADATA_MARKERS = (
+    # The claims the scorer reads out of the metadata. The window and the
+    # per-element cap bound how much of a container reaches the scorer, so a
+    # marker they cut away would change the score by up to 100 points. They
+    # are therefore collected over the full text and appended.
+    "full-text", "fulltext",
+    "page-count", "pages",
+    "attachment-size", "filesize", "file-size",
+    "supplement", "supplementary", "mmc", "appendix", "graphical", "thumbnail",
+    "-am.pdf", "aam-pdf", "accepted manuscript", "accepted-manuscript",
+    "author manuscript", "manuscript version", "submitted to",
+)
+
+
+def _marker_hits(text: str) -> list[str]:
+    """The decisive markers present in `text`."""
+    low = text.lower()
+    return [marker for marker in _ATTACHMENT_METADATA_MARKERS if marker in low]
+
+
+def _marker_survivors(text: str) -> str:
+    """The decisive markers present in `text`, as a compact tail.
+
+    A marker that falls outside the metadata window, or one the per-element
+    cap cuts in half, would silently change the score -- up to 100 points for
+    the version of record's own "full-text" claim. Collecting the markers
+    over the full text and appending them keeps the window a bound on the
+    size of the metadata rather than on what it says.
+    """
+    hits = _marker_hits(text)
+    if not hits:
+        return ""
+    return "[markers: " + " ".join(hits) + "]"
+
+
+def _name_survivors(el: ET.Element) -> str:
+    """The decisive markers carried by the container's element names.
+
+    An element's name -- "page-count", "attachment-size" -- reaches the
+    haystack only through the part it produces, and the builder produces a
+    part only for an element that has text. Reading the name of an element
+    that produced no part would add a marker no version of the metadata
+    ever held: an empty ``<supplementary-material/>`` would demote the
+    version of record on its own.
+
+    The attribute names and values are read the same way -- the builder
+    emits an attribute part only for a non-empty value -- so the survivors
+    are exactly the markers the unbounded metadata holds.
+    """
+    hits: list[str] = []
+    for node in el.iter():
+        local = _local_name(str(node.tag))
+        name_hits = _marker_hits(local)
+        if name_hits and _element_text(node):
+            hits.extend(name_hits)
+        for attr_name, attr_value in node.attrib.items():
+            attr_local = _local_name(str(attr_name))
+            if attr_value:
+                hits.extend(_marker_hits(attr_local))
+                hits.extend(_marker_hits(str(attr_value)))
+    if not hits:
+        return ""
+    return "[markers: " + " ".join(sorted(set(hits))) + "]"
+
+
+def _cap_text(text: str) -> str:
+    """Shorten one element's text to the per-element cap.
+
+    The beginning is kept: the markers the scorer reads ("supplementary",
+    "thumbnail", "accepted manuscript") sit at the head of a label, and a cut
+    through the middle of one would leave the scorer a word it cannot match.
+    A cut that does land inside a marker is repaired by appending the
+    markers the full text holds, so a marker is never truncated into
+    something the scorer cannot read.
+    """
+    if len(text) <= _ATTACHMENT_METADATA_PART_CAP:
+        return text
+    cut = text[:_ATTACHMENT_METADATA_PART_CAP]
+    space = cut.rfind(" ")
+    if space > _ATTACHMENT_METADATA_PART_CAP // 2:
+        cut = cut[:space]
+    survivors = _marker_survivors(text)
+    return f"{cut} {survivors}" if survivors else cut
 
 
 def _attachment_metadata(el: ET.Element) -> str:
+    """Metadata of an attachment's container, bounded to a few KB.
+
+    Two bounds apply. The total keeps a pathological container from filling
+    the scorer's haystack; the per-element cap keeps one long element from
+    pushing the block's own markers out of the window, which would cost the
+    version of record its own "full-text" claim.
+
+    The bounds are a bound on size, not on meaning: the markers the scorer
+    reads are collected over the whole container and appended, so a marker
+    the window or the cap would have cut away cannot change the score.
+    """
     parts: list[str] = []
+    size = 0
     for node in el.iter():
         local = _local_name(str(node.tag))
         text = _element_text(node)
         if text:
-            parts.append(f"{local}:{text}")
+            part = f"{local}:{_cap_text(text)}"
+            if size + len(part) + 1 > _ATTACHMENT_METADATA_WINDOW:
+                break
+            parts.append(part)
+            size += len(part) + 1
         for attr_name, attr_value in node.attrib.items():
             attr_local = _local_name(str(attr_name))
             if attr_value:
-                parts.append(f"{attr_local}:{attr_value}")
+                part = f"{attr_local}:{attr_value}"
+                if size + len(part) + 1 > _ATTACHMENT_METADATA_WINDOW:
+                    break
+                parts.append(part)
+                size += len(part) + 1
+        if size >= _ATTACHMENT_METADATA_WINDOW:
+            break
+    names = _name_survivors(el)
+    if names:
+        parts.append(names)
     return " ".join(parts).lower()
 
 
+_ACCEPTED_MANUSCRIPT_MARKERS = (
+    "-am.pdf", "aam-pdf", "accepted manuscript", "accepted-manuscript",
+    "author manuscript", "manuscript version", "submitted to",
+)
+
+
 def _attachment_score(eid: str, metadata: str) -> int:
+    eid_lower = eid.lower()
     haystack = f"{eid} {metadata}".lower()
     score = 0
-    if eid.lower().endswith(".pdf"):
+    if eid_lower.endswith(".pdf"):
         score += 20
     if "pdf" in haystack:
         score += 10
-    if "main" in haystack or "full-text" in haystack or "fulltext" in haystack:
+    # Scope the version-of-record boost to the object id. Matching "main"
+    # anywhere in the haystack also catches accepted-manuscript attachments:
+    # their storage URLs carry a "/main/" path segment, so an `-am.pdf` picked
+    # up the same +100 and outranked the `-main.pdf` it accompanies (#73).
+    if eid_lower.endswith("-main.pdf") or "full-text" in haystack or "fulltext" in haystack:
         score += 100
     if "page-count" in haystack or "pages" in haystack:
         score += 5
@@ -144,9 +517,14 @@ def _attachment_score(eid: str, metadata: str) -> int:
         score += 5
     if any(
         marker in haystack
-        for marker in ("supplement", "supplementary", "mmc", "appendix", "graphical")
+        for marker in ("supplement", "supplementary", "mmc", "appendix", "graphical", "thumbnail")
     ):
         score -= 100
+    if any(marker in haystack for marker in _ACCEPTED_MANUSCRIPT_MARKERS):
+        # Below the version of record even if the manuscript claims
+        # "full-text" (+100), yet still above supplementary material (-100) so
+        # a manuscript-only article keeps its best candidate.
+        score -= 60
     return score
 
 
@@ -158,38 +536,26 @@ def _extract_pdf_attachment_eids(xml_text: str) -> list[str]:
         return []
 
     parent_map = {child: parent for parent in root.iter() for child in parent}
+
+    # Index the tight attachment blocks: a node that names an attachment and
+    # declares exactly one of them. The article-level id sits outside every
+    # block, so this index is what describes the version of record it names.
+    blocks = _attachment_blocks(root)
+
     candidates: list[tuple[int, int, str]] = []
     seen: set[str] = set()
 
     for el in root.iter():
-        local = _local_name(str(el.tag))
-        found: list[str] = []
-
-        if local in {"attachment-eid", "object-eid"}:
-            text = _element_text(el)
-            if _looks_like_pdf_eid(text):
-                found.append(text)
-        elif local in {"eid", "identifier"}:
-            main_pdf = _article_eid_to_main_pdf(_element_text(el))
-            if main_pdf:
-                found.append(main_pdf)
-
-        for attr_name, attr_value in el.attrib.items():
-            attr_local = _local_name(str(attr_name))
-            if attr_local in {"attachment-eid", "object-eid", "eid"}:
-                value = str(attr_value).strip()
-                if _looks_like_pdf_eid(value):
-                    found.append(value)
-                else:
-                    main_pdf = _article_eid_to_main_pdf(value)
-                    if main_pdf:
-                        found.append(main_pdf)
-
-        for eid in found:
-            if eid in seen:
+        for eid in _eids_in(el):
+            # De-duplicate on the attachment identity, not on the spelling:
+            # "1-S2.0-X-MAIN.PDF" and "1-s2.0-x-main.pdf" are one file, and
+            # asking the object store for it twice wastes a request.
+            key = _attachment_key(eid)
+            if key in seen:
                 continue
-            seen.add(eid)
-            metadata = _attachment_metadata(_attachment_container(el, parent_map))
+            seen.add(key)
+            container = _attachment_container(el, parent_map, eid, blocks)
+            metadata = _attachment_metadata(container)
             candidates.append((_attachment_score(eid, metadata), len(candidates), eid))
 
     candidates.sort(key=lambda item: (-item[0], item[1]))
@@ -355,7 +721,23 @@ def _api_request(
             timeout=30,
             allow_redirects=True,
         )
-    except requests.exceptions.SSLError:
+    except requests.exceptions.SSLError as exc:
+        # A campus proxy that terminates TLS presents its own certificate, so a
+        # retry without verification is the one legitimate case -- but it has to
+        # be asked for. Retrying unverified by default turned a certificate error
+        # into a silent success (#70).
+        from ..config import load_config
+        from ..network import allow_self_signed as _allow_self_signed
+        if not _allow_self_signed(load_config()):
+            logger.warning(
+                "Elsevier API: TLS verification failed and no retry was made "
+                "(set institutional_allow_self_signed for a self-signed campus connector): %s",
+                exc,
+            )
+            return None
+        logger.warning(
+            "Elsevier API: retrying without TLS verification (institutional_allow_self_signed is on)"
+        )
         try:
             session = requests.Session()
             session.trust_env = False

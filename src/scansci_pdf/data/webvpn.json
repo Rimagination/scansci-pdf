@@ -99,6 +99,9 @@
     },
     "华北电力大学": {
       "host": "myvpn.ncepu.edu.cn"
+    },
+    "北京中医药大学": {
+      "host": "webvpn.bucm.edu.cn"
     }
   },
   "福建": {

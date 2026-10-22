@@ -1,90 +1,34 @@
-"""Shared cookie persistence for institutional access sessions."""
+"""Re-export the cookie store from the root package.
 
-from __future__ import annotations
+The publisher stack shipped in two copies that drifted apart; this module is
+now a re-export shim over the single implementation in
+``scansci_pdf.session_store``
+(#71 item 5). Keep the implementation there, not here.
 
-import json
-import logging
-import time
-from pathlib import Path
-from typing import Any
+Nothing is bound at import time. A reload of the canonical module replaces its
+function objects, and a shim that captured them at import time would keep
+handing back the stale ones -- so every name is resolved through
+``__getattr__`` instead, and ``__all__`` is derived from the canonical module
+on demand.
+"""
 
-logger = logging.getLogger(__name__)
+from .. import session_store as _canonical
 
 
-class CookieStore:
-    """Persist browser cookies and load them into requests sessions."""
+def __getattr__(name: str):
+    """Resolve every name through the canonical module.
 
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
+    The old copy exposed the canonical module''s own imported names as its
+    attributes too (``requests``, ``time`` and friends), and code that patched
+    or read one of them through this path must keep working.
+    """
+    if name == "__all__":
+        return [n for n in dir(_canonical) if not n.startswith("_")]
+    try:
+        return getattr(_canonical, name)
+    except AttributeError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
 
-    def load(self, *, now: float | None = None) -> list[dict[str, Any]]:
-        """Load valid cookies from disk."""
-        if not self.path.exists():
-            return []
 
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to read cookies from %s: %s", self.path, exc)
-            return []
-
-        if not isinstance(raw, list):
-            logger.warning("Cookie file %s does not contain a cookie list", self.path)
-            return []
-
-        now = time.time() if now is None else now
-        cookies = [self._normalize_cookie(c) for c in raw if isinstance(c, dict)]
-        return [c for c in cookies if self._is_valid(c, now)]
-
-    def save(self, cookies: list[dict[str, Any]], *, now: float | None = None) -> list[dict[str, Any]]:
-        """Save valid cookies to disk and return the persisted list."""
-        now = time.time() if now is None else now
-        valid = [
-            normalized
-            for cookie in cookies
-            if isinstance(cookie, dict)
-            for normalized in [self._normalize_cookie(cookie)]
-            if self._is_valid(normalized, now)
-        ]
-
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(valid, indent=2, ensure_ascii=False), encoding="utf-8")
-        return valid
-
-    def load_into(self, session: Any, *, now: float | None = None) -> bool:
-        """Load valid cookies into a requests-like session."""
-        cookies = self.load(now=now)
-        self.apply_to_session(session, cookies)
-        return bool(cookies)
-
-    @staticmethod
-    def apply_to_session(session: Any, cookies: list[dict[str, Any]]) -> None:
-        """Apply cookies to a requests-like session cookie jar."""
-        for cookie in cookies:
-            name = cookie.get("name")
-            value = cookie.get("value")
-            if name is None or value is None:
-                continue
-            session.cookies.set(
-                name,
-                value,
-                domain=cookie.get("domain", ""),
-                path=cookie.get("path", "/"),
-            )
-
-    @staticmethod
-    def _normalize_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(cookie)
-        if normalized.get("expires", 0) < 0:
-            normalized["expires"] = 0
-        return normalized
-
-    @staticmethod
-    def _is_valid(cookie: dict[str, Any], now: float) -> bool:
-        if cookie.get("name") is None or cookie.get("value") is None:
-            return False
-
-        expires = cookie.get("expires", 0)
-        if not expires or expires == 0:
-            return True
-        return expires > now
+def __dir__() -> list[str]:
+    return sorted(set(dir(_canonical)) | {"__getattr__", "__dir__", "__all__"})

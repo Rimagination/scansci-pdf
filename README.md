@@ -8,7 +8,7 @@
 
   让 Agent 替你下载学术论文 —— 20+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
 
-  [这是什么](#这是什么) · [快速开始](#快速开始) · [怎么用](#怎么用) · [检索与发现](#检索与发现) · [机构通道](#机构通道) · [参考](#参考) · [故障排查](#故障排查) · [使用边界](#使用边界与合规) · [社区](#交流群--community)
+  [这是什么](#这是什么) · [客户端兼容性](#客户端兼容性) · [浏览器](#浏览器成功率的最大单一变量) · [快速开始](#快速开始) · [怎么用](#怎么用) · [检索与发现](#检索与发现) · [机构通道](#机构通道) · [参考](#参考) · [故障排查](#故障排查) · [使用边界](#使用边界与合规) · [社区](#交流群--community)
 </div>
 
 ## 这是什么
@@ -47,6 +47,59 @@ ScanSci PDF 是一个面向 AI Agent 的学术文献获取与发现工具。它�
 得到：规整命名的 PDF + 引用/附件/Markdown + 明确的失败原因
 ```
 
+## 客户端兼容性
+
+同一份 MCP 配置，在不同宿主里能走多远并不一样。差别来自**宿主平台自身的策略与沙箱**，不是插件配置——仓库里没有任何按宿主分支的代码，`.mcp.json` 对所有宿主都是同一份。
+
+<details>
+<summary><strong>宿主差异与策略对齐</strong></summary>
+
+| 宿主 | 灰色源（Sci-Hub / LibGen） | 说明 |
+|---|---|---|
+| ZCode、Claude Code | 可用 | 灰源正常参与竞速；`fastest`（默认）下自动作为付费墙兜底 |
+| DeepSeek Harness（DSH） | 可用 | 通过 `dsh-plugin/` bundle 以 stdio 接入同一 MCP server；宿主策略与原 MCP 客户端一致 |
+| Codex、workbuddy | 被平台拦截 | 宿主策略限制该类请求；OA 与机构通道不受影响，付费墙论文仍可走学校订阅 |
+| 其他标准 MCP 客户端 | 取决于客户端 | 工具本身不做宿主判断，只看客户端是否允许该类请求 |
+
+在受限宿主里，如果想显式对齐策略、不再尝试灰源，把下载策略固定成 `legal_only`：
+
+```bash
+scansci-pdf config-cmd download_strategy legal_only
+```
+
+在允许灰源的宿主里不需要任何设置。想反过来只走灰源，用 `scihub_only`；只走灰源竞速但不要 OA，用 `grey_only`。
+
+</details>
+
+## 浏览器：成功率的最大单一变量
+
+同一篇论文、同一台机器，换个浏览器内核，能不能下下来可以完全不同。很多人不在意自己跑的是哪个浏览器，但**成功率差别很大**。
+
+<details>
+<summary><strong>四条原因与建议设置</strong></summary>
+
+- **登录态只来自工具打开的那个浏览器。** `scansci_pdf_login` 会打开工具自带的可见浏览器，cookie 是从**那个上下文**抓取并落盘的。用你的日常 Chrome / Safari / Edge 登录、或让窗口无头运行，都拿不到会话——症状是"我明明登录成功了"，下载却仍然失败。
+- **Cloudflare / CAPTCHA 能不能过，取决于内核。** 内核过旧或指纹不对，验证页直接把请求挡掉。`patchright` 1.56–1.61 有一个 Turnstile 组件空白页的已知 bug，表现就是"验证框根本没出现"。
+- **出版商看 TLS / HTTP 指纹。** 同样的 cookie，Python HTTP 客户端可能 403，而真实浏览器能过——所以机构通道的最后一公里常常只能交给浏览器去取字节。
+- **浏览器看到的出口 IP，就是出版商看到的 IP。** 一旦开了系统/全局代理，出口变成代理机房，机构 IP 授权当场失效（见下方 Elsevier 一节的 CPE 说明）。
+
+**建议设置。** 代码默认是 `patchright`，而它恰好在 Turnstile 上有上面那个 bug，所以值得显式改掉：
+
+| 配置项 | 建议 | 说明 |
+|---|---|---|
+| `browser_backend` | `cloakbrowser` 或 `camoufox` | 回退顺序为 `patchright → cloakbrowser → camoufox`；cloakbrowser 低于 0.5.9 会被**硬拒绝**（内核过旧会被出版商标记并拒绝服务），camoufox 是反指纹 Firefox 内核 |
+| `browser_headless` | `false` | 机构登录 / CAPTCHA / Cloudflare 都需要可见窗口 |
+| `browser_executable` | 你装的 Chrome 路径 | **坚持用自己的浏览器就用这一条**：让工具拿你装的 Chrome 当内核，而不是把登录态留在工具外面 |
+
+```bash
+scansci-pdf config-cmd browser_backend cloakbrowser
+scansci-pdf config-cmd browser_headless false
+```
+
+另外两条兜底：把内核指向你自己的 Chrome（`config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"`），或直接导入 cookie（`scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")`；CARSI 还会自动读取本机 Chrome 的 cookie 库）。用 `scansci-pdf browser-status` 可查看当前实际生效的内核。
+
+</details>
+
 ## 快速开始
 
 安装和更新是同一句话——对 Codex、ZCode、Claude Code 都这么说：
@@ -70,6 +123,15 @@ scansci-pdf check
 pip install scansci-pdf
 ```
 
+> **基础安装只含 HTTP 通道。** 浏览器后端与 WebVPN 的加密依赖都是**可选 extra**，不装的话 OA 与出版商 API 车道照常工作，但**机构登录（WebVPN / CARSI / EZProxy）和隐身浏览器通道会失败**。按你的场景补装：
+
+| 想做什么 | 装什么 |
+|---|---|
+| WebVPN / 校园连接器 | `pip install "scansci-pdf[vpnsci]"`（提供 `pycryptodome`，WebVPN 的 URL 加密必需） |
+| 浏览器登录、CARSI、绕过 Cloudflare | `pip install "scansci-pdf[cloakbrowser]"`（隐身 Chromium 内核） |
+| 一组装齐（推荐） | `pip install "scansci-pdf[cloakbrowser,vpnsci]"` |
+| 换用 Camoufox / Patchright 内核 | `pip install "scansci-pdf[camoufox]"` 或 `pip install "scansci-pdf[patchright]"` |
+
 标准 MCP 配置（Claude Desktop / Cursor / Windsurf / Cline / Cherry Studio…）：
 
 ```json
@@ -91,7 +153,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command '$p=Join-Path $HOME "plug
 
 ZCode：插件市场搜 `scansci-pdf` 一键安装，MCP、skills、快捷命令一次带齐。
 
-**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置。
+DeepSeek Harness（DSH）：**Plugins → Add plugin** 填 npm 包名 `scansci-pdf`（与 PyPI 包同名；开发时也可填本仓库 `dsh-plugin/` 的绝对路径）。bundle 会自动注册 stdio MCP server 和 `scansci-pdf` / `scansci-sort` 两个 skill，无需重启。也可以直接对 agent 说“安装这个 DSH bundle：<仓库路径>/dsh-plugin”。详见 [`dsh-plugin/README.md`](./dsh-plugin/README.md)。
+
+**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](./zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置；DeepSeek Harness = npm 包 `scansci-pdf` 或 [`dsh-plugin/`](./dsh-plugin/)（bundle：MCP client + skills + locale/icon）。
 
 手动安装（Codex）：仓库放到 `%USERPROFILE%\plugins\scansci-pdf` → `python -m pip install -e .` → 插件管理页刷新个人 marketplace；Codex CLI 可用时执行 `codex plugin add scansci-pdf@local-plugins`。
 
@@ -142,7 +206,7 @@ docker compose up -d
 
 ```bash
 scansci-pdf get 10.1038/nature12373            # 单篇下载
-scansci-pdf batch 文献清单.xlsx --lanes        # 批量下载（xlsx/csv/队列通用，四车道调度）
+scansci-pdf batch 文献清单.xlsx --lanes        # 批量下载（xlsx/csv/队列通用，分车道调度）
 scansci-pdf search "carbon cycle" --out q.txt  # 检索结果落成队列文件，直接接 batch
 scansci-pdf web                                # 浏览器 Web UI
 scansci-pdf check                              # 依赖与服务配置体检
@@ -265,6 +329,20 @@ scansci-pdf elsevier-setup --api-key YOUR_KEY
 scansci-pdf elsevier-check --doi 10.1016/j.example
 ```
 
+> **权益跟随出口 IP**：API key 的机构身份靠 key + 请求源 IP 一起判定。离校使用要经 `network_proxy` / `SCANSCI_PDF_PROXY` 走校园出口；回 403 `Requestor configuration settings insufficient` 或网页带 `CPE` 码，先核对出口 IP 是否在机构网段，不要直接归因于“学校没订阅”。工具忽略 `HTTP_PROXY` / `HTTPS_PROXY`。
+
+<details>
+<summary><strong>Springer TDM（无需浏览器）</strong></summary>
+
+`10.1007` 的 Springer 论文走 Full Text API，交付 **JATS XML 全文**（非 PDF，同名 `.xml` 落在 PDF 目录旁）：
+
+1. 到 [dev.springernature.com](https://dev.springernature.com/) 免费注册，用 ORCID 关联机构
+2. 配置 `scansci_pdf_springer_setup` 或 `scansci_pdf_config(key="springer_api_key", value="...")`
+
+`scansci_pdf_springer_setup(test=true)` 会探测机构订阅与 TDM 权限：`entitled` / `not_entitled` / `invalid_key`；无权限时该车道自动让位给其他源。
+
+</details>
+
 <details>
 <summary><strong>WebVPN（高校代理）</strong></summary>
 
@@ -342,6 +420,20 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 </details>
 
 <details>
+<summary><strong>校园连接器（EasyConnect / aTrust）与自签名证书</strong></summary>
+
+部分学校用 EasyConnect / aTrust 连接器而非 WebVPN 网页网关。把连接器的 SOCKS5 地址填进
+`network_proxy`（如 `socks5://127.0.0.1:1080`），工具会走直连、不做 WebVPN URL 改写。
+
+这些连接器常带自签名证书。TLS 校验默认开启；确认连接器可信后再显式放宽：
+
+```bash
+scansci-pdf config-cmd institutional_allow_self_signed true
+```
+
+</details>
+
+<details>
 <summary><strong>支持的出版商路由表</strong>（19 条路由，18 家出版商 + Generic，自动生成）</summary>
 
 <!-- publisher-table:start -->
@@ -375,6 +467,7 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 <details>
 <summary><strong>MCP 工具全表</strong>（20 个，按意图分组）</summary>
 
+<!-- mcp-tools:start -->
 | 想做什么 | 工具 |
 |---|---|
 | 下载单篇（可拉附件、转 Markdown） | `scansci_pdf_download` |
@@ -387,6 +480,7 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 | API Key 配置（Elsevier / Springer） | `scansci_pdf_elsevier_setup` · `scansci_pdf_springer_setup` |
 | 引文 / 元数据 / Zotero | `scansci_pdf_citation` · `scansci_pdf_zotero_push` |
 | 配置 / 诊断 / Tor | `scansci_pdf_config` · `scansci_pdf_diagnostics` · `scansci_pdf_tor` |
+<!-- mcp-tools:end -->
 
 每个工具的参数与说明由 MCP `tools/list` 自带，Agent 会自动看到。
 
@@ -425,7 +519,7 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 </details>
 
 <details>
-<summary><strong>配置参考</strong>（完整表）</summary>
+<summary><strong>常用配置项</strong>（完整列表见 <code>scansci-pdf config-cmd</code>）</summary>
 
 通过 `scansci_pdf_config` 或 `scansci-pdf config-cmd` 修改：
 
@@ -433,17 +527,21 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 |---|---:|---|
 | `output_dir` | `~/.scansci-pdf/papers` | PDF 保存目录 |
 | `auto_rename` | `true` | 自动按作者/标题重命名 |
-| `download_strategy` | `fastest` | 下载策略 |
+| `download_strategy` | `fastest` | 下载策略（见下表） |
+| `email` | 占位地址 | Unpaywall 等 API 的联系邮箱。**默认是 `scansci-pdf@example.invalid` 这个占位值，务必改成真实邮箱**，否则 OA 定位会失败 |
 | `scihub_enabled` | `true` | 启用 Sci-Hub/LibGen 类来源 |
 | `network_proxy` | 空 | HTTP/SOCKS 代理地址（机构 IP 授权类来源——Elsevier/Springer TDM API——必须走这里；`HTTP_PROXY`/`HTTPS_PROXY` 环境变量被有意忽略，也可用 `SCANSCI_PDF_PROXY` 环境变量） |
 | `proxy_pool` | 空 | 逗号分隔的代理列表；非空时批量下载按代理轮换出口 IP |
 | `batch_workers` | `10` | 批量下载并发数（被封 IP 时建议调低到 2） |
 | `request_delay_min` | `2.0` | 请求间随机延迟下限（秒） |
 | `request_delay_max` | `5.0` | 请求间随机延迟上限（秒） |
+| `is_campus_network` | `false` | 声明当前在校园网内（IP 认证直连，跳过 HTTP 预检） |
+| `institutional_allow_self_signed` | `false` | 允许校园连接器使用自签名证书（确认可信后再开） |
 | `vpnsci_enabled` / `instsci_enabled` | `false` | 启用 WebVPN |
 | `vpnsci_school` / `instsci_school` | 空 | WebVPN 学校名称 |
 | `carsi_enabled` | `false` | 启用 CARSI |
 | `carsi_idp_name` | 空 | CARSI 机构名称 |
+| `ezproxy_enabled` / `ezproxy_login_url` | `false` / 空 | EZProxy 开关与代理模板 |
 | `ncpssd_enabled` | `true` | 国家哲学社会科学文献中心免费全文源 |
 | `cn_journal_direct` | `true` | 中文期刊官网直链 PDF |
 | `cn_databases_enabled` | `true` | 知网/万方/维普（校园网 IP 或 CARSI） |
@@ -459,10 +557,15 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 | `sciverse_base_url` | `https://api.sciverse.space` | API 地址（测试/代理时可覆盖） |
 | `sciverse_sub_queries` | `0` | 查询改写数 0–4；调高召回更好但延迟更高 |
 | `sciverse_timeout_seconds` | `45` | 单次请求读超时（秒） |
-| `use_tor_for_scihub` | `false` | Sci-Hub 走 Tor |
-| `flaresolverr_url` | `http://localhost:8191/v1` | FlareSolverr 服务地址 |
-| `browser_headless` | `false` | 浏览器是否无头运行 |
+| `browser_backend` | `patchright` | 浏览器内核：`patchright` / `camoufox` / `cloakbrowser` |
+| `browser_executable` | 空 | 指定 Chrome/Edge 路径；留空自动探测 |
+| `browser_headless` | `false` | 浏览器是否无头运行（机构登录建议 `false`） |
 | `browser_humanize` | `true` | 浏览器人性化操作 |
+| `race_mode` | `hedge` | 单篇竞速模式：`hedge`（对冲级联，省请求）/ `full`（全部齐发） |
+| `use_tor_for_scihub` | `true` | Sci-Hub 走内嵌 Tor（国内直连域名常不稳时有用） |
+| `tor_binary_path` | 空 | 指定 tor 二进制；留空则用内嵌安装，最后才回退 PATH |
+| `scihub_domains` | 内置镜像列表 | Sci-Hub 域名列表（默认含 12 条历史镜像，可按可达性增删） |
+| `flaresolverr_url` | `http://127.0.0.1:8191/v1` | FlareSolverr 服务地址 |
 
 </details>
 
@@ -471,10 +574,12 @@ scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
 
 | 策略 | 描述 |
 |------|------|
-| `fastest`（默认） | 多数据源并行，最快获胜 |
+| `fastest`（默认） | 多数据源并行，最快获胜（含灰源） |
 | `oa_first` | 优先开放获取，Sci-Hub 兜底 |
-| `scihub_only` / `scihub_first` | 仅用 / 优先 Sci-Hub |
-| `legal_only` | 仅使用合法数据源（不含 Sci-Hub/LibGen） |
+| `scihub_first` | 优先 Sci-Hub，其他源兜底 |
+| `scihub_only` | 只用 Sci-Hub / LibGen |
+| `grey_only` | 只用灰源竞速，不碰 OA 与机构通道 |
+| `legal_only` | 只用合法数据源（不含 Sci-Hub / LibGen），适合受宿主策略限制的环境 |
 
 - 每个输出目录的 `.doi_index.json` 记录 `{file, source, strategy, ts}`；超过 `cache_ttl_hours` 视为过期自动重下。
 - 显式策略与缓存记录的策略不符时视为未命中重新下载，无需手动删缓存。
@@ -513,6 +618,10 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 <details>
 <summary><strong>工作原理：分层竞速（Tier 0–5）</strong></summary>
 
+**单篇下载分两阶段**：Phase 1 免费源竞速（OA + 预印本 + 灰色源，整体 15s）；失败后进入 Phase 2 机构通道（InstSci → CARSI → WebVPN → EZProxy，整体 30s，进入前先做会话自愈）。策略为 `scihub_only` / `grey_only` 时不进入 Phase 2。
+
+**批量下载走分车道调度**：快车道（Elsevier API + OA + Springer TDM）→ 灰色源竞速 → 机构级联；失败逐级溢流，限流/超时在车道跑完后冷却 60 秒重试一次。
+
 下载一篇论文时，ScanSci PDF 同时启动多个数据源，按优先级分层竞速，第一个成功立即返回：
 
 ```
@@ -532,6 +641,9 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 <summary><strong>近期更新</strong></summary>
 
 - **Sciverse 检索接入** — 语义证据片段、结构化元数据、引文图谱、图表下载四层能力；`scansci-pdf sciverse-setup` 一键配置并验证，未配置时搜索与体检会主动提示。
+- **DeepSeek Harness 适配** — 新增 `dsh-plugin/` bundle：一次注册 stdio MCP server 与 `scansci-pdf` / `scansci-sort` 两个 skill，批量调用超时放宽到 30 分钟。
+- **Springer TDM 车道** — 配置 `springer_api_key` 后，`10.1007` 论文走 Springer 全文 API（JATS XML，1–2 秒）。
+- **校园连接器** — EasyConnect / aTrust 的 SOCKS5 可直接填入 `network_proxy`；自签名证书用 `institutional_allow_self_signed` 显式放宽。
 - **统一任务管线** — 任意输入（xlsx/csv 表格、文献清单、检索结果、文章页 URL）自动归一成带渠道预测的下载队列；`batch --lanes` 四车道调度：Elsevier API / OA 快车道并行，灰色源竞速与机构级联接续，失败逐级溢流。
 - **SI 附件下载** — `get <DOI> --si` 把补充材料一并拉下来；被 Cloudflare 挡住的 Elsevier 自动切隐身浏览器通道。
 - **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
@@ -553,11 +665,17 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 | Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可（insttoken 仅拿不到校园出口时申请）；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
 | Elsevier 403 Requestor configuration settings insufficient | key 有效但 key+出口未配置全文：`scansci-pdf elsevier-check --doi <DOI>`——未走校园出口则配 `network_proxy`/`SCANSCI_PDF_PROXY`；已走校园出口则是机构未给 key 开 API 全文权限（找机构 Elsevier 管理员，insttoken 为替代路径） |
 | 新申请的 Elsevier key 一直 403 | 注册环节问题：机构邮箱注册 Elsevier 账号 + 校园网/学校 VPN 下创建 key（门户靠邮箱域 + 出口 IP 识别机构）；创建后当场 `scansci-pdf elsevier-check` 验证 |
+| 10.1007 论文没走 Springer TDM | `scansci_pdf_springer_setup(test=true)` 确认权限；`not_entitled` 表示机构订阅未含 TDM 权利 |
 | 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_diagnostics(check="network")`，给出针对性修复建议 |
 | 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`scansci-pdf browser-doctor` 会标出 outdated） |
-| WebVPN / CARSI 登录失败 | `pip install "scansci-pdf[cloakbrowser,instsci]"`，在可见浏览器完成登录后重试 |
 | Sci-Hub 连不上 | 内嵌 Tor：`scansci_pdf_tor(action="start", use_bridges=true)`，或配置 `network_proxy` |
 | 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；数据源延迟用 `scansci_pdf_diagnostics(check="health")` 查看 |
+| 装完提示 `pycryptodome required for WebVPN` | 基础安装不含该依赖：`pip install "scansci-pdf[vpnsci]"` |
+| 机构登录弹不出浏览器 / 登录后仍失败 | `pip install "scansci-pdf[cloakbrowser]"`，确认 `browser_headless=false`；也可用 `browser_executable` 指向本机 Chrome 或导入 cookie |
+| Cloudflare 验证框不出现 / 一直转 | `scansci-pdf browser-status` 看内核；换 `config-cmd browser_backend cloakbrowser`（或 `camoufox`），patchright 1.56–1.61 有 Turnstile 空白页问题 |
+| 签名 PDF 报 "There was a problem providing the content"（带 CPE 码） | 先看页面打印的 IP 是否属于机构网段；多半是系统/全局代理把出口带离校园，核对 `network_proxy` |
+| 校园连接器报 SSL 证书错误 | 自签名证书：`scansci-pdf config-cmd institutional_allow_self_signed true`（确认可信后再开） |
+| 灰源通道在宿主里被拦 | 宿主策略所致；可固定 `download_strategy=legal_only` 与策略对齐 |
 
 <details>
 <summary><strong>ACS 提示 IP Address Blocked 怎么办</strong></summary>
@@ -630,8 +748,10 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 ### 贡献者
 
 <a href="https://github.com/annsyun"><img src="https://avatars.githubusercontent.com/u/151621087?v=4" width="50" height="50" alt="annsyun" title="annsyun"/></a>
+<a href="https://github.com/OvOYu"><img src="https://avatars.githubusercontent.com/u/107761563?v=4" width="50" height="50" alt="OvOYu" title="OvOYu"/></a>
 
 - **[annsyun](https://github.com/annsyun)** — SAGE 中国站（sage.cnpereading.com）机构授权下载通道：CARSI 会话复用、`articleId` 解析与站点原生下载接口（[#58](https://github.com/Rimagination/scansci-pdf/pull/58)）
+- **[OvOYu](https://github.com/OvOYu)** — 出版商 PDF 抓取与 MDPI 路由修复：CARSI/WebVPN 响应捕获的 PDF 签名判断、浏览器取 PDF 时保留签名查询参数、Firefox 原生 PDF.js 查看器已加载文档的读取、Materials/Catalysts 的 MDPI CDN 映射（[#69](https://github.com/Rimagination/scansci-pdf/pull/69)）
 
 ### 致谢
 
@@ -643,7 +763,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 - **[paper-fetcher](https://github.com/fermionoid/paper-fetcher)** — 论文下载流程参考
 - **[cloakbrowser](https://github.com/CloakHQ/CloakBrowser)** — Chromium stealth 浏览器引擎
 
-感谢以上项目作者的开源贡献。
+感谢以上项目作者的开源贡献。问题报告同样让项目更准，感谢 **lwz20210407**、**Furfuryl-Alcohol**（出版商抓取与 MDPI 路由缺陷）、**JackieLiang1111**（Elsevier 正式版/录用稿选择）、**NkAntony777**（TLS 校验、进程全局状态、批量 I/O 与架构问题）。
 
 </details>
 

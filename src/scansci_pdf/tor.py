@@ -66,13 +66,17 @@ def ensure_tor(config: dict[str, Any]) -> str | None:
 
     # 2. Try starting embedded Tor (auto-install if needed)
     try:
-        from .embedded_tor import get_embedded_tor
+        from .embedded_tor import TorIntegrityError, get_embedded_tor
         log.info("Tor: starting embedded Tor...")
         tor = get_embedded_tor(config)
         if tor and tor.is_running():
             log.info(f"Tor: embedded Tor started at {tor.proxy_url}")
             return tor.proxy_url
         log.warning("Tor: embedded Tor failed to start")
+    except TorIntegrityError as e:
+        # A tampered cache is a security event, not a startup hiccup; say so
+        # loudly before the downloader falls back to a direct connection.
+        log.error(f"Tor: installed bundle failed verification, refusing to use it: {e}")
     except Exception as e:
         log.warning(f"Tor: embedded Tor error: {e}")
 

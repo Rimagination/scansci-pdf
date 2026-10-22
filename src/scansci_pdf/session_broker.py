@@ -19,6 +19,8 @@ from typing import Any
 from uuid import uuid4
 
 DATA_DIR = Path(os.environ.get("SCANSCI_PDF_DATA_DIR", str(Path.home() / ".scansci-pdf")))
+# Kept for the old institutional import path (see #71 item 5).
+DEFAULT_BASE_DIR = DATA_DIR
 BROKER_ROOT = DATA_DIR / "brokers"
 
 

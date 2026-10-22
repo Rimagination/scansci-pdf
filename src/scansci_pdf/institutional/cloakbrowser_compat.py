@@ -1,42 +1,34 @@
-"""Compatibility helpers for CloakBrowser runtime quirks."""
+"""Re-export the CloakBrowser compatibility helpers from the root package.
 
-from __future__ import annotations
+The publisher stack shipped in two copies that drifted apart; this module is
+now a re-export shim over the single implementation in
+``scansci_pdf.cloakbrowser_compat``
+(#71 item 5). Keep the implementation there, not here.
 
-import os
-import platform
-from typing import Any
+Nothing is bound at import time. A reload of the canonical module replaces its
+function objects, and a shim that captured them at import time would keep
+handing back the stale ones -- so every name is resolved through
+``__getattr__`` instead, and ``__all__`` is derived from the canonical module
+on demand.
+"""
+
+from .. import cloakbrowser_compat as _canonical
 
 
-def ensure_cloakbrowser_platform_compatible(config_module: Any | None = None) -> bool:
-    """Patch CloakBrowser platform detection when Windows reports no machine.
+def __getattr__(name: str):
+    """Resolve every name through the canonical module.
 
-    Some Windows Python environments return an empty string from
-    ``platform.machine()``. CloakBrowser supports Windows x64, but its lookup
-    table cannot match that empty architecture value. We add the narrow missing
-    lookup entry at runtime instead of modifying the third-party package.
+    The old copy exposed the canonical module''s own imported names as its
+    attributes too (``requests``, ``time`` and friends), and code that patched
+    or read one of them through this path must keep working.
     """
-    if platform.system() != "Windows" or platform.machine():
-        return False
-
+    if name == "__all__":
+        return [n for n in dir(_canonical) if not n.startswith("_")]
     try:
-        config = config_module
-        if config is None:
-            from cloakbrowser import config as config  # type: ignore[no-redef]
-    except Exception:
-        return False
+        return getattr(_canonical, name)
+    except AttributeError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
 
-    supported = getattr(config, "SUPPORTED_PLATFORMS", None)
-    if not isinstance(supported, dict):
-        return False
 
-    if ("Windows", "") in supported:
-        return False
-
-    is_64bit_windows = bool(os.environ.get("ProgramFiles(x86)")) or bool(
-        os.environ.get("PROCESSOR_ARCHITEW6432")
-    )
-    if not is_64bit_windows:
-        return False
-
-    supported[("Windows", "")] = supported.get(("Windows", "AMD64"), "windows-x64")
-    return True
+def __dir__() -> list[str]:
+    return sorted(set(dir(_canonical)) | {"__getattr__", "__dir__", "__all__"})

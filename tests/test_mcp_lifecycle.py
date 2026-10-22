@@ -57,11 +57,13 @@ def test_stdio_server_exits_on_eof():
             )
             + "\n"
         )
-        proc.stdin.write(payload.encode("utf-8"))
-        proc.stdin.close()
-
         t0 = time.monotonic()
-        out_bytes, err_bytes = proc.communicate(timeout=20)
+        # communicate() must own stdin: closing it by hand first makes the
+        # posix implementation flush an already-closed file and raise
+        # ValueError on some Python versions (3.11 on macOS in CI).
+        out_bytes, err_bytes = proc.communicate(
+            input=payload.encode("utf-8"), timeout=20
+        )
         elapsed = time.monotonic() - t0
         out = out_bytes.decode("utf-8", errors="replace")
         err = err_bytes.decode("utf-8", errors="replace")

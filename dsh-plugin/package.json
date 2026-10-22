@@ -1,0 +1,61 @@
+{
+  "name": "scansci-pdf",
+  "version": "1.19.0",
+  "description": "DeepSeek Harness bundle for ScanSci PDF: connects the scansci-pdf MCP server and registers its academic-literature skills.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Rimagination",
+    "url": "https://github.com/Rimagination"
+  },
+  "homepage": "https://github.com/Rimagination/scansci-pdf",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rimagination/scansci-pdf.git",
+    "directory": "dsh-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/Rimagination/scansci-pdf/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "mcp",
+    "academic-papers",
+    "literature",
+    "pdf",
+    "scansci"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.png",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.png",
+    "README.md",
+    "LICENSE",
+    "skills/**"
+  ],
+  "scripts": {
+    "sync-skills": "node scripts/sync-skills.mjs",
+    "check-skills": "node scripts/sync-skills.mjs --check",
+    "prepack": "node scripts/sync-skills.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -859,7 +859,11 @@ def publisher_batch_cmd(
         raise SystemExit(
             f"Unknown/unresolved publisher '{publisher or key or '(auto)'}'. "
             f"Pass --publisher with one of: {', '.join(list_publisher_profiles())}")
-    downloader = PublisherBatchDownloader(config, profile=profile)
+    # This path drives a manual SSO/2FA login in the browser, so the window
+    # has to stay visible: browser_headless in the config must not win here.
+    downloader = PublisherBatchDownloader(
+        config, profile=profile, require_interactive_browser=True
+    )
     records = [PaperRecord(doi=d) for d in dois]
     summary = downloader.run_records(records, output)
     results = summary.get("results", []) if isinstance(summary, dict) else []

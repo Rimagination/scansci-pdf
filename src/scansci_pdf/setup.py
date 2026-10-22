@@ -37,8 +37,13 @@ def check_tor() -> dict[str, Any]:
     # Check embedded Tor binary
     from .config import load_config
     config = load_config()
-    from .embedded_tor import _tor_binary
-    embedded = _tor_binary(config)
+    from .embedded_tor import TorIntegrityError, _tor_binary
+    try:
+        embedded = _tor_binary(config)
+    except TorIntegrityError as e:
+        # A tampered cache is a diagnosis, not a crash (mirrors install_tor).
+        result["error"] = f"Tor bundle failed verification: {e}"
+        embedded = None
     if embedded:
         result["installed"] = True
         result["embedded"] = True

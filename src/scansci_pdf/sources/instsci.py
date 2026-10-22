@@ -275,7 +275,7 @@ def _is_campus_connector_mode(config: dict[str, Any]) -> bool:
 
 
 def _fetch_via_webvpn(url: str, config: dict[str, Any], *, stream: bool = False) -> requests.Response:
-    from ..network import USER_AGENT, request_timeout
+    from ..network import USER_AGENT, allow_self_signed, request_timeout
     base = _get_webvpn_base(config)
     proxied = convert_url(url, base, config)
 
@@ -288,21 +288,29 @@ def _fetch_via_webvpn(url: str, config: dict[str, Any], *, stream: bool = False)
     socks5 = _get_socks5_proxy(config)
     if socks5:
         s.proxies = {"http": socks5, "https": socks5}
-        s.verify = False  # Campus connectors often use self-signed certs
+        # Campus connectors often use self-signed certs, so this is where
+        # skipping verification can be legitimate -- but only when the user has
+        # asked for it (network.allow_self_signed), not merely because a proxy is
+        # configured (#70).
+        if allow_self_signed(config):
+            s.verify = False
+            log.warning("TLS verification disabled for the campus connector (institutional_allow_self_signed is on)")
 
     return s.get(proxied, timeout=request_timeout(config), allow_redirects=True, stream=stream)
 
 
 def _fetch_direct_via_socks5(url: str, config: dict[str, Any], *, stream: bool = False) -> requests.Response:
     """Fetch a URL directly through SOCKS5 campus connector (no WebVPN URL conversion)."""
-    from ..network import USER_AGENT, request_timeout
+    from ..network import USER_AGENT, allow_self_signed, request_timeout
     socks5 = _get_socks5_proxy(config)
 
     s = requests.Session()
     s.trust_env = False
     s.headers.update({"User-Agent": USER_AGENT})
     s.proxies = {"http": socks5, "https": socks5}
-    s.verify = False
+    if allow_self_signed(config):
+        s.verify = False
+        log.warning("TLS verification disabled for the campus connector (institutional_allow_self_signed is on)")
 
     return s.get(url, timeout=request_timeout(config), allow_redirects=True, stream=stream)
 
@@ -316,7 +324,6 @@ def _resolve_doi_url(doi: str) -> str | None:
             timeout=15,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
             stream=True,
-            verify=False,
         )
         resp.close()
         if resp.url and resp.url != f"https://doi.org/{doi}":
@@ -784,7 +791,7 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 if response.status >= 400:
                     return
                 body = response.body()
-                if len(body) > 5000 and body[:4] == b"%PDF-":
+                if len(body) > 5000 and body.startswith(b"%PDF-"):
                     captured_pdf.append(body)
                     log.info(f"   [WebVPN-Browser] PDF captured: {len(body)} bytes from {url[:60]}")
             except Exception:
@@ -933,7 +940,7 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 download = download_info.value
                 tmp = download.path()
                 pdf_bytes = tmp.read_bytes() if tmp else None
-                if pdf_bytes and pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 5000:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(pdf_bytes)
                     if is_pdf_file(output_path):
@@ -969,7 +976,7 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
                 download = download_info.value
                 tmp = download.path()
                 pdf_bytes = tmp.read_bytes() if tmp else None
-                if pdf_bytes and pdf_bytes[:4] == b"%PDF-" and len(pdf_bytes) > 5000:
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-") and len(pdf_bytes) > 5000:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(pdf_bytes)
                     if is_pdf_file(output_path):

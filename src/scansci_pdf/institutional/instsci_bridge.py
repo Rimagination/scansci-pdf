@@ -334,6 +334,9 @@ def _try_browser_batch_download(
         pdf_timeout_sec=60,
         post_login_hold_sec=config.get("post_login_hold", 0),
         post_run_hold_sec=0,
+        # The institutional bridge logs in by hand (SSO/2FA), so the browser
+        # must stay visible whatever browser_headless says.
+        require_interactive_browser=True,
     )
 
     run_dir = output_path.parent / ".browser_runs"

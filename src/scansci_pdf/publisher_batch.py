@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import base64
 import csv
 import inspect
 import json
@@ -281,14 +282,21 @@ class PublisherBatchDownloader:
         pdf_timeout_sec: int = 60,
         post_login_hold_sec: int = 0,
         post_run_hold_sec: int = 0,
+        require_interactive_browser: bool = False,
     ) -> None:
-        self.config = config or load_config()
+        self.config = load_config() if config is None else config
         self.profile = profile
         self.institution_query = institution_query.strip()
         self.login_timeout_sec = login_timeout_sec
         self.pdf_timeout_ms = max(1, pdf_timeout_sec) * 1_000
         self.post_login_hold_sec = max(0, int(post_login_hold_sec or 0))
         self.post_run_hold_sec = max(0, int(post_run_hold_sec or 0))
+        # The institutional downloader this implementation replaced always
+        # launched a *visible* browser, because its login flow is a manual
+        # SSO/2FA round trip. Callers that come from that path set this flag
+        # so that ``browser_headless`` in the config cannot turn the login
+        # into one a headless browser cannot complete.
+        self.require_interactive_browser = bool(require_interactive_browser)
         # Set True by _run_once/_run_once_parallel when IP_BLOCK_STOP_THRESHOLD
         # consecutive ip_blocked results trip an auto-stop. Read by run_records.
         self._ip_block_stopped: bool = False
@@ -905,6 +913,17 @@ class PublisherBatchDownloader:
         config = dict(self.config)
         if proxy:
             config["browser_static_proxy"] = proxy
+        if getattr(self, "require_interactive_browser", False):
+            # This flow drives a manual SSO/2FA login, which a headless browser
+            # cannot complete. The institutional downloader this replaced was
+            # always visible, so keep it that way regardless of the config.
+            if config.get("browser_headless"):
+                logger.info(
+                    "require_interactive_browser: forcing a visible browser "
+                    "(browser_headless=%s) for the interactive login",
+                    config.get("browser_headless"),
+                )
+            config["browser_headless"] = False
         ctx = get_persistent_context(profile_path, config)
         # Record the binding so _fetch_pdf_url can route plain-HTTP requests
         # through the same proxy as this context's browser traffic.
@@ -2464,6 +2483,14 @@ class PublisherBatchDownloader:
                     return None, str(getattr(page, "url", "") or "")
                 attempted.clear()
                 continue
+            # Firefox/Camoufox can leave the native PDF.js shell visible while
+            # the document is already available (or while its loading task is
+            # idle).  Read that document in the viewer's own realm before
+            # falling back to a second HTTP request, which may lose the
+            # authenticated browser session or signed URL.
+            viewer_body = self._capture_loaded_pdf_viewer(page, pdf_url)
+            if viewer_body:
+                return viewer_body, pdf_url
             for candidate_url in self._page_state_pdf_urls(page):
                 if candidate_url in attempted:
                     continue
@@ -2471,11 +2498,88 @@ class PublisherBatchDownloader:
                 if not self._is_pdf_candidate_url(candidate_url) or self._is_supplementary_url(candidate_url):
                     continue
                 self._event(result, "pdf_state_candidate", candidate_url)
-                body, final_url = self._fetch_pdf_url_with_browser_state(candidate_url, page)
+                body, final_url, _block_reason = self._fetch_pdf_url_with_browser_state(candidate_url, page)
                 if body:
                     return body, final_url
             time.sleep(2)
         return None, ""
+
+    def _capture_loaded_pdf_viewer(self, page: Any, source_url: str) -> bytes | None:
+        """Read a PDF already loaded by Firefox's native PDF.js viewer.
+
+        The viewer runs in a privileged native realm.  Accessing its
+        ``PDFViewerApplication`` through the automation realm can produce
+        Xray wrappers, so the script uses ``wrappedJSObject`` and native
+        ``Blob``/``FileReader`` constructors.  An initialized but idle viewer
+        is started once per source URL; a marker on the native window prevents
+        repeated ``app.open`` calls while the document loads.
+        """
+        script = r"""
+        async (sourceUrl) => {
+            try {
+                const nativeWindow = window.wrappedJSObject || window;
+                const nativeLocation = String(nativeWindow.location?.href || "");
+                const nativeDocument = nativeWindow.document;
+                const documentUri = String(nativeDocument?.documentURI || "");
+                const isNativePdfViewer = nativeLocation.startsWith("resource://pdf.js/")
+                    || documentUri.startsWith("resource://pdf.js/");
+                if (!isNativePdfViewer) return null;
+
+                const app = nativeWindow.PDFViewerApplication;
+                if (!app) return null;
+                // In some Firefox builds location.href is the signed source
+                // URL; in others it is the resource:// viewer shell.  Prefer
+                // the former and otherwise use the URL supplied by Python.
+                const target = /^https?:/i.test(nativeLocation)
+                    ? nativeLocation : String(sourceUrl || "");
+                const attempts = nativeWindow.__scansciPdfViewerOpenAttempts
+                    || (nativeWindow.__scansciPdfViewerOpenAttempts = Object.create(null));
+
+                if (!app.pdfDocument && !app.pdfLoadingTask && app.initialized === true
+                    && /^https?:/i.test(target) && !attempts[target]) {
+                    attempts[target] = true;
+                    try {
+                        const args = nativeWindow.JSON.parse(
+                            nativeWindow.JSON.stringify({url: target})
+                        );
+                        app.open(args);
+                    } catch (_) {
+                        // Keep the marker: a failed initialization must not be
+                        // retried on every polling tick.
+                    }
+                    return null;
+                }
+
+                if (!app.pdfDocument || typeof app.pdfDocument.getData !== "function") {
+                    return null;
+                }
+                const data = await app.pdfDocument.getData();
+                const blob = new nativeWindow.Blob([data], {type: "application/pdf"});
+                return await new nativeWindow.Promise((resolve) => {
+                    const reader = new nativeWindow.FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                });
+            } catch (_) {
+                return null;
+            }
+        }
+        """
+        try:
+            encoded = page.evaluate(script, source_url)
+        except Exception:
+            return None
+        if not isinstance(encoded, str) or not encoded.startswith("data:"):
+            return None
+        try:
+            _, payload = encoded.split(",", 1)
+            body = base64.b64decode(payload, validate=True)
+        except (ValueError, TypeError):
+            return None
+        if len(body) > MIN_PDF_BYTES and body.startswith(b"%PDF-"):
+            return body
+        return None
 
     def _should_use_async_pdf_navigation(self, url: str) -> bool:
         return self.profile.name.lower() == "elsevier" and self._is_pdf_candidate_url(url)
@@ -2776,7 +2880,15 @@ class PublisherBatchDownloader:
             return True
         if any(marker in title for marker in self.profile.auth_url_markers):
             return True
-        if any(marker.lower() in title for marker in self.profile.auth_title_markers):
+        if any(
+            # Word boundaries, not a bare substring: "Sign In" also occurs
+            # inside "deSIGN IN", and chemistry titles such as "Catalyst
+            # Design in a Single Step" are ordinary entitled article pages.
+            # Matching those as logged out aborts the download of an article
+            # the institution can read.
+            re.search(rf"\b{re.escape(marker.lower())}\b", title)
+            for marker in self.profile.auth_title_markers
+        ):
             return True
         if self._elsevier_has_full_text_access(text):
             return False

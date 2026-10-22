@@ -10,7 +10,7 @@ from pathlib import Path
 
 @dataclass
 class PaperEntry:
-    title: str
+    title: str = ""
     authors: list[str] = field(default_factory=list)
     year: int | None = None
     doi: str | None = None

@@ -87,8 +87,13 @@ def validate_doi(doi: str) -> tuple[bool, str]:
         return True, "Chinese DOI (validated by CN sources)"
 
     import requests
+
+    from .network import thread_session
     try:
-        resp = requests.head(
+        # Batches validate up to ten DOIs at once, so a module-level request
+        # opened a connection per call and one shared session would be reached
+        # from ten threads at a time (#72).
+        resp = thread_session().head(
             f"https://doi.org/{urllib.parse.quote(doi, safe='')}",
             timeout=10,
             allow_redirects=True,

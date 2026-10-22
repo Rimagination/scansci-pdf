@@ -6,6 +6,7 @@ import logging
 import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _SEARCH_TIMEOUT = 30  # seconds, longer than default because these are public APIs
 _USER_AGENT = "scansci-pdf/1.5 (https://github.com/Rimagination/scansci-pdf)"
+_AUTHOR_CANDIDATES = 10  # OpenAlex author profiles fetched per name lookup
 
 
 def _plain_session() -> requests.Session:
@@ -100,66 +102,155 @@ def _parse_openalex_works(works: list[dict]) -> list[dict[str, Any]]:
     return results
 
 
-def _lookup_author_id(name: str) -> tuple[str | None, str, int, int]:
-    """Resolve an author name to an OpenAlex author ID.
+@dataclass(frozen=True)
+class AuthorMatch:
+    """A resolved OpenAlex author profile, plus the alternatives it beat."""
 
-    Returns (author_id, display_name, works_count, cited_by_count).
-    author_id is None if no match found.
+    id: str
+    display_name: str
+    works_count: int
+    cited_by_count: int
+    exact: bool = True
+    alternatives: tuple[dict[str, Any], ...] = ()
+    fallback: bool = False
 
-    Matching strategy:
-    1. Exact case-insensitive name match
-    2. If none, pick by highest works_count
+
+_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv"})
+_NAME_SPLIT = re.compile(r"[\s,.]+")
+
+
+def _name_parts(name: str) -> tuple[list[str], str]:
+    """Split a name into (core tokens, suffix).
+
+    Dots and commas are separators, not characters to delete: "L.Piao" becomes
+    ["l", "piao"] and "J.R.R." becomes ["j", "r", "r"], so compact initials
+    compare like spaced ones. A trailing/embedded Jr/Sr/II/III/IV is returned
+    separately so it can constrain compatibility instead of being discarded.
+    """
+    tokens = [t for t in _NAME_SPLIT.split((name or "").strip().lower()) if t]
+    suffix = ""
+    core: list[str] = []
+    for token in tokens:
+        if token in _NAME_SUFFIXES:
+            suffix = token
+        else:
+            core.append(token)
+    return core, suffix
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Core name tokens (suffix removed)."""
+    return _name_parts(name)[0]
+
+
+def _name_suffix(name: str) -> str:
+    return _name_parts(name)[1]
+
+
+def _tokens_compatible(query: list[str], candidate: list[str]) -> bool:
+    """Every query token appears in `candidate`; leftover candidate tokens are initials."""
+    remaining = list(candidate)
+    for token in query:
+        if token in remaining:
+            remaining.remove(token)
+        else:
+            return False
+    return all(len(token) == 1 for token in remaining)
+
+
+def _name_compatible(query: str, candidate: str) -> bool:
+    """True when two name strings plausibly denote the same person.
+
+    Tolerates middle names/initials ("Shilong Piao" ≈ "Shilong L. Piao"),
+    compact initials ("Shilong L.Piao") and reversed order ("Fang Jingyun" ≈
+    "Jingyun Fang"). A single-letter query token never expands to a spelled-out
+    candidate token, so "J. Smith" does not silently resolve to "John Smith".
+    A suffix only constrains when both names carry one: "John Smith" matches
+    "John Smith Jr.", but "John Smith Jr." does not match "John Smith Sr.".
+    """
+    q, q_suffix = _name_parts(query)
+    c, c_suffix = _name_parts(candidate)
+    if not q or not c:
+        return False
+    if q_suffix and c_suffix and q_suffix != c_suffix:
+        return False
+    return _tokens_compatible(q, c) or _tokens_compatible(c, q)
+
+
+def _author_alternative(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": (candidate.get("id") or "").split("/")[-1],
+        "display_name": candidate.get("display_name") or "",
+        "works_count": candidate.get("works_count") or 0,
+        "cited_by_count": candidate.get("cited_by_count") or 0,
+    }
+
+
+def _resolve_author(name: str) -> AuthorMatch | None:
+    """Resolve an author name to the most likely OpenAlex author profile.
+
+    OpenAlex keeps thin duplicate profiles beside authoritative ones, and a
+    query without the middle initial is an *exact* match for the thin profile
+    while the real one carries the initial: "Shilong Piao" matches the 1-work
+    duplicate exactly, and the 999-work "Shilong L. Piao" only approximately.
+    Ranking inside exact matches alone therefore selects the duplicate, so
+    every name-compatible profile competes and the largest one wins.
     """
     try:
         session = _plain_session()
         resp = session.get(
             "https://api.openalex.org/authors",
-            params={"search": name, "per_page": 10},
+            params={"search": name, "per_page": _AUTHOR_CANDIDATES},
             timeout=_SEARCH_TIMEOUT,
         )
         if resp.status_code != 200:
-            return None, "", 0, 0
+            return None
         data = resp.json()
+        candidates = [
+            c for c in (data.get("results") or [])
+            if isinstance(c, dict) and c.get("id")
+        ]
     except Exception:
-        return None, "", 0, 0
+        return None
 
-    candidates = data.get("results", [])
     if not candidates:
-        return None, "", 0, 0
+        return None
 
-    name_lower = name.lower().strip()
-    # Generate name variants (handle Chinese/Western name order)
-    name_parts = name_lower.split()
-    name_variants = {name_lower}
-    if len(name_parts) == 2:
-        # "Fang Jingyun" ↔ "Jingyun Fang"
-        name_variants.add(f"{name_parts[1]} {name_parts[0]}")
-    elif len(name_parts) >= 3:
-        # Try last-name-first ordering for 3+ word names
-        name_variants.add(f"{name_parts[-1]} {' '.join(name_parts[:-1])}")
-
-    # First: try exact case-insensitive name match (including variants)
-    exact_matches = [
-        a for a in candidates
-        if (a.get("display_name") or "").lower().strip() in name_variants
+    compatible = [
+        c for c in candidates
+        if _name_compatible(name, c.get("display_name") or "")
     ]
-    if exact_matches:
-        best = max(
-            exact_matches,
-            key=lambda a: (a.get("cited_by_count", 0), a.get("works_count", 0)),
-        )
-    else:
-        # Fallback: highest cited_by_count (prefer authoritative consolidated profiles)
-        best = max(
-            candidates,
-            key=lambda a: (a.get("cited_by_count", 0), a.get("works_count", 0)),
-        )
+    ranked = sorted(
+        compatible or candidates,
+        key=lambda a: (a.get("cited_by_count") or 0, a.get("works_count") or 0),
+        reverse=True,
+    )
+    best = ranked[0]
+    display = best.get("display_name") or name
 
-    author_id = best.get("id", "").split("/")[-1] if best.get("id") else ""
-    display = best.get("display_name", name)
-    works = best.get("works_count", 0)
-    cited = best.get("cited_by_count", 0)
-    return (author_id if author_id else None, display, works, cited)
+    return AuthorMatch(
+        id=(best.get("id") or "").split("/")[-1],
+        display_name=display,
+        works_count=best.get("works_count") or 0,
+        cited_by_count=best.get("cited_by_count") or 0,
+        exact=(
+            _name_tokens(display) == _name_tokens(name)
+            and _name_suffix(display) == _name_suffix(name)
+        ),
+        alternatives=(
+            tuple(_author_alternative(a) for a in ranked[1:4])
+            if compatible else ()
+        ),
+        fallback=not compatible,
+    )
+
+
+def _lookup_author_id(name: str) -> tuple[str | None, str, int, int]:
+    """Backwards-compatible 4-tuple wrapper around :func:`_resolve_author`."""
+    match = _resolve_author(name)
+    if not match:
+        return None, "", 0, 0
+    return match.id, match.display_name, match.works_count, match.cited_by_count
 
 
 def _search_openalex_by_author(
@@ -513,28 +604,35 @@ def search_papers(
     """
     # --- Author-based search (fast path) ---
     if author_id or author:
-        matched_name = None
-        matched_works = 0
-        matched_cited = 0
+        match: AuthorMatch | None = None
         if author and not author_id:
-            resolved, matched_name, matched_works, matched_cited = _lookup_author_id(author)
-            if not resolved:
+            match = _resolve_author(author)
+            if not match:
                 return []
-            author_id = resolved
+            author_id = match.id
 
         if author_id:
             results = _search_openalex_by_author(
                 author_id, limit=limit,
                 year_from=year_from, year_to=year_to, sort=sort,
             )
-            # Attach author match metadata to first result
-            if results and (matched_name or author):
-                results[0]["_author_match"] = {
-                    "name": matched_name or author or "",
+            # Attach author match metadata to first result. `exact`, `fallback`
+            # and `alternatives` let callers spot a disambiguation they may
+            # want to override with an explicit author_id.
+            if results and (match or author):
+                meta: dict[str, Any] = {
+                    "name": match.display_name if match else (author or ""),
                     "id": author_id,
-                    "works_count": matched_works,
-                    "cited_by_count": matched_cited,
+                    "works_count": match.works_count if match else 0,
+                    "cited_by_count": match.cited_by_count if match else 0,
                 }
+                if match:
+                    meta["query"] = author
+                    meta["exact"] = match.exact
+                    meta["fallback"] = match.fallback
+                    if match.alternatives:
+                        meta["alternatives"] = list(match.alternatives)
+                results[0]["_author_match"] = meta
             return results
 
     # --- Keyword-based search (existing parallel path) ---

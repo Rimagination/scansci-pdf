@@ -4,7 +4,7 @@ description: >
   Use this skill whenever the user wants to download academic papers, search for research literature,
   get citations (BibTeX/RIS/EndNote), manage WebVPN institutional proxy for paper access,
   import .bib files, or batch-download papers. This skill orchestrates the scansci-pdf MCP server
-  which exposes 17 high-level tools covering download (OA/grey/institutional channels),
+  which exposes 18 high-level tools covering download (OA/grey/institutional channels),
   discovery, queue preparation, diagnostics, and login.
   TRIGGER when: user mentions downloading papers, DOI, arXiv ID, Sci-Hub, paper search,
   literature review, citation export, WebVPN, institutional access, "帮我下载论文", "搜索文献",
@@ -18,12 +18,14 @@ description: >
 
 ## ⚠️ 修改反爬/嗅探/镜像相关代码前必读
 
-先读 [`docs/PLAYBOOK.md`](../../docs/PLAYBOOK.md)：镜像健康唯一存储（domain_db wall_state 表）、
+先读 [`docs/PLAYBOOK.md`](../docs/PLAYBOOK.md)：镜像健康唯一存储（domain_db wall_state 表）、
 结构性失败签名表、节奏参数、已知死镜像清单、以及六条铁律（含"造轮子前先 grep 家底"——
 镜像健康存储曾被重复造过三代）。
 ## 概述
 
 scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 灰色源 / 机构渠道）、Sciverse 语义检索、发现与队列准备、引文导出和诊断排障。下载引擎支持 20+ 数据源并行竞速、100+ 中国高校 WebVPN。
+
+> 工具名可能带宿主的 MCP 命名空间前缀（`mcp__<server>__<tool>`）；以当前工具列表中实际注册的名称为准。
 
 ## MCP 工具参考（20 个）
 
@@ -82,7 +84,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 |------|------|----------|
 | `scansci_pdf_login` | 统一登录：`kind=publisher\|webvpn\|carsi\|ezproxy\|custom\|cookie_import` | `kind`（默认 publisher）、`identifier`、`publisher`、`custom_url`、`cookie_file` |
 | `scansci_pdf_elsevier_setup` | Elsevier API Key 配置向导（免费，无需机构邮箱） | `test`（验证 key） |
-| `scansci_pdf_springer_setup` | Springer TDM API Key 配置与订阅权限探测 | `test` |
+| `scansci_pdf_springer_setup` | Springer TDM 全文 API Key 配置与权益探测 | `test`（验证 key / 机构订阅） |
 | `scansci_pdf_sciverse_setup` | Sciverse API Token 配置向导（打开控制台、保存并验证；启用语义证据/元数据/引文图谱/图表） | `token`、`test` |
 
 ## 工作流编排
@@ -105,6 +107,25 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 1. scansci_pdf_parse_list(file_path="papers.md") → 查看解析结果
 2. scansci_pdf_batch_download(identifiers=entries)（或 resolve_and_download 的等价组合）
 ```
+
+### 流程 2.5：先定机构认证方式与浏览器（流程 3/4/5 的前置判断）
+
+机构失败大多不是"下不下来"，而是这两件事没定：
+
+**① 浏览器**：`scansci_pdf_login` 打开的是工具自带的可见反检测浏览器，**cookie 是从那个上下文抓取并落盘的**——用户在自带的 Safari/Edge/日常 Chrome 里登录、或用无头模式，登录态都拿不到。要求：`browser_headless=false`（机构登录/CAPTCHA/Cloudflare 都需要可见窗口）；后端用 `camoufox` 或 `cloakbrowser`（`patchright` 1.56~1.61 有 Turnstile 空白页 bug）。用户坚持用自己的浏览器时不必硬拦，两条兜底：`config-cmd browser_executable "<他的 Chrome 路径>"` 把内核指过去；或 `scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")` 导入 Netscape cookie（CARSI 另会自动读本机 Chrome 的 cookie 库）。
+
+**② 出口 IP**：出版商（尤其 Elsevier）按请求源 IP 判权益。机器一旦开系统/全局代理，**工具与浏览器的出口就变成代理出口，机构授权当场失效**——典型症状是 `pdf.sciencedirectassets.com` 返回 "There was a problem providing the content you requested"（带 `CPE` 码，页面上会打印它看到的 IP）。**先拿那个 IP 核对是否属于机构网段，再判断"学校没订阅"。** 工具只认 `network_proxy`/`SCANSCI_PDF_PROXY`，**忽略** `HTTP_PROXY`/`HTTPS_PROXY`。
+
+| 你的情况 | 走哪条 | 怎么配 |
+|---|---|---|
+| 在校内（IP 认证） | 直连 | `is_campus_network=true` |
+| 校外 + 出版商支持联邦认证 | **CARSI 优先于 WebVPN** | `config-cmd carsi_idp_name <学校>` |
+| 校外 + 学校有 WebVPN 网关 | WebVPN | 流程 3 |
+| 学校只给 EasyConnect/aTrust | SOCKS5 连接器 | `network_proxy=socks5://…`；自签名证书需 `institutional_allow_self_signed` |
+| 学校给图书馆代理 | EZProxy | `ezproxy_login_url`（前缀式 / 域名重写式） |
+| 有 Elsevier/Springer key | API 车道，1–2 s/篇且无需浏览器 | 流程 5 / Springer TDM |
+
+**不要替用户猜学校名**——`scansci_pdf_schools(action="search")` 让他确认；项目策略明确"不要默认任何学校"。
 
 ### 流程 3：WebVPN 机构代理
 
@@ -163,6 +184,19 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 3. scansci_pdf_download(identifier="...", strategy="scihub_only")
 ```
 
+### 流程 7：某学者的 TOP-N 被引论文
+
+```
+1. 解析作者 ID（不要用 author=姓名 直接搜，见「已知坑位」）
+   GET https://api.openalex.org/authors?search=<姓名>
+   → 取被引最高、同被引再看 works_count 最大的那条，核对 last_known_institutions 是否含目标单位
+2. 取代表作（务必加 type:article，否则数据集/paratext 会混进榜）
+   GET https://api.openalex.org/works?filter=author.id:<ID>,type:article
+       &sort=cited_by_count:desc&per_page=25
+3. scansci_pdf_batch_download(identifiers=[DOI...], output_dir=<宿主已授权的目录>)
+4. 校验 + 去重（下载器会为每篇留下多份源标记副本，见「已知坑位」）
+```
+
 ## 能力边界
 
 | 请求 | 处理方式 |
@@ -175,6 +209,16 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 | 批量 100+ 篇 | `batch_download`，并发数由 `batch_workers` 配置控制 |
 | 需要机构权限的论文 | `login` 登录后重试下载 |
 | 下载失败 | 结果含 `error_type`；`paywall`→登录流程，`rate_limited`→稍后重试，`cloudflare_blocked`→启动 CloakBrowser/配置代理 |
+
+## 已知坑位（2026-10-22 实测，agent 必读）
+
+- **`search` 的 `author=` 曾经会命中同名假档案（2026-10-22 已修）**。传 `author="Shilong Piao"` 时旧版只返回 1 条 figshare 数据集，命中 `A5072538516`（1 篇 / 0 被引）：权威档案 `A5000033522`（999 篇 / 125 224 被引）因为带中间名缩写 `L.` 不算"精确匹配"而被排除，`max()` 于是在假档案里选。现已改为名字 token 兼容（容忍中间名缩写、紧凑缩写 `L.Piao`、姓在前；Jr/Sr/III/IV 不同会被拒绝）后取最大，并在 `_author_match` 里返回 `exact`、`fallback` 与 `alternatives`。**旧版仍会选错**，此时先解析 `author_id` 再用 `author_id=` 调；看到 `exact=false`、`fallback=true` 或 `alternatives` 非空时，核对一下选中的是不是目标学者。
+- **`batch_download` 的 `failed` 计数曾经会骗人（2026-10-22 已修）**。车道模式下重试成功的 DOI 会留两行（先 failed 后 success），旧版按行计数，于是 `total` 大于去重条数（实测 24 > 20）、`failed: 4` 与 `succeeded: 20` 同时出现。现已由 `server._merge_lane_results` 按论文合并（成功覆盖失败，新增 `retried` 计数）。**旧版或其它宿主的返回仍可能这样**，此时以 `failed_dois` 和每条的 `success` 为准。
+- **每篇会落 2–4 个源标记副本**。除自动改名的 `Piao2009_Carbon.pdf` 外，还可能留 `10.xxxx_Sci-Hub.pdf`、`_CrossrefPage.pdf`、`_NatureDirect.pdf`、`_PublisherDirect.pdf`、`_OpenAIRE.pdf`；其中一份与最终改名文件逐字节相同（实测 20 篇留下 34 个多余副本）。**交付前必须去重**，否则文件夹里全是同一篇的多份副本。
+- **`output_dir` 不要指向宿主运行时新建的子目录**。在 DSH 这类沙箱宿主里，由非沙箱进程（MCP server 自己）创建的子目录拿不到沙箱写权限：`write` 工具能写，但 `pwsh` 之后在同一目录里新建或删除任何文件都报 Access denied，把"删几个副本"拖成一轮权限排查。**先让宿主在自己的目录里建好目标文件夹，再下到那里**。
+- **校验用轻量手段**：大小 ≥ `min_pdf_size_bytes`（默认 10 000）+ 头 5 字节 `%PDF-` 即可判定；要页数就用 `pymupdf` 一次跑完。实测 `_check.py` 第一版把 `doc.close()` 写在 `doc.page_count` 之前，20 篇全报 "document closed"，白跑一轮。
+- **非正式版本要点出来**：机构库存档稿（"Accepted Article"、"archived peer-reviewed author-version"）与 early-online-release 都是合法 PDF，但页数和排版与正式版差别很大（实测 71 页 vs 正式版约 20 页），交付时要说明版本性质。
+- **合作者不等于通讯作者**：OpenAlex 按署名计入，大团队论文（Crowther / Luyssaert / Janssens 领衔）会出现在"某人的高被引"列表里；报告时要区分本人主导与合作署名。
 
 ## 常见边界情况
 

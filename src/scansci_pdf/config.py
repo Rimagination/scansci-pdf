@@ -86,6 +86,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "elsevier_api_key": "",
     "springer_api_key": "",  # Springer Nature Full Text API (TDM) — entitlement follows the institution (ORCID-affiliated key, needs a Springer subscription with TDM rights)
     "elsevier_insttoken": "",
+    "institutional_allow_self_signed": False,  # Campus connectors (EasyConnect/aTrust, and some WebVPN gateways) commonly serve self-signed certificates; this is the one place that justifies skipping TLS verification, and it is opt-in
     "connect_timeout": 15,
     "read_timeout": 30,
     "request_delay_min": 2.0,
@@ -131,6 +132,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "browser_auto_upgrade": True,
     "is_campus_network": False,
     "tor_proxy": os.environ.get("TOR_PROXY", ""),
+    "tor_binary_path": "",  # Explicit tor binary; empty falls back to the embedded install and then PATH. Pinning it stops lookup order from deciding which binary runs
     "tor_use_bridges": False,
     "use_tor_for_scihub": True,
     "google_scholar_limit": 5,
@@ -262,6 +264,12 @@ SENSITIVE_KEYS = [
     "sciverse_api_key",
 ]
 
+# The list above is for names that do not advertise themselves. Everything else
+# is decided by name, because an exact-match list silently leaks every key that
+# is added later: springer_api_key, openalex_api_key, cookie_path and
+# carsi_cookie_dir all reached MCP clients in cleartext that way (#70).
+_SECRET_NAME_RE = re.compile(r"key|token|secret|password|cookie|credential", re.I)
+
 _PROXY_URL_CREDS_RE = re.compile(r"(//[^/@\s]+:)[^@\s]+@")
 
 
@@ -273,7 +281,7 @@ def mask_config_value(key: str, value: Any) -> Any:
     """
     if value is None:
         return value
-    if key in SENSITIVE_KEYS:
+    if key in SENSITIVE_KEYS or _SECRET_NAME_RE.search(key):
         # Empty means "not configured", not a masked secret — callers use
         # this to decide whether to show a setup prompt.
         return "***" if value != "" else ""

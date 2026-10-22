@@ -1,0 +1,35 @@
+name: Publish DSH bundle to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish; must equal dsh-plugin/package.json"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify version and generated skills
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node -e "const p = require('./dsh-plugin/package.json'); if (p.version !== process.env.VERSION) { console.error('dsh-plugin/package.json is ' + p.version + ', expected ' + process.env.VERSION); process.exit(1) }"
+          node dsh-plugin/scripts/sync-skills.mjs --check
+
+      - name: Publish
+        working-directory: dsh-plugin
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
