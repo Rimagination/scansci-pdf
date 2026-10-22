@@ -112,20 +112,39 @@ class AuthorMatch:
     cited_by_count: int
     exact: bool = True
     alternatives: tuple[dict[str, Any], ...] = ()
+    fallback: bool = False
 
 
 _NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv"})
-_NAME_SPLIT = re.compile(r"[\s,]+")
+_NAME_SPLIT = re.compile(r"[\s,.]+")
+
+
+def _name_parts(name: str) -> tuple[list[str], str]:
+    """Split a name into (core tokens, suffix).
+
+    Dots and commas are separators, not characters to delete: "L.Piao" becomes
+    ["l", "piao"] and "J.R.R." becomes ["j", "r", "r"], so compact initials
+    compare like spaced ones. A trailing/embedded Jr/Sr/II/III/IV is returned
+    separately so it can constrain compatibility instead of being discarded.
+    """
+    tokens = [t for t in _NAME_SPLIT.split((name or "").strip().lower()) if t]
+    suffix = ""
+    core: list[str] = []
+    for token in tokens:
+        if token in _NAME_SUFFIXES:
+            suffix = token
+        else:
+            core.append(token)
+    return core, suffix
 
 
 def _name_tokens(name: str) -> list[str]:
-    """Split a display name into comparable tokens: lowercase, dots and suffixes dropped."""
-    tokens = _NAME_SPLIT.split((name or "").strip().lower())
-    return [
-        t.replace(".", "")
-        for t in tokens
-        if t and t.replace(".", "") not in _NAME_SUFFIXES
-    ]
+    """Core name tokens (suffix removed)."""
+    return _name_parts(name)[0]
+
+
+def _name_suffix(name: str) -> str:
+    return _name_parts(name)[1]
 
 
 def _tokens_compatible(query: list[str], candidate: list[str]) -> bool:
@@ -142,13 +161,18 @@ def _tokens_compatible(query: list[str], candidate: list[str]) -> bool:
 def _name_compatible(query: str, candidate: str) -> bool:
     """True when two name strings plausibly denote the same person.
 
-    Tolerates middle names/initials ("Shilong Piao" ≈ "Shilong L. Piao") and
-    reversed order ("Fang Jingyun" ≈ "Jingyun Fang"). A single-letter query
-    token never expands to a spelled-out candidate token, so "J. Smith" does
-    not silently resolve to "John Smith".
+    Tolerates middle names/initials ("Shilong Piao" ≈ "Shilong L. Piao"),
+    compact initials ("Shilong L.Piao") and reversed order ("Fang Jingyun" ≈
+    "Jingyun Fang"). A single-letter query token never expands to a spelled-out
+    candidate token, so "J. Smith" does not silently resolve to "John Smith".
+    A suffix only constrains when both names carry one: "John Smith" matches
+    "John Smith Jr.", but "John Smith Jr." does not match "John Smith Sr.".
     """
-    q, c = _name_tokens(query), _name_tokens(candidate)
+    q, q_suffix = _name_parts(query)
+    c, c_suffix = _name_parts(candidate)
     if not q or not c:
+        return False
+    if q_suffix and c_suffix and q_suffix != c_suffix:
         return False
     return _tokens_compatible(q, c) or _tokens_compatible(c, q)
 
@@ -156,9 +180,9 @@ def _name_compatible(query: str, candidate: str) -> bool:
 def _author_alternative(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": (candidate.get("id") or "").split("/")[-1],
-        "display_name": candidate.get("display_name", ""),
-        "works_count": candidate.get("works_count", 0),
-        "cited_by_count": candidate.get("cited_by_count", 0),
+        "display_name": candidate.get("display_name") or "",
+        "works_count": candidate.get("works_count") or 0,
+        "cited_by_count": candidate.get("cited_by_count") or 0,
     }
 
 
@@ -182,10 +206,13 @@ def _resolve_author(name: str) -> AuthorMatch | None:
         if resp.status_code != 200:
             return None
         data = resp.json()
+        candidates = [
+            c for c in (data.get("results") or [])
+            if isinstance(c, dict) and c.get("id")
+        ]
     except Exception:
         return None
 
-    candidates = [c for c in (data.get("results") or []) if c.get("id")]
     if not candidates:
         return None
 
@@ -195,7 +222,7 @@ def _resolve_author(name: str) -> AuthorMatch | None:
     ]
     ranked = sorted(
         compatible or candidates,
-        key=lambda a: (a.get("cited_by_count", 0), a.get("works_count", 0)),
+        key=lambda a: (a.get("cited_by_count") or 0, a.get("works_count") or 0),
         reverse=True,
     )
     best = ranked[0]
@@ -204,10 +231,17 @@ def _resolve_author(name: str) -> AuthorMatch | None:
     return AuthorMatch(
         id=(best.get("id") or "").split("/")[-1],
         display_name=display,
-        works_count=best.get("works_count", 0),
-        cited_by_count=best.get("cited_by_count", 0),
-        exact=_name_tokens(display) == _name_tokens(name),
-        alternatives=tuple(_author_alternative(a) for a in ranked[1:4]),
+        works_count=best.get("works_count") or 0,
+        cited_by_count=best.get("cited_by_count") or 0,
+        exact=(
+            _name_tokens(display) == _name_tokens(name)
+            and _name_suffix(display) == _name_suffix(name)
+        ),
+        alternatives=(
+            tuple(_author_alternative(a) for a in ranked[1:4])
+            if compatible else ()
+        ),
+        fallback=not compatible,
     )
 
 
@@ -336,9 +370,9 @@ def search_papers(
                 author_id, limit=limit,
                 year_from=year_from, year_to=year_to, sort=sort,
             )
-            # Attach author match metadata to first result. `exact` and
-            # `alternatives` let callers spot a disambiguation they may want to
-            # override with an explicit author_id.
+            # Attach author match metadata to first result. `exact`, `fallback`
+            # and `alternatives` let callers spot a disambiguation they may
+            # want to override with an explicit author_id.
             if results and (match or author):
                 meta: dict[str, Any] = {
                     "name": match.display_name if match else (author or ""),
@@ -349,6 +383,7 @@ def search_papers(
                 if match:
                     meta["query"] = author
                     meta["exact"] = match.exact
+                    meta["fallback"] = match.fallback
                     if match.alternatives:
                         meta["alternatives"] = list(match.alternatives)
                 results[0]["_author_match"] = meta

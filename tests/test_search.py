@@ -4,7 +4,7 @@ Regression for the "Shilong Piao" case: OpenAlex returns a 1-work duplicate
 named exactly like the query and the real 999-work profile that carries a
 middle initial. Ranking inside exact matches alone picked the duplicate.
 
-Run: python -m unittest discover -s tests -t .
+Run: python -m pytest tests/test_search.py
 """
 
 from __future__ import annotations
@@ -70,8 +70,16 @@ class NameCompatibilityTests(unittest.TestCase):
     def test_different_people_are_not_compatible(self):
         self.assertFalse(search._name_compatible("Shilong Piao", "Wei Zhang"))
 
-    def test_suffixes_are_ignored(self):
+    def test_missing_suffix_is_tolerated(self):
         self.assertTrue(search._name_compatible("John Smith", "John Smith Jr."))
+
+    def test_different_suffixes_are_not_compatible(self):
+        self.assertFalse(search._name_compatible("John Smith Jr.", "John Smith Sr."))
+        self.assertFalse(search._name_compatible("John Smith III", "John Smith IV"))
+
+    def test_compact_initials_are_split(self):
+        self.assertTrue(search._name_compatible("Shilong Piao", "Shilong L.Piao"))
+        self.assertTrue(search._name_compatible("J.R.R. Tolkien", "J. R. R. Tolkien"))
 
 
 class ResolveAuthorTests(unittest.TestCase):
@@ -110,6 +118,7 @@ class ResolveAuthorTests(unittest.TestCase):
             match = search._resolve_author("Shilong Piao")
 
         self.assertEqual(match.id, "A5000033522")
+        self.assertFalse(match.fallback)
         self.assertEqual(len(match.alternatives), 3)
 
     def test_falls_back_to_all_candidates_when_none_is_compatible(self):
@@ -121,6 +130,8 @@ class ResolveAuthorTests(unittest.TestCase):
 
         self.assertEqual(match.id, "A5072538516")
         self.assertFalse(match.exact)
+        self.assertTrue(match.fallback)
+        self.assertEqual(match.alternatives, ())
 
     def test_http_error_returns_none(self):
         with _patch_authors([AUTHORITATIVE], status_code=503):
@@ -161,6 +172,7 @@ class SearchPapersMetadataTests(unittest.TestCase):
         self.assertEqual(meta["id"], "A5000033522")
         self.assertEqual(meta["query"], "Shilong Piao")
         self.assertFalse(meta["exact"])
+        self.assertFalse(meta["fallback"])
         self.assertEqual(meta["alternatives"][0]["id"], "A5072538516")
 
     def test_unresolved_author_returns_no_results(self):

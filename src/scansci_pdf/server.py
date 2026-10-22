@@ -129,7 +129,19 @@ def scansci_pdf_download(
 
 def _result_key(result: dict[str, Any]) -> str:
     """Identity of the paper a lane result refers to ('' when unrecognizable)."""
-    return ((result.get("doi") or result.get("identifier") or "") or "").strip().lower()
+    raw = result.get("doi") or result.get("identifier") or ""
+    key = str(raw).strip()
+    if not key:
+        return ""
+    try:
+        from .identifiers import normalize_arxiv_id, normalize_doi
+
+        arxiv_id = normalize_arxiv_id(key)
+        if arxiv_id:
+            return f"arxiv:{arxiv_id.lower()}"
+        return normalize_doi(key).lower()
+    except Exception:
+        return key.lower()
 
 
 def _merge_lane_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -138,6 +150,11 @@ def _merge_lane_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     The lane scheduler emits one row per attempt: a paper that misses the fast
     lane and lands in the grey lane leaves both a failed row and a success row.
     Counting rows therefore reports a failure for a paper that was downloaded.
+
+    When every attempt failed, the later row wins: lanes run fast → grey →
+    institutional, so the last row carries the more specific reason. Earlier
+    ``source_failures`` are copied over when the winner does not have its own,
+    so channel diagnostics are not lost.
     """
     merged: dict[str, dict[str, Any]] = {}
     unrecognized: list[dict[str, Any]] = []
@@ -147,8 +164,21 @@ def _merge_lane_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
             unrecognized.append(result)
             continue
         previous = merged.get(key)
-        if previous is None or (not previous.get("success") and result.get("success")):
+        if previous is None:
             merged[key] = result
+            continue
+        if result.get("success"):
+            if not previous.get("success"):
+                merged[key] = result
+            continue
+        if previous.get("success"):
+            continue
+
+        # Both attempts failed: keep the later (more specific) failure, but
+        # preserve the earlier attempt's channel-level diagnostics.
+        if not result.get("source_failures") and previous.get("source_failures"):
+            result = {**result, "source_failures": previous["source_failures"]}
+        merged[key] = result
     return list(merged.values()) + unrecognized
 
 

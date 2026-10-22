@@ -39,6 +39,24 @@ class MergeLaneResultsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0]["success"])
 
+    def test_later_failure_reason_wins(self):
+        rows = _merge_lane_results([
+            _fail("10.1/x", "fast lane failed"),
+            _fail("10.1/x", "cloudflare_blocked"),
+        ])
+        self.assertEqual(rows[0]["error"], "cloudflare_blocked")
+
+    def test_earlier_source_failures_are_preserved(self):
+        rows = _merge_lane_results([
+            {
+                "doi": "10.1/x", "success": False, "error": "fast lane failed",
+                "source_failures": [{"source": "OA", "reason": "miss"}],
+            },
+            {"doi": "10.1/x", "success": False, "error": "grey failed"},
+        ])
+        self.assertEqual(rows[0]["error"], "grey failed")
+        self.assertEqual(rows[0]["source_failures"][0]["source"], "OA")
+
     def test_success_wins_even_when_it_came_first(self):
         rows = _merge_lane_results([_ok("10.1/a"), _fail("10.1/a")])
         self.assertEqual(len(rows), 1)
@@ -55,6 +73,14 @@ class MergeLaneResultsTests(unittest.TestCase):
 
     def test_keys_are_case_and_whitespace_insensitive(self):
         raw = [_fail(" 10.1/ABC "), _ok("10.1/abc")]
+        self.assertEqual(len(_merge_lane_results(raw)), 1)
+
+    def test_doi_url_and_bare_doi_are_merged(self):
+        raw = [_fail("https://doi.org/10.1/ABC"), _ok("10.1/abc")]
+        self.assertEqual(len(_merge_lane_results(raw)), 1)
+
+    def test_arxiv_prefixes_are_merged(self):
+        raw = [_fail("arXiv:2401.12345"), _ok("2401.12345")]
         self.assertEqual(len(_merge_lane_results(raw)), 1)
 
     def test_unrecognized_rows_are_never_collapsed(self):
