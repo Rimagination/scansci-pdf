@@ -310,3 +310,88 @@ def test_the_broker_spawn_target_is_executable():
     )
     assert proc.returncode == 0, proc.stderr[-2000:].decode("utf-8", "replace")
     assert "session-broker-run" in proc.stdout.decode("utf-8", "replace")
+
+
+def test_the_broker_spawns_the_module_the_product_names(tmp_path):
+    """The spawn target is read from the product, not copied into the test.
+
+    The test above proves that *a* plausible command works. What has to hold
+    is that the command the product builds works: a module-path typo in
+    ``start_broker_process`` kills the whole broker path -- every spawn dies
+    with "No module named ..." -- while every test stays green.
+    """
+    from unittest.mock import patch
+
+    import scansci_pdf.session_broker as broker
+
+    recorded: dict[str, list[str]] = {}
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            recorded["args"] = list(args)
+
+        def poll(self):
+            return None
+
+    with patch.object(broker, "broker_dir", lambda publisher: tmp_path):
+        with patch.object(broker.subprocess, "Popen", _FakePopen):
+            broker.start_broker_process(
+                publisher="elsevier",
+                browser_profile="test-profile",
+                institution="Test University",
+                ttl_seconds=60,
+                cwd=REPO,
+            )
+
+    args = recorded["args"]
+    assert args[1:4] == ["-m", "scansci_pdf.cli", "session-broker-run"], args
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO / "src")
+    proc = subprocess.run(
+        args[:4] + ["--help"], capture_output=True, timeout=180, env=env
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:].decode("utf-8", "replace")
+
+
+@pytest.mark.parametrize("shim_name,canon_name", PAIRS, ids=IDS)
+def test_a_shim_forwards_without_answering_a_name_of_its_own(shim_name, canon_name):
+    """``__getattr__`` may only forward.
+
+    A branch that answers one name itself is a second implementation,
+    reachable only through the old import path, and the identity guard
+    cannot see it: that guard compares the *canonical's* names, so a name
+    the canonical does not have is never compared.
+    """
+    shim = importlib.import_module(shim_name)
+    source = Path(shim.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "__getattr__"):
+            continue
+        answered = {
+            comparator.value
+            for compare in ast.walk(node)
+            if isinstance(compare, ast.Compare)
+            for comparator in compare.comparators
+            if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str)
+        }
+        assert answered <= {"__all__"}, (
+            f"{shim_name} answers names of its own: {sorted(answered)}"
+        )
+
+
+@pytest.mark.parametrize("shim_name,canon_name", PAIRS, ids=IDS)
+def test_a_star_import_from_a_shim_exports_the_canonical_names(shim_name, canon_name):
+    """``from ... import *`` must export the canonical module's public names.
+
+    A module-level ``__all__`` in a shim would shadow the dynamic one, and
+    a dunder is exempt from the namespace check -- so the export list has
+    to be checked for every pair, not for one of them.
+    """
+    shim = importlib.import_module(shim_name)
+    canon = importlib.import_module(canon_name)
+    expected = {name for name in dir(canon) if not name.startswith("_")}
+    assert set(shim.__all__) == expected, (
+        f"{shim_name} exports {sorted(set(shim.__all__) ^ expected)} that the "
+        f"canonical module does not"
+    )

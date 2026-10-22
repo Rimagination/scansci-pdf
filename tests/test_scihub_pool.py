@@ -90,11 +90,19 @@ class PersistentPoolTests(unittest.TestCase):
             own_calls = _own_close_calls(pool, calls)
 
         self.assertIsNone(scihub._RACE_POOL)
-        # Each worker closed its own browser in its own thread.
-        self.assertLessEqual(len(own_calls), 2)
-        self.assertTrue(
-            own_calls,
-            "no close task ran in the pool's workers",
+        # The product queues one close task per configured slot, and the
+        # join above means every one of them has run.
+        self.assertEqual(
+            len(own_calls),
+            pool._max_workers,
+            "the pool's workers did not close one browser each",
+        )
+        # The executor is stopped: the workers are gone. Without the
+        # shutdown sentinel they would still be running, and the join above
+        # would have timed out silently.
+        self.assertFalse(
+            [thread for thread in pool._threads if thread.is_alive()],
+            "the pool's workers were still alive after the shutdown",
         )
         # A close must never run on the main thread: Playwright's sync objects
         # are thread-affine, so the browser has to be closed by the worker that

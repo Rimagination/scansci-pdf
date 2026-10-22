@@ -85,6 +85,22 @@ def _payload() -> str:
 """
 
 
+def _manuscript_claims_full_text_payload() -> str:
+    """The manuscript's own label claims the full text.
+
+    That is the shape #89 describes: under the old resolution the version of
+    record's container spans the document, so the manuscript's "full-text"
+    claim inflates the version of record and the manuscript's own +100
+    outranks it. The two copies' extractors then rank the candidates
+    differently -- which is what lets the drift guard see a copy that
+    resolves its container differently.
+    """
+    return _payload().replace(
+        "<label>submitted to thin-walled structures",
+        "<label>full-text submitted to thin-walled structures",
+    )
+
+
 # The container logic exists in two places; both feed a live code path
 # (_publisher_strategies_core's API lane and sources.elsevier_api's fetch_pdf).
 IMPLS = (
@@ -140,6 +156,24 @@ def _tag_by_eid(impl, xml_text):
     return {eid: tag for eid, (tag, _meta) in _resolve(impl, xml_text).items()}
 
 
+def _score(impl, eid, metadata):
+    """Score with the copy's OWN scorer.
+
+    The two copies are two implementations of one rule, and they run in two
+    different lanes -- ``sources.elsevier_api.fetch_pdf`` and the publisher
+    strategies -- so a candidate has to be scored by the copy that will score
+    it in production. Scoring both with the core copy's scorer would leave
+    the sources copy's scorer untested.
+    """
+    module = importlib.import_module(impl[0])
+    name = (
+        "_elsevier_attachment_score"
+        if impl[0].endswith("_core")
+        else "_attachment_score"
+    )
+    return getattr(module, name)(eid, metadata)
+
+
 @pytest.mark.parametrize("impl", IMPLS)
 def test_the_version_of_record_is_scored_on_its_own_metadata(impl):
     """The version of record must not inherit the manuscript's markers.
@@ -155,7 +189,7 @@ def test_the_version_of_record_is_scored_on_its_own_metadata(impl):
         assert marker not in vor, (
             f"the version of record's metadata carries the sibling's {marker!r} marker"
         )
-    assert _elsevier_attachment_score(VOR_EID, vor) == VOR_SCORE
+    assert _score(impl, VOR_EID, vor) == VOR_SCORE
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -172,7 +206,7 @@ def test_the_manuscript_is_still_scored_as_a_manuscript(impl):
     assert "submitted to" in am
     for marker in SIBLING_MARKERS:
         assert marker not in am
-    assert _elsevier_attachment_score(AM_EID, am) == AM_SCORE
+    assert _score(impl, AM_EID, am) == AM_SCORE
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -212,8 +246,8 @@ def test_the_version_of_record_outranks_the_manuscript(impl):
     """The whole point: the version of record is the file that gets fetched."""
     metadata = _metadata_by_eid(impl, _payload())
 
-    vor_score = _elsevier_attachment_score(VOR_EID, metadata[VOR_EID])
-    am_score = _elsevier_attachment_score(AM_EID, metadata[AM_EID])
+    vor_score = _score(impl, VOR_EID, metadata[VOR_EID])
+    am_score = _score(impl, AM_EID, metadata[AM_EID])
     assert vor_score > am_score, (
         f"the version of record scored {vor_score}, the manuscript {am_score}"
     )
@@ -242,6 +276,7 @@ def test_the_two_copies_agree_on_the_container():
         _nested_id_payload(),
         _cut_marker_payload(),
         _wide_container_payload(),
+        _manuscript_claims_full_text_payload(),
     )
 
     for payload in payloads:
@@ -383,11 +418,11 @@ def test_a_long_label_does_not_cost_the_version_of_record_its_own_claim(impl):
     assert len(vor) < 4096
 
     # +20 (.pdf) +10 (pdf) +100 (the block's own "full-text" claim)
-    assert _elsevier_attachment_score(
+    assert _score(impl, 
         "1-s2.0-S0263823116307662-mainext.pdf", vor
     ) == 130
     # +20 +10 +100 -60 ("accepted manuscript")
-    assert _elsevier_attachment_score(
+    assert _score(impl, 
         "1-s2.0-S0263823116307662-am.pdf",
         metadata["1-s2.0-S0263823116307662-am.pdf"],
     ) == 70
@@ -420,7 +455,7 @@ def test_a_holder_of_two_blocks_normalising_to_one_key_is_not_a_container(impl):
 
     assert tag == "attachment", f"the holder was used as the container ({tag})"
     assert "supplementary" not in meta, "the sibling block's label leaked in"
-    assert _elsevier_attachment_score("1-s2.0-S0263823116307662-main.pdf", meta) == 140
+    assert _score(impl, "1-s2.0-S0263823116307662-main.pdf", meta) == 140
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -459,8 +494,8 @@ def test_a_manuscript_block_holding_a_nested_object_keeps_its_label(impl):
     # version of record still wins by a wide margin. What this pins is that
     # the label survived: without it the score was +30, above the version of
     # record's, and the manuscript stopped being recognisable as one.
-    assert _elsevier_attachment_score(AM_EID, metadata[AM_EID]) == -125
-    assert _elsevier_attachment_score(VOR_EID, metadata[VOR_EID]) == 140
+    assert _score(impl, AM_EID, metadata[AM_EID]) == -125
+    assert _score(impl, VOR_EID, metadata[VOR_EID]) == 140
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -485,28 +520,67 @@ def test_an_id_carried_as_an_attribute_resolves_to_its_own_block(impl):
     tag, meta = resolved["1-s2.0-S0263823116307662-main.pdf"]
 
     assert tag == "attachment", f"the holder was used as the container ({tag})"
-    assert _elsevier_attachment_score("1-s2.0-S0263823116307662-main.pdf", meta) == 140
+    assert _score(impl, "1-s2.0-S0263823116307662-main.pdf", meta) == 140
 
 
 def test_the_same_file_under_two_spellings_is_one_candidate():
     """``1-S2.0-X-MAIN.PDF`` and ``1-s2.0-x-main.pdf`` are one attachment.
 
     Deduplicating on the raw id string would offer the same file twice.
+    The two spellings differ in more than case here, so a de-duplication on
+    the lowercased id string cannot pass for a de-duplication on the
+    attachment's identity.
     """
     from scansci_pdf._publisher_strategies_core import (
         _extract_elsevier_pdf_attachment_eids,
+    )
+    from scansci_pdf.sources.elsevier_api import (
+        _extract_pdf_attachment_eids,
     )
 
     payload = """<?xml version="1.0" encoding="UTF-8"?>
 <full-text-retrieval-response>
   <attachments>
     <attachment><attachment-eid>1-S2.0-S0263823116307662-MAIN.PDF</attachment-eid></attachment>
-    <attachment><attachment-eid>1-s2.0-S0263823116307662-main.pdf</attachment-eid></attachment>
+    <attachment><attachment-eid>1-s2.0-S0263823116307662.pdf</attachment-eid></attachment>
   </attachments>
 </full-text-retrieval-response>
 """
-    ranked = _extract_elsevier_pdf_attachment_eids(payload)
-    assert len(ranked) == 1, f"the same file was offered twice: {ranked}"
+    for extract in (_extract_elsevier_pdf_attachment_eids, _extract_pdf_attachment_eids):
+        ranked = extract(payload)
+        assert len(ranked) == 1, f"the same file was offered twice: {ranked}"
+
+
+def test_the_two_scorers_agree():
+    """The two copies are two implementations of one rule.
+
+    They live in two live lanes, so a difference between them makes the
+    lanes pick different files -- the accepted manuscript in one of them and
+    the version of record in the other. The fixtures below cover the
+    id-derived terms and every marker the rule reads.
+    """
+    core = importlib.import_module("scansci_pdf._publisher_strategies_core")
+    api = importlib.import_module("scansci_pdf.sources.elsevier_api")
+
+    eids = (
+        "1-s2.0-X-main.pdf",
+        "1-s2.0-X-am.pdf",
+        "1-s2.0-X-author_2017.pdf",
+        "1-s2.0-X.pdf",
+    )
+    haystacks = (
+        "",
+        "attachment:1-s2.0-x-main.pdf attachment-size:1 page-count:2",
+        "attachment:1-s2.0-x-am.pdf label:submitted to a manuscript version",
+        "attachment:1-s2.0-x-am.pdf aam-pdf thumbnail supplementary mmc",
+        "attachment:1-s2.0-x-main.pdf full-text pages attachment-size filesize",
+        "attachment:1-s2.0-x-am.pdf accepted manuscript author manuscript",
+    )
+    for eid in eids:
+        for haystack in haystacks:
+            assert core._elsevier_attachment_score(eid, haystack) == (
+                api._attachment_score(eid, haystack)
+            ), f"the two scorers disagree on {eid!r} / {haystack!r}"
 
 
 # --- the second review round ---------------------------------------------- #
@@ -596,7 +670,7 @@ def test_an_element_without_text_does_not_add_a_marker(impl):
     vor = metadata[VOR_EID]
     assert "supplement" not in vor, "an element without text added a marker"
     # +20 (.pdf) +10 (pdf) +100 (-main.pdf) +5 (attachment-size)
-    assert _elsevier_attachment_score(VOR_EID, vor) == 135
+    assert _score(impl, VOR_EID, vor) == 135
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -612,7 +686,7 @@ def test_a_marker_cut_in_half_by_the_element_cap_still_counts(impl):
     am = metadata[AM_EID]
     assert "aam-pdf" in am, "the marker that straddled the cap was lost"
     # +20 (.pdf) +10 (pdf) +5 (page-count) -60 ("aam-pdf")
-    assert _elsevier_attachment_score(AM_EID, am) == -25
+    assert _score(impl, AM_EID, am) == -25
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -629,7 +703,7 @@ def test_the_window_does_not_decide_the_score(impl):
     assert "full-text" in vor, "the version of record lost its own full-text claim"
     assert "page-count" in vor, "the page-count element's name was lost with it"
     # +20 (.pdf) +10 (pdf) +100 (full-text) +5 (page-count)
-    assert _elsevier_attachment_score(VOR_EID, vor) == 135
+    assert _score(impl, VOR_EID, vor) == 135
 
 
 @pytest.mark.parametrize("impl", IMPLS)
@@ -657,7 +731,7 @@ def test_the_bounded_metadata_scores_the_same_as_the_unbounded_one(impl):
     bounded: dict[tuple[str, str], int] = {}
     for payload in payloads:
         for eid, meta in _metadata_by_eid(impl, payload).items():
-            bounded[(payload, eid)] = _elsevier_attachment_score(eid, meta)
+            bounded[(payload, eid)] = _score(impl, eid, meta)
 
     old_cap = getattr(module, cap_name)
     old_window = getattr(module, window_name)
@@ -666,7 +740,7 @@ def test_the_bounded_metadata_scores_the_same_as_the_unbounded_one(impl):
         setattr(module, window_name, 10**9)
         for payload in payloads:
             for eid, meta in _metadata_by_eid(impl, payload).items():
-                unbounded = _elsevier_attachment_score(eid, meta)
+                unbounded = _score(impl, eid, meta)
                 assert bounded[(payload, eid)] == unbounded, (
                     f"the window moved the score of {eid} from {unbounded} "
                     f"to {bounded[(payload, eid)]}"
@@ -767,6 +841,7 @@ def test_the_two_copies_rank_the_same_candidates():
         _nested_id_payload(),
         _cut_marker_payload(),
         _wide_container_payload(),
+        _manuscript_claims_full_text_payload(),
     )
     for payload in payloads:
         assert _extract_elsevier_pdf_attachment_eids(payload) == (
