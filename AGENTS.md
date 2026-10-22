@@ -37,6 +37,7 @@ scansci-pdf check
 - `skill/SKILL.md` — canonical, full workflow reference for `scansci-pdf`.
 - `skills/scansci-pdf/SKILL.md` — short host-neutral wrapper.
 - `skills/scansci-sort/SKILL.md` — list triage and route planning.
+- `skills/dsh-plugin-npm-publish/SKILL.md` — DSH bundle adaptation and npm publishing playbook.
 - `zcode-plugin/skills/` — expanded ZCode editions.
 
 Keep the MCP tool names and the source-authorization rules in these skills in
