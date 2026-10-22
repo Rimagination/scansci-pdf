@@ -1,5 +1,5 @@
 ---
-name: dsh-plugin-npm-publish
+name: dsh-npm
 description: Package an MCP server or agent plugin as a DeepSeek Harness (DSH) Cordis bundle and publish it to registry.npmjs.org so DSH's Plugins → Add plugin installs it by package name. Use when adapting a plugin to DSH, making a DSH bundle npm-installable, publishing a DSH plugin, or debugging a bundle that fails after npm install.
 whenToUse: The user wants others to install a plugin through DSH's Plugins UI, or wants to turn an existing MCP server, CLI, or set of skills into an npm-installable DSH bundle.
 ---
