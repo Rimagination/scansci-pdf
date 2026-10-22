@@ -32,7 +32,7 @@ def test_gate_skips_when_distribution_missing(monkeypatch):
 def test_launch_refuses_old_version(monkeypatch):
     calls = []
     monkeypatch.setattr(bb, "_cloakbrowser_dist_version", lambda: (0, 4, 11))
-    import cloakbrowser
+    cloakbrowser = pytest.importorskip("cloakbrowser")
 
     orig = cloakbrowser.launch
     monkeypatch.setattr(cloakbrowser, "launch", lambda **kw: calls.append(kw))
