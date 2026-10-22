@@ -9,17 +9,32 @@ from .network import fetch_json
 
 
 def fetch_metadata(doi: str, config: dict[str, Any]) -> dict[str, Any] | None:
-    """Fetch paper metadata from Crossref API."""
+    """Fetch paper metadata from Crossref, with a Chinese-source fallback.
+
+    Chinese DOIs registered through ISTIC/China DOI or CNKI are not in
+    Crossref.  For those, resolve the DOI and enrich from NCPSSD/chndoi/Wanfang
+    instead so auto-rename, BibTeX, and citation export keep working.
+    """
     import urllib.parse
     q = urllib.parse.quote(doi, safe="")
     url = f"https://api.crossref.org/works/{q}"
     try:
         payload = fetch_json(url, config, headers={"Accept": "application/json"})
-        if not payload:
-            return None
-        return payload.get("message", {})
+        if payload:
+            message = payload.get("message")
+            if message:
+                return message
     except Exception:
-        return None
+        pass
+
+    try:
+        from .chinese import is_chinese_doi
+        if is_chinese_doi(doi):
+            from .sources.ncpssd import chinese_metadata
+            return chinese_metadata(doi, config)
+    except Exception:
+        pass
+    return None
 
 
 def _extract_fields(msg: dict[str, Any], doi: str) -> dict[str, str]:

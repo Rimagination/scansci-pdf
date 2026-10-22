@@ -21,8 +21,12 @@ tool routing or configuration guidance.
 镜像健康存储曾被重复造过三代）。
 ## Route by intent
 
-- Search or identify papers: `scansci_pdf_search`, `scansci_pdf_verify_identifiers`,
-  and `scansci_pdf_parse_list` for list files.
+- Search or identify papers: `scansci_pdf_search`, `scansci_pdf_sciverse`
+  (`search`/`content`/`meta_search`/`relations`/`catalog`/`resource`; requires
+  `sciverse_api_key`), `scansci_pdf_verify_identifiers`, and
+  `scansci_pdf_parse_list` for list files.
+- Configure Sciverse (optional semantic evidence/metadata): `scansci_pdf_sciverse_setup`
+  with `token` and `test=true`; without it, search still works and returns a `config_hint`.
 - Resolve open-access locations: `scansci_pdf_prepare_queue(action="resolve_oa")`.
 - Download one paper: `scansci_pdf_download` with an explicit strategy when the
   user has a source preference.

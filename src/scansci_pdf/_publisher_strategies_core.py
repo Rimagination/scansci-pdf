@@ -170,6 +170,9 @@ def _save_all_cookie_formats(
         "ascelibrary.org", "sagepub.com", "journals.sagepub.com",
         "sage.cnpereading.com",
         "royalsocietypublishing.org", "copernicus.org",
+        # Chinese databases (CARSI login + campus-IP sessions)
+        "cnki.net", "cnki.com.cn", "wanfangdata.com.cn", "cqvip.com",
+        "ncpssd.cn",
     ]
     pub_cookies = [c for c in cookie_data
                    if any(c.get("domain", "").endswith(d) for d in _pub_domains)]

@@ -194,12 +194,30 @@ def setup_check() -> dict[str, Any]:
     if not tor["running"] and not docker.get("running") and not browser["running"]:
         readiness = "limited"
 
+    from .config import load_config
+    config = load_config()
+    services = {
+        "elsevier_api": "configured" if config.get("elsevier_api_key") else "not_configured",
+        "sciverse": "configured" if config.get("sciverse_api_key") else "not_configured",
+    }
+    recommendations = []
+    if (
+        services["sciverse"] == "not_configured"
+        and config.get("sciverse_enabled", True)
+    ):
+        recommendations.append(
+            "Sciverse 未配置：运行 scansci-pdf sciverse-setup --token <token> --test "
+            "启用语义检索/元数据/引文图谱（可选，不影响下载）"
+        )
+
     return {
         "system": sys_info,
         "tor": tor,
         "docker": docker,
         "browser": browser,
         "install_commands": commands,
+        "services": services,
         "issues": issues,
+        "recommendations": recommendations,
         "readiness": readiness,
     }

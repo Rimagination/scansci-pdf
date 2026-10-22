@@ -129,6 +129,7 @@ def get_user_advice(error_type: str, source: str) -> str:
         "network_blocked": "网络完全不通 → 建议：1) 检查代理配置 config_set network_proxy 2) 使用 WebVPN 机构代理 3) 换用海外网络",
         "paywall": "论文需要机构订阅 → 运行 scansci_pdf_browser_login 或 scansci_pdf_instsci_login 登录机构账号",
         "cloudflare_blocked": "Cloudflare 反爬封锁 → 安装 CloakBrowser (pip install cloakbrowser) 或配置代理",
+        "caj_format": "知网返回 CAJ 格式 → 用 CAJViewer 打开，或用 caj2pdf 转换 PDF；详情页有 PDF 按钮时优先重试 PDF",
     }
     return advice.get(error_type, "未知错误 → 建议：运行 network_diagnose 检查网络状态")
 

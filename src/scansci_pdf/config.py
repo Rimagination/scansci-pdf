@@ -53,6 +53,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vpnsci_cookie_file": "",
     "carsi_enabled": False,
     "carsi_idp_name": "",
+    # 中文源开关（均为合法渠道）：
+    #   ncpssd_enabled      国家哲学社会科学文献中心，人文社科免费全文
+    #   cn_journal_direct   中文期刊官网直链 PDF（DOI 落地到刊社网站时）
+    #   cn_databases_enabled CNKI/万方/维普（校园网出口或 CARSI 机构订阅）
+    "ncpssd_enabled": True,
+    "cn_journal_direct": True,
+    "cn_databases_enabled": True,
+    # 中文库 CARSI 登录弹窗由内部阶段控制：免费源阶段只复用已保存会话，
+    # 失败后进入机构阶段才允许打开登录浏览器。
+    "cn_auto_login": True,
+    # 万方/知网失败后用维普再兜底（校园网 IP 或 CARSI 均可）。
+    "cn_vip_fallback": True,
     "ezproxy_enabled": False,
     "ezproxy_login_url": "",
     # 机构会话自愈：下载走机构渠道前自动校验 WebVPN/CARSI 会话，
@@ -61,6 +73,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_relogin": True,
     "core_api_key": "",
     "openalex_api_key": "",
+    # Sciverse 语义检索（agentic-search）：自然语言问题 → 可引用的证据片段。
+    # 需要 https://sciverse.space/tokens 创建的 API Key；未配置时整条链路静默跳过。
+    "sciverse_enabled": True,
+    "sciverse_api_key": "",
+    "sciverse_base_url": "https://api.sciverse.space",
+    "sciverse_sub_queries": 0,  # 查询改写数 0-4；调高召回更好但延迟更高
+    "sciverse_timeout_seconds": 45,
+    # 每次 search 额外跑一路结构化 meta-search（返回 DOI/unique_id，补语义片段的 DOI 缺口）。
+    # 每次检索会因此多消耗一次 Sciverse 配额；配额紧张时设为 false。
+    "sciverse_meta_search_enabled": True,
     "elsevier_api_key": "",
     "springer_api_key": "",  # Springer Nature Full Text API (TDM) — entitlement follows the institution (ORCID-affiliated key, needs a Springer subscription with TDM rights)
     "elsevier_insttoken": "",
@@ -159,6 +181,8 @@ _VALIDATION_RULES: dict[str, tuple[type, Any, Any]] = {
     "batch_stagger_seconds": (float, 0.0, 10.0),
     "min_pdf_size_bytes": (int, 100, 1000000),
     "google_scholar_limit": (int, 1, 50),
+    "sciverse_sub_queries": (int, 0, 4),
+    "sciverse_timeout_seconds": (int, 5, 300),
 }
 
 _VALID_STRATEGIES = frozenset({"fastest", "scihub_first", "scihub_only", "grey_only", "oa_first", "legal_only"})
@@ -235,6 +259,7 @@ SENSITIVE_KEYS = [
     "zotero_library_id",
     "elsevier_api_key",
     "elsevier_insttoken",
+    "sciverse_api_key",
 ]
 
 _PROXY_URL_CREDS_RE = re.compile(r"(//[^/@\s]+:)[^@\s]+@")
@@ -249,7 +274,9 @@ def mask_config_value(key: str, value: Any) -> Any:
     if value is None:
         return value
     if key in SENSITIVE_KEYS:
-        return "***"
+        # Empty means "not configured", not a masked secret — callers use
+        # this to decide whether to show a setup prompt.
+        return "***" if value != "" else ""
     if "proxy" in key.lower() and isinstance(value, str) and "@" in value:
         return _PROXY_URL_CREDS_RE.sub(r"\1***@", value)
     return value

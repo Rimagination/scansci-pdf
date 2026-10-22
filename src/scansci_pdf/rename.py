@@ -6,16 +6,25 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .chinese import has_cjk, normalize_cn_text
 from .log import get_logger
 
 log = get_logger()
+
+_CN_TITLE_STOP_PREFIXES = ("论", "关于", "基于", "面向", "我国", "中国")
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_component(value: str) -> str:
+    value = _INVALID_FILENAME_CHARS.sub("", value)
+    return value.strip(" .")
 
 
 def generate_filename(metadata: dict[str, Any], max_len: int = 80) -> str:
     """Generate a clean filename from paper metadata.
 
     Format: LastNameYear_FirstWordOfTitle.pdf
-    Example: Smith2023_CRISPR.pdf
+    Example: Smith2023_CRISPR.pdf, 杨国荣2025_理解人工智能.pdf
     """
     # Extract year
     year = ""
@@ -51,20 +60,35 @@ def generate_filename(metadata: dict[str, Any], max_len: int = 80) -> str:
     if titles:
         title = titles[0] if isinstance(titles, list) else titles
         if isinstance(title, str):
-            # Remove HTML tags
-            title = re.sub(r"<[^>]+>", "", title)
-            # Skip common stop words
-            stop_words = {"a", "an", "the", "on", "in", "of", "for", "to", "and", "with", "from"}
-            words = re.findall(r"[A-Za-z]+", title)
-            for w in words:
-                if w.lower() not in stop_words and len(w) > 2:
-                    title_word = w.capitalize()
-                    break
+            title = normalize_cn_text(title)
+            if has_cjk(title):
+                # Chinese titles have no spaces: use the leading CJK run and
+                # drop a common discourse prefix ("论"/"基于"/"关于"...) so
+                # "论人工智能报关" → 人工智能报关.
+                cjk = "".join(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]+", title))
+                for prefix in _CN_TITLE_STOP_PREFIXES:
+                    if cjk.startswith(prefix) and len(cjk) - len(prefix) >= 4:
+                        cjk = cjk[len(prefix):]
+                        break
+                title_word = cjk[:12]
+            else:
+                # Skip common stop words
+                stop_words = {"a", "an", "the", "on", "in", "of", "for", "to", "and", "with", "from"}
+                words = re.findall(r"[A-Za-z]+", title)
+                for w in words:
+                    if w.lower() not in stop_words and len(w) > 2:
+                        title_word = w.capitalize()
+                        break
 
     # Clean components
-    first_author = re.sub(r"[^A-Za-z]", "", first_author)[:20]
+    if has_cjk(first_author):
+        author_tokens = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]+", first_author)
+        first_author = author_tokens[0][:6] if author_tokens else ""
+    else:
+        first_author = re.sub(r"[^A-Za-z]", "", first_author)[:20]
     year = re.sub(r"[^0-9]", "", year)[:4]
-    title_word = re.sub(r"[^A-Za-z]", "", title_word)[:20]
+    first_author = _sanitize_component(first_author)
+    title_word = _sanitize_component(title_word)[:20]
 
     # Build filename: LastNameYear_TitleWord
     parts = []
@@ -88,7 +112,7 @@ def generate_filename(metadata: dict[str, Any], max_len: int = 80) -> str:
     # Truncate if too long
     if len(name) > max_len:
         name = name[:max_len]
-    return name
+    return _sanitize_component(name)
 
 
 def rename_pdf(

@@ -61,6 +61,9 @@ async def fetch_paper(identifier: str, format: str = "markdown") -> str:
 async def search_papers(query: str, limit: int = 10, year_range: str = "") -> str:
     """Search for academic papers via OpenAlex, Semantic Scholar, and Crossref.
 
+    Chinese queries also search NCPSSD (国家哲学社会科学文献中心), which covers
+    humanities/social-science journals absent from the Western indexes.
+
     Returns a list of papers with titles, authors, DOIs, and citation counts.
     Use the DOIs from results with fetch_paper to get full text.
 

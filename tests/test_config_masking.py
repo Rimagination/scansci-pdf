@@ -11,6 +11,8 @@ from scansci_pdf.config import get_config_safe, mask_config_value
 def test_mask_sensitive_key():
     assert mask_config_value("elsevier_api_key", "sk-secret-123") == "***"
     assert mask_config_value("zotero_api_key", "abc") == "***"
+    assert mask_config_value("sciverse_api_key", "scv-secret") == "***"
+    assert mask_config_value("sciverse_api_key", "") == ""
     assert mask_config_value("core_api_key", None) is None
 
 

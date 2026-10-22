@@ -1,7 +1,8 @@
-"""Compiled core modules for IP protection.
+"""Optional Cython-accelerated core modules.
 
-These .pyx files are compiled to .pyd/.so via Cython at build time.
-Pure Python fallbacks exist in the original modules.
+The .pyx sources live in this package and are MIT licensed. When Cython
+is available they are compiled to .pyd/.so at build time; pure Python fallbacks
+exist in the original modules.
 
 Usage in other modules:
     try:

@@ -13,7 +13,7 @@ from typing import Any
 
 from ..cache import cache_get, cache_set
 from ..config import load_config, DATA_DIR
-from ..identifiers import is_arxiv_identifier, normalize_doi, safe_filename
+from ..identifiers import is_arxiv_identifier, is_chinese_doi, normalize_doi, safe_filename
 from ..log import get_logger
 from ..pdf_utils import fail
 from ..rename import rename_pdf, generate_filename as rename_pdf_generate_filename
@@ -44,6 +44,9 @@ from .openaire import try_openaire
 from .unpaywall import try_unpaywall
 from .vpnsci import try_vpnsci
 from .ezproxy import try_ezproxy
+from .ncpssd import try_ncpssd
+from .cn_journal import try_cn_journal_direct
+from .cn_databases import try_cn_database
 
 # Institutional bridge — uses instsci PaperFetcher when available
 def _try_institutional_bridge(doi: str, output_path: Path, config: dict) -> dict | None:
@@ -67,6 +70,9 @@ _BROWSER_SOURCE_LABELS = frozenset({
     "NatureBrowser", "ScienceBrowser", "SAGEBrowser", "ASCEBrowser",
     "RoyalSocietyBrowser", "CopernicusDirect",
     "GenericBrowser", "WebVPN", "CARSI", "EZProxy",
+    # CNKI/VIP need a visible browser for CARSI login / download clicks;
+    # Wanfang and NCPSSD are pure HTTP but share the same lane label.
+    "CNDatabase", "CNKI", "Wanfang", "VIP",
     # Sci-Hub launches CloakBrowser internally (browser-first pass +
     # Cloudflare/ALTCHA challenge solving), so it must participate in the
     # global browser-source concurrency budget.
@@ -207,9 +213,9 @@ def _try_source(
                 # Check for suspicious PDF (1-page or very small — likely not full text)
                 file_path = result.get("file", "")
                 if file_path:
-                    from ..pdf_utils import is_suspicious_pdf, suspicious_pdf
+                    from ..pdf_utils import is_pdf_file, is_suspicious_pdf, suspicious_pdf
                     fp = Path(file_path)
-                    if fp.exists() and is_suspicious_pdf(fp):
+                    if fp.suffix.lower() == ".pdf" and fp.exists() and is_pdf_file(fp) and is_suspicious_pdf(fp):
                         log.info(f"   SUSPICIOUS {label}: PDF appears to be a preview/cover page, not full text")
                         record_result(label, False, latency_ms, "suspicious_pdf")
                         return suspicious_pdf(doi, fp, label)
@@ -238,6 +244,30 @@ def _try_source(
             sem.release()
 
 
+def _finalize_result_file(result: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    """Move a winning lane's file into place without forcing a non-PDF to .pdf.
+
+    CNKI can legitimately return a CAJ artifact.  Renaming ``paper.caj`` to
+    ``paper.pdf`` would produce a file that every PDF reader rejects; keep the
+    original extension instead.
+    """
+    final_path = Path(result.get("file", ""))
+    if not final_path.exists():
+        return result
+    suffix = final_path.suffix.lower()
+    target = output_path if suffix in ("", ".pdf") else output_path.with_suffix(suffix)
+    if final_path == target:
+        return result
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        final_path.replace(target)
+        result["file"] = str(target)
+    except OSError:
+        pass
+    return result
+
+
 def _run_tier(
     tier_sources: list[tuple[Any, str]],
     tier_label: str,
@@ -258,13 +288,7 @@ def _run_tier(
         try:
             result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
             if result and result.get("success"):
-                final_path = Path(result.get("file", ""))
-                if final_path != output_path and final_path.exists():
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    if output_path.exists():
-                        output_path.unlink()
-                    final_path.rename(output_path)
-                    result["file"] = str(output_path)
+                _finalize_result_file(result, output_path)
                 log.info(f"   OK {label}")
                 return result
             else:
@@ -292,13 +316,7 @@ def _run_tier(
                 except Exception:
                     result = None
                 if result and result.get("success"):
-                    final_path = Path(result.get("file", ""))
-                    if final_path != output_path and final_path.exists():
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        if output_path.exists():
-                            output_path.unlink()
-                        final_path.rename(output_path)
-                        result["file"] = str(output_path)
+                    _finalize_result_file(result, output_path)
                     for _, other_path in futures.values():
                         if other_path != output_path and other_path.exists():
                             try:
@@ -317,6 +335,18 @@ def _run_tier(
         except TimeoutError:
             log.info(f"   [{tier_label}] Timeout after {timeout_sec}s")
     return None
+
+
+def _try_cn_database_free(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
+    """CN database lane for the free phase: reuse cookies, never open a login browser.
+
+    Interactive CARSI login can take minutes, far beyond the free-race budget.
+    The institutional phase re-runs this lane with auto-login enabled.
+    """
+    return try_cn_database(
+        doi, output_path,
+        {**config, "cn_auto_login": False, "cn_vip_fallback": False},
+    )
 
 
 def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str]]:
@@ -346,7 +376,20 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
         if label not in _fast_names:
             extra_fast.append((fn, label))
 
-    legal_sources = publisher_fast + extra_fast
+    # Chinese sources: NCPSSD free full text, journal official sites, and the
+    # CNKI/Wanfang/VIP institutional lanes (campus egress or CARSI cookies).
+    # They come first for Chinese DOIs because the Western OA indexes either
+    # do not know these DOIs or return nothing useful.
+    cn_sources: list[tuple[Any, str]] = []
+    if is_chinese_doi(doi):
+        if config.get("ncpssd_enabled", True):
+            cn_sources.append((try_ncpssd, "NCPSSD"))
+        if config.get("cn_databases_enabled", True):
+            cn_sources.append((_try_cn_database_free, "CNDatabase"))
+        if config.get("cn_journal_direct", True):
+            cn_sources.append((try_cn_journal_direct, "CNJournal"))
+
+    legal_sources = cn_sources + publisher_fast + extra_fast
     legal_sources += [(try_doaj, "DOAJ"), (try_crossref_page_scrape, "CrossrefPage")]
     legal_sources += [(try_europepmc, "EuropePMC"), (try_core, "CORE"), (try_pmc, "PMC")]
 
@@ -388,11 +431,22 @@ def _build_institutional_sources(doi: str, config: dict[str, Any], *, use_vpnsci
 
     sources: list[tuple[Any, str]] = []
 
-    if _any_institutional_path(config):
+    if _any_institutional_path(config) and not is_chinese_doi(doi):
         sources.append((_try_institutional_bridge, "InstSci"))
 
-    if config.get("carsi_enabled", False) and config.get("carsi_idp_name", "").strip():
+    # Chinese DOIs use the dedicated CNDatabase lane below; the generic
+    # publisher CARSI flow does not understand CNKI/Wanfang/VIP pages.
+    if (
+        config.get("carsi_enabled", False)
+        and config.get("carsi_idp_name", "").strip()
+        and not is_chinese_doi(doi)
+    ):
         sources.append((try_carsi, "CARSI"))
+
+    # Chinese databases: the free phase only reuses saved cookies; this is
+    # where an interactive CARSI login is allowed.
+    if config.get("cn_databases_enabled", True) and is_chinese_doi(doi):
+        sources.append((try_cn_database, "CNDatabase"))
 
     if use_vpnsci and config.get("vpnsci_enabled", False):
         sources.append((try_vpnsci, "WebVPN"))
@@ -479,13 +533,7 @@ def _run_tiers_parallel(
         src_output = target_dir / f"{safe_filename(doi)}_{label}.pdf"
         result = _try_source(fn, doi, src_output, config, label, use_tor=use_tor)
         if result and result.get("success"):
-            final_path = Path(result.get("file", ""))
-            if final_path != output_path and final_path.exists():
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                final_path.rename(output_path)
-                result["file"] = str(output_path)
+            _finalize_result_file(result, output_path)
             return result
         _record_source_failure(failures, label, result)
         return None
@@ -597,13 +645,7 @@ def _run_tiers_parallel(
 
         if shared_result["result"] is not None:
             result, label, src_output = shared_result["result"]
-            final_path = Path(result.get("file", ""))
-            if final_path != output_path and final_path.exists():
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                final_path.rename(output_path)
-                result["file"] = str(output_path)
+            _finalize_result_file(result, output_path)
             log.info(f"   OK {label}")
             return result
         if all_done_event.is_set():
@@ -625,13 +667,7 @@ def _run_tiers_parallel(
         _wait_any((success_event, all_done_event), grace)
         if shared_result["result"] is not None:
             result, label, src_output = shared_result["result"]
-            final_path = Path(result.get("file", ""))
-            if final_path != output_path and final_path.exists():
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                if output_path.exists():
-                    output_path.unlink()
-                final_path.rename(output_path)
-                result["file"] = str(output_path)
+            _finalize_result_file(result, output_path)
             log.info(f"   OK {label} (late)")
             return result
         if all_done_event.is_set():
@@ -1060,22 +1096,27 @@ def _download_impl(
                 return result
 
     # Late capture: wait briefly for browser downloads that complete after race timeout,
-    # then scan for any PDFs that were saved to disk by racing threads.
+    # then scan for any PDFs (or CAJ artifacts) that were saved to disk by racing threads.
     import time as _time
     _time.sleep(2)  # grace period for browser threads to finish writing
-    for p in target_dir.glob(f"{safe_filename(identifier)}*.pdf"):
-        if p.stat().st_size > 5000:
-            result = {
-                "success": True, "identifier": identifier, "doi": doi,
-                "file": str(p), "source": "late_capture",
-            }
-            cache_set(identifier, result, config)
-            if rename:
-                _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
-            if bibtex:
-                from ..bibtex import fetch_bibtex
-                result["bibtex"] = fetch_bibtex(identifier, config)
-            return result
+    for pattern in (f"{safe_filename(identifier)}*.pdf", f"{safe_filename(identifier)}*.caj"):
+        for p in target_dir.glob(pattern):
+            if p.stat().st_size > 5000:
+                result = {
+                    "success": True, "identifier": identifier, "doi": doi,
+                    "file": str(p), "source": "late_capture",
+                }
+                if p.suffix.lower() == ".caj":
+                    from ..caj import caj_hints
+                    result["format"] = "caj"
+                    result.update(caj_hints(p))
+                cache_set(identifier, result, config)
+                if rename:
+                    _auto_rename(result, identifier, config, doi=doi, target_dir=target_dir)
+                if bibtex:
+                    from ..bibtex import fetch_bibtex
+                    result["bibtex"] = fetch_bibtex(identifier, config)
+                return result
 
     # Build actionable guidance based on what was tried
     guidance = _build_failure_guidance(doi, config)
@@ -1086,6 +1127,15 @@ def _download_impl(
         error_type, error_action = get_last_error()
     except Exception:
         error_type, error_action = "", ""
+
+    # A Chinese database lane that hit a login wall is more informative than
+    # the generic "not found": promote it so the user gets the campus/CARSI
+    # guidance instead of a Sci-Hub hint.
+    if not error_type:
+        for failure in race_failures:
+            if failure.get("action") == "login_required":
+                error_type, error_action = "paywall", "login_required"
+                break
 
     hint: dict[str, Any] = {"manual_url": f"https://sci-hub.ru/{doi}", "guidance": guidance}
 
@@ -1104,10 +1154,18 @@ def _download_impl(
             error_type=error_type or "paywall",
             action=error_action or "login_required",
         )
-        result["agent_hint"] = (
-            f"此论文需要机构登录才能下载。请运行 scansci_pdf_login(identifier=\"{doi}\") "
-            "打开浏览器让用户登录机构账号，登录后关闭浏览器，然后重试下载。"
-        )
+        if is_chinese_doi(doi):
+            result["agent_hint"] = (
+                "中文论文需要校园网出口或机构订阅。请选择：1) 连接学校校园网/机构 VPN 后重试"
+                "（万方/维普按 IP 授权）；2) 运行 scansci_pdf_config 设置 "
+                'carsi_enabled=true 和 carsi_idp_name="<学校名>"，再重试（会打开 CARSI 登录浏览器）；'
+                "3) 若知网只提供 CAJ，请用 CAJViewer 打开或 caj2pdf 转 PDF。"
+            )
+        else:
+            result["agent_hint"] = (
+                f"此论文需要机构登录才能下载。请运行 scansci_pdf_login(identifier=\"{doi}\") "
+                "打开浏览器让用户登录机构账号，登录后关闭浏览器，然后重试下载。"
+            )
     else:
         result = fail(
             identifier,
@@ -1139,6 +1197,13 @@ def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
     """Build actionable guidance when all download sources fail."""
     import os
     tips = []
+
+    if is_chinese_doi(doi):
+        tips.append("中文论文已尝试：NCPSSD（国家哲社文献中心）→ 期刊官网 → 万方 → 知网 → 维普")
+        tips.append("→ 校园网用户：连接学校网络/机构 VPN 后重试（万方/维普通常按 IP 授权）")
+        tips.append("→ CARSI 用户：scansci-pdf config_set carsi_enabled true 且设置 carsi_idp_name")
+        tips.append("→ 知网若只提供 CAJ：用 CAJViewer 打开，或用 caj2pdf 转换为 PDF")
+        tips.append("→ NCPSSD 手动检索: https://www.ncpssd.cn/ （按标题/作者检索）")
 
     # Check if browser strategy detected a paywall
     try:

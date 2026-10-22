@@ -3,32 +3,49 @@
   <h1>ScanSci PDF</h1>
 
   <a href="https://pypi.org/project/scansci-pdf/"><img alt="PyPI" src="https://img.shields.io/pypi/v/scansci-pdf?style=flat-square" /></a>
-  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-0F766E?style=flat-square" /></a>
-  <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-17%20tools-111827?style=flat-square" /></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-0F766E?style=flat-square" /></a>
+  <a href="https://modelcontextprotocol.io"><img alt="MCP" src="https://img.shields.io/badge/MCP-20%20tools-111827?style=flat-square" /></a>
 
   让 Agent 替你下载学术论文 —— 20+ 数据源并行竞速，100+ 高校机构通道，一句自然语言拿下整份文献清单。
 
-  [能力](#能力) · [快速开始](#快速开始) · [怎么用](#怎么用) · [机构通道](#机构通道) · [社区](#交流群--community) · [致谢](#致谢)
+  [这是什么](#这是什么) · [快速开始](#快速开始) · [怎么用](#怎么用) · [检索与发现](#检索与发现) · [机构通道](#机构通道) · [参考](#参考) · [故障排查](#故障排查) · [使用边界](#使用边界与合规) · [社区](#交流群--community)
 </div>
 
-## 能力
+## 这是什么
 
-给出 DOI、arXiv 号或一份文献清单，ScanSci PDF 会自动挑最快能下的那条路：OA 直链、预印本、出版商 API、你的学校通道都试一遍，付费墙自动路由，结果落地成规整命名的 PDF 文件。
+ScanSci PDF 是一个面向 AI Agent 的学术文献获取与发现工具。它同时提供 **MCP Server、CLI、Web UI 和 Agent Skill/插件** 四种入口：你给它 DOI、arXiv ID、文章 URL、文献清单或一句研究问题，它会自动选择最快能拿到全文的路径，并把结果整理成可归档的 PDF 和引用。
 
-- **单篇，一句话的事** — DOI / arXiv 进，`作者_年份_标题.pdf` 出；BibTeX / RIS / EndNote 引文顺手导出，可直推 Zotero。
-- **清单，整批拿下** — APA / BibTeX / DOI 列表直接喂，自动补全缺失 DOI；上千篇先分「OA / 灰色源 / 需机构」三桶再分批下载，不瞎跑不浪费。
-- **付费墙，走你的学校** — 100+ 高校 WebVPN、CARSI 联邦认证、EZProxy、Elsevier API 快速通道（1–2 秒/篇）；登录在你自己的浏览器完成，密码不经过工具。
-- **对抗与自愈全自动** — Cloudflare / CAPTCHA / SSO 分层处理；出版商封 IP 自动停损；机构会话过期自动重登，登录一次全程复用。
-- **Agent 原生** — 标准 MCP 服务器、17 个工具即装即用；Codex App、ZCode、Claude Code 都有现成的插件或配置。
+它解决的是“从‘我知道要哪篇/哪个主题’到‘文件已经在本地且命名规整’”这一段：免费副本、出版商 API、学校权限、中文数据库、灰色源（按配置）会并行尝试，失败时逐级溢流，而不是让你在十几个网站之间手动切换。
 
-### 近期更新
+### 适合谁
 
-- **统一任务管线** — 任意输入（xlsx/csv 表格、文献清单、检索结果、文章页 URL）自动归一成带渠道预测的下载队列；`batch --lanes` 四车道调度：Elsevier API / OA 快车道并行，灰色源竞速与机构级联接续，失败逐级溢流。
-- **SI 附件下载** — `get <DOI> --si` 把补充材料一并拉下来；被 Cloudflare 挡住的 Elsevier 自动切隐身浏览器通道。
-- **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
-- **OpenAIRE 仓储源接入** — 绿色 OA / 机构库副本进入免费竞速池，Unpaywall 漏掉的它来补（现已 20+ 数据源）。
-- **MCP 工具面瘦身** — 45 → 17 个工具，每次会话的 schema token 开销降约 60%，能力零损失。
-- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；cloakbrowser 强制 0.5.9+（Chromium 151 内核）；每周出版商金丝雀巡检。
+- 需要**单篇或批量下载**论文的研究者、学生、实验室和科研团队。
+- 已经在使用 Claude、Cursor、ZCode、Codex 等 Agent，希望把文献获取变成一句话的人。
+- 需要**机构权限、中文文献、综述证据检索、引文导出**的人。
+- 想把下载结果整理成 PDF + 引用 + 附件 + Markdown 的人。
+
+### 不适合谁
+
+- 只需要 PDF 阅读器或文献管理器（请用 Zotero、ReadPaper 等专门工具）。
+- 需要 OCR 扫描版 PDF 全文识别的人（本工具不内置 OCR）。
+- 没有合法访问权限、且不愿意自行确认授权与合规性的人。
+
+### 你需要准备
+
+- **Python 3.11+**（`pip install scansci-pdf` 或从源码安装）。
+- 一个 **DOI / arXiv ID / 文章 URL / 文献清单**（xlsx、csv、bib、APA、txt 均可）。
+- 付费墙论文需要你的**学校账号或机构网络**（WebVPN / CARSI / EZProxy / 出版商 SSO）。
+- 可选：Elsevier、Springer、Sciverse 的 API Key（更快/更强，不配也能用）。
+
+### 三步工作流
+
+```text
+给 DOI / arXiv / URL / 清单 / 研究问题
+              ↓
+自动选路：OA 副本 → 出版商 API → 机构通道 → 中文库（灰色源按配置）
+              ↓
+得到：规整命名的 PDF + 引用/附件/Markdown + 明确的失败原因
+```
 
 ## 快速开始
 
@@ -38,7 +55,13 @@
 帮我安装或更新这个插件：https://github.com/Rimagination/scansci-pdf
 ```
 
-Agent 会克隆（或原地更新）仓库、装好依赖并注册插件，然后你就能直接让它下论文了——例子见下一节[怎么用](#怎么用)。
+Agent 会克隆（或原地更新）仓库、装好依赖并注册插件，然后你就能直接让它下论文了——例子见下一节[怎么用](#怎么用)。装好后建议先跑一次：
+
+```bash
+scansci-pdf check
+```
+
+它会检查依赖、浏览器、Tor 和 API Key 配置，并提示还能补什么。
 
 <details>
 <summary><strong>手动安装 / pip / MCP 配置</strong>（不走对话流程时）</summary>
@@ -83,7 +106,7 @@ HTTP 模式（远程部署或不支持 stdio 的场景，默认只监听本机�
 scansci-pdf run --mode streamable_http --host 127.0.0.1 --port 8000
 ```
 
-Web UI：
+Web UI（不想用 Agent 或命令行时）：
 
 ```bash
 scansci-pdf web --port 8080   # 浏览器打开 http://localhost:8080
@@ -121,31 +144,104 @@ docker compose up -d
 scansci-pdf get 10.1038/nature12373            # 单篇下载
 scansci-pdf batch 文献清单.xlsx --lanes        # 批量下载（xlsx/csv/队列通用，四车道调度）
 scansci-pdf search "carbon cycle" --out q.txt  # 检索结果落成队列文件，直接接 batch
-scansci-pdf check                             # 依赖与环境体检
+scansci-pdf web                                # 浏览器 Web UI
+scansci-pdf check                              # 依赖与服务配置体检
 ```
 
-<!-- mcp-tools:start -->
-<details>
-<summary><strong>MCP 工具全表</strong>（17 个，按意图分组）</summary>
+### 三种入口
 
-| 想做什么 | 工具 |
-|---|---|
-| 下载单篇（可拉附件、转 Markdown） | `scansci_pdf_download` |
-| 批量下载（列表 / xlsx·csv·bib·APA 文件） | `scansci_pdf_batch_download` |
-| 检索、作者检索、系统性发现 | `scansci_pdf_search` · `scansci_pdf_find` · `scansci_pdf_expand_citations` |
-| 准备队列（校验 / OA 定位 / 构建） | `scansci_pdf_prepare_queue` |
-| 机构登录与状态（WebVPN / CARSI / EZProxy / 出版商 SSO） | `scansci_pdf_login` · `scansci_pdf_channel_status` · `scansci_pdf_schools` |
-| 引文 / 元数据 / Zotero | `scansci_pdf_citation` · `scansci_pdf_zotero_push` |
-| 配置 / 诊断 / Tor / 缓存 / Elsevier Key | `scansci_pdf_config` · `scansci_pdf_diagnostics` · `scansci_pdf_tor` · `scansci_pdf_cache_clear` · `scansci_pdf_elsevier_setup` |
+| 入口 | 适合 | 怎么开始 |
+|---|---|---|
+| **Agent / MCP** | 日常对话、让 Agent 自动选路和排障 | 安装插件或配置 MCP，直接说“帮我下这篇…” |
+| **CLI** | 脚本、批处理、CI、精细控制 | `pip install scansci-pdf`，用 `get` / `batch` / `search` |
+| **Web UI** | 不想用命令行、想手动点选文件 | `scansci-pdf web` |
 
-每个工具的参数与说明由 MCP `tools/list` 自带，Agent 会自动看到。
+### 你会得到什么
 
-</details>
-<!-- mcp-tools:end -->
+- 默认交付 **PDF**，自动按 `作者_年份_标题.pdf` 命名。
+- `--si`：补充材料/附件。
+- `--md`：PDF 转成 Agent 友好的 Markdown（PDF 仍是默认交付物）。
+- **BibTeX / RIS / EndNote** 引文，可推送 **Zotero**。
+- 批量结果写入 `download_results.json`；下载缓存用 `.doi_index.json` 记录来源与 TTL。
+- 下载失败时返回 `error_type`、`action`、`source_failures`（每个渠道为什么失败）和 `agent_hint`，不会静默换渠道。
+
+## 能力
+
+- **单篇，一句话的事** — DOI / arXiv 进，`作者_年份_标题.pdf` 出；BibTeX / RIS / EndNote 引文顺手导出，可直推 Zotero。
+- **清单，整批拿下** — APA / BibTeX / DOI 列表直接喂，自动补全缺失 DOI；上千篇先分「OA / 灰色源 / 需机构」三桶再分批下载，不瞎跑不浪费。
+- **检索与发现** — 关键词/作者检索（OpenAlex / Crossref / Semantic Scholar / NCPSSD），前向/后向引文追踪，系统性检索协议与队列准备。
+- **付费墙，走你的学校** — 100+ 高校 WebVPN、CARSI 联邦认证、EZProxy、Elsevier API 快速通道（1–2 秒/篇）；登录在你自己的浏览器完成，密码不经过工具。
+- **中文文献也能下** — NCPSSD 免费全文、中文期刊官网直链、知网/万方/维普校园网或 CARSI 机构订阅；支持 `10.3969` 中文 DOI、全角括号标题归一化与 CAJ 格式提示。
+- **语义检索与证据定位** — 配置 Sciverse 后，自然语言问题直接返回带页码/偏移量的正文证据片段，检索结果自动并入现有数据源；还支持元数据筛选、引文图谱和图表下载。不配置不影响下载。
+- **对抗与自愈全自动** — Cloudflare / CAPTCHA / SSO 分层处理；出版商封 IP 自动停损；机构会话过期自动重登，登录一次全程复用。
+- **Agent 原生** — 标准 MCP 服务器、20 个工具即装即用；Codex App、ZCode、Claude Code 都有现成的插件或配置。
+
+## 检索与发现
+
+内置检索会把 OpenAlex、Crossref、Semantic Scholar、NCPSSD（中文）的结果合并去重；如果安装了可选的 `scansci-find` CLI，还会接入它的 13 源发现引擎。配置 Sciverse 后，语义证据片段和结构化元数据也会自动并入。
+
+```bash
+# 关键词检索，结果落成下载队列
+scansci-pdf search "carbon cycle" --limit 10 --out q.txt
+
+# 作者检索
+scansci-pdf search --author "Fang Jingyun" --limit 10 --sort cited_by_count
+
+# 前向/后向引文追踪（MCP）
+# scansci_pdf_expand_citations(query="...", rounds=2)
+```
+
+MCP 侧对应：
+
+- `scansci_pdf_search` — 关键词/作者检索，可写队列文件。
+- `scansci_pdf_find` — ScanSci Find 系统综述协议：plan / estimate / smoke / calibrate。
+- `scansci_pdf_expand_citations` — Semantic Scholar / OpenCitations 引文追踪。
+- `scansci_pdf_prepare_queue` — 校验 DOI、解析 OA 位置、构建下载队列。
+- `scansci_pdf_parse_list` — 解析 APA / BibTeX / DOI 列表 / TSV / csv / xlsx。
+
+### Sciverse（可选，语义检索与元数据）
+
+[Sciverse](https://sciverse.space) 提供互补的两层能力：`agentic-search` 把自然语言研究问题转成**可引用的证据片段**（带 `doc_id` / `chunk_id` / `offset` / 页码），`meta-search` 按字段精确检索元数据（带 DOI、`unique_id`）。**不配置不影响现有检索与下载。**
+
+配置一次即可：
+
+1. 打开 [Sciverse 控制台](https://sciverse.space/tokens) 创建 API Token。
+2. 配置并当场验证：
+
+```bash
+scansci-pdf sciverse-setup --token YOUR_TOKEN --test
+```
+
+MCP 等价写法：`scansci_pdf_sciverse_setup(token="YOUR_TOKEN", test=true)`（未配置时会打开控制台并给出注册指引）。
+
+3. 之后 `scansci-pdf search` 自动并入 Sciverse；配额紧张时执行 `scansci-pdf config-cmd sciverse_meta_search_enabled false` 只保留语义路。
+
+| 能力 | MCP `scansci_pdf_sciverse` | CLI | 用途 |
+|---|---|---|---|
+| 语义证据 | `action="search"` | `sciverse-search` | 自然语言 → 正文证据片段，适合综述取证 |
+| 读全文 | `action="content"` | `sciverse-content` | 按 `doc_id` 读全文，`offset`/`limit` 分页 |
+| 元数据检索 | `action="meta_search"` | `sciverse-meta-search` | 按年份/期刊/作者/DOI/引用数筛选，返回 DOI/`unique_id` |
+| 引文图谱 | `action="relations"` | `sciverse-relations` | 按 `unique_id` 分页拉取被引/参考文献/相关工作 |
+| 字段目录 | `action="catalog"` | `sciverse-catalog` | 查看 meta-search 可用字段、算子与样例值 |
+| 图表附件 | `action="resource"` | `sciverse-resource` | 下载正文里的图/表/附件二进制 |
+
+- **自动合并**：`scansci-pdf search` 会把 agentic-search 的语义片段和 meta-search 的元数据一起并入 OpenAlex/Crossref/S2/NCPSSD 结果（按 DOI/标题去重）。语义命中带 `evidence`，meta 命中补 `doi`/`unique_id`。
+- **配额开关**：每次检索默认跑两路 Sciverse 请求（agentic + meta）。配额紧张时执行 `scansci-pdf config-cmd sciverse_meta_search_enabled false` 只保留语义路。
+- **高级过滤**：agentic 用 `filters_json`（对象，字段间 AND、同字段列表内 OR）；meta-search 用 `filters_json`（`{field, operator, value}` 数组，算子 `FILTER_OP_EQ/GTE/IN/MATCH_PHRASE/...`）+ `sort_json` + `fields`。
+- `paper-schema BETA` 是独立的 18 个子操作结构化阅读 API（Entity/Relation/Evidence/引用图谱），目前未接入。
+
+```bash
+scansci-pdf sciverse-search "graphene battery cycle stability" --top-k 10 --year-from 2020
+scansci-pdf sciverse-meta-search "graphene" --year-from 2020 --sort citation_count:desc --page-size 20
+scansci-pdf sciverse-relations paper:10.1038/s41586-021-03819-2 --relation CITATIONS
+scansci-pdf sciverse-content <doc_id> --offset 0 --limit 700
+scansci-pdf sciverse-resource "dt=xxx/p_yyy/f3.png" --output-dir ./figures
+scansci-pdf sciverse-catalog --samples
+```
 
 ## 机构通道
 
-付费墙论文优先走这四条机构通道。登录都在你自己的浏览器里完成，密码不经过本工具。
+付费墙论文优先走以下机构通道。登录都在你自己的浏览器里完成，密码不经过本工具。
 
 ### Elsevier API（推荐，无需浏览器）
 
@@ -153,6 +249,13 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 
 1. 访问 [Elsevier Developer Portal](https://dev.elsevier.com/) 创建应用，勾选 **ScienceDirect Article Retrieval**
 2. 配置 Key：`scansci_pdf_elsevier_setup`（MCP 会打开浏览器引导）或 `scansci_pdf_config(key="elsevier_api_key", value="...")`
+
+CLI 等价：
+
+```bash
+scansci-pdf elsevier-setup --api-key YOUR_KEY
+scansci-pdf elsevier-check --doi 10.1016/j.example
+```
 
 ### WebVPN（高校代理）
 
@@ -173,9 +276,32 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 3. scansci_pdf_login(kind="carsi", publisher="sciencedirect")
 ```
 
-支持 sciencedirect、springer、wiley、ieee、tandfonline、nature 等。SAGE 中国站首次使用
+支持 sciencedirect、springer、wiley、ieee、tandfonline、nature 等，以及中文库 CNKI、万方、维普。SAGE 中国站首次使用
 `scansci_pdf_login(kind="carsi", publisher="sage-cn")` 登录；之后下载会复用已保存会话，
 从文章页解析实际 `articleId` 并请求站点自身的 PDF 下载接口，无需反复开启浏览器。
+
+### 中文文献（NCPSSD / 知网 / 万方 / 维普）
+
+中文 DOI（`10.3969/...`、`10.16235/j.cnki...` 等）不走 Crossref，ScanSci PDF 会自动切换到中文通道，按顺序尝试：
+
+1. **NCPSSD 国家哲学社会科学文献中心** — 人文社科合法免费全文，命中后直接下载，无需登录。
+2. **中文期刊官网直链** — DOI 落到刊社网站（Magtech / `downloadArticleFile.do?attachType=PDF` 等）时，抓取官网免费 PDF。
+3. **万方 / 知网 / 维普** — 校园网出口按 IP 授权；校外则用 CARSI 机构订阅。
+
+```text
+# 校园网用户：连上学校网络/VPN 即可，万方、维普通常自动按 IP 授权
+scansci_pdf_download(identifier="10.3969/j.issn.1674-4993.2024.02.008")
+
+# 校外 CARSI：先配置机构，再登录对应中文库（首次会打开浏览器选学校）
+scansci_pdf_config(key="carsi_enabled", value="true")
+scansci_pdf_config(key="carsi_idp_name", value="你的学校名称")
+scansci_pdf_login(kind="carsi", publisher="cnki")     # 或 wanfang / cqvip
+```
+
+- **中文 DOI 归一化**：全角数字/斜杠、`doi：` 前缀、结尾中文标点（`。，；`）都会自动清洗；`10.3969` 识别为 China DOI/万方族，`/j.cnki` 识别为知网族。
+- **CNKI / 万方双 ID 映射**：知网 DOI 经 `chndoi.org` 解析后可直接拿到 `filename` / `dbcode` / `tablename`；万方详情接口会返回内部 `file_id` 与 NCPSSD 记录号，便于跨库定位。
+- **CAJ 格式**：知网部分论文只提供 `.caj`。下载器会保留 `.caj` 扩展名（不会伪装成 `.pdf`），并返回 CAJViewer / `caj2pdf` 转换提示；详情页有「PDF下载」时优先取 PDF。
+- **关闭开关**：`ncpssd_enabled`、`cn_journal_direct`、`cn_databases_enabled`（默认均开启）。
 
 ### EZProxy（图书馆代理）
 
@@ -196,7 +322,7 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 误判为登录成功；会话校验也只探测代理自身的 `/login` 端点，对两类部署都有效。
 
 <details>
-<summary><strong>支持的出版商路由表</strong>（19 家，自动生成）</summary>
+<summary><strong>支持的出版商路由表</strong>（19 条路由，18 家出版商 + Generic，自动生成）</summary>
 
 <!-- publisher-table:start -->
 | 策略 | DOI 前缀 | 域名 |
@@ -224,7 +350,45 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 
 </details>
 
-## 配置与策略
+## 参考
+
+<details>
+<summary><strong>MCP 工具全表</strong>（20 个，按意图分组）</summary>
+
+| 想做什么 | 工具 |
+|---|---|
+| 下载单篇（可拉附件、转 Markdown） | `scansci_pdf_download` |
+| 批量下载（列表 / xlsx·csv·bib·APA 文件） | `scansci_pdf_batch_download` |
+| 清理下载缓存 | `scansci_pdf_cache_clear` |
+| 检索、作者检索、系统性发现 | `scansci_pdf_search` · `scansci_pdf_find` · `scansci_pdf_expand_citations` |
+| 队列准备与列表解析 | `scansci_pdf_prepare_queue` · `scansci_pdf_parse_list` |
+| 语义证据 / 元数据 / 引文图谱 / 图表（Sciverse） | `scansci_pdf_sciverse` · `scansci_pdf_sciverse_setup` |
+| 机构登录与状态（WebVPN / CARSI / EZProxy / 出版商 SSO） | `scansci_pdf_login` · `scansci_pdf_channel_status` · `scansci_pdf_schools` |
+| API Key 配置（Elsevier / Springer） | `scansci_pdf_elsevier_setup` · `scansci_pdf_springer_setup` |
+| 引文 / 元数据 / Zotero | `scansci_pdf_citation` · `scansci_pdf_zotero_push` |
+| 配置 / 诊断 / Tor | `scansci_pdf_config` · `scansci_pdf_diagnostics` · `scansci_pdf_tor` |
+
+每个工具的参数与说明由 MCP `tools/list` 自带，Agent 会自动看到。
+
+</details>
+
+<details>
+<summary><strong>常用 CLI 命令</strong></summary>
+
+| 想做什么 | 命令 |
+|---|---|
+| 单篇下载 | `scansci-pdf get <DOI/arXiv/URL>` |
+| 批量下载 | `scansci-pdf batch <清单文件> --lanes` |
+| 检索并生成队列 | `scansci-pdf search "关键词" --out q.txt` |
+| 机构登录 | `scansci-pdf setup <学校>` / `scansci-pdf login` |
+| Elsevier Key | `scansci-pdf elsevier-setup --api-key <KEY>` |
+| Sciverse | `scansci-pdf sciverse-setup --token <TOKEN> --test` |
+| Web UI | `scansci-pdf web` |
+| 体检 | `scansci-pdf check` |
+
+完整命令列表：`scansci-pdf --help`。
+
+</details>
 
 <details>
 <summary><strong>配置参考</strong>（完整表）</summary>
@@ -246,10 +410,20 @@ ScienceDirect / Cell Press 等 Elsevier 论文走 API 直接下载，速度从 1
 | `vpnsci_school` / `instsci_school` | 空 | WebVPN 学校名称 |
 | `carsi_enabled` | `false` | 启用 CARSI |
 | `carsi_idp_name` | 空 | CARSI 机构名称 |
+| `ncpssd_enabled` | `true` | 国家哲学社会科学文献中心免费全文源 |
+| `cn_journal_direct` | `true` | 中文期刊官网直链 PDF |
+| `cn_databases_enabled` | `true` | 知网/万方/维普（校园网 IP 或 CARSI） |
 | `auto_relogin` | `true` | 机构会话自愈：下载前自动校验 WebVPN 会话，明确过期才弹浏览器重登 |
 | `cache_ttl_hours` | `168` | 下载缓存 TTL（小时），设 0 禁用 |
 | `elsevier_api_key` | 空 | Elsevier / ScienceDirect API Key |
 | `elsevier_insttoken` | 空 | Elsevier institutional token，仅拿不到校园出口时需要（找机构管理员申请） |
+| `springer_api_key` | 空 | Springer TDM API Key（机构订阅 + ORCID 关联；JATS XML 全文） |
+| `sciverse_api_key` | 空 | Sciverse API Token（https://sciverse.space/tokens）；配置后检索自动并入语义证据与元数据 |
+| `sciverse_enabled` | `true` | Sciverse 源开关（未配置 Key 时自动跳过） |
+| `sciverse_meta_search_enabled` | `true` | 每次 search 额外跑一路 meta-search（补 DOI/`unique_id`）；配额紧张时设 false |
+| `sciverse_base_url` | `https://api.sciverse.space` | API 地址（测试/代理时可覆盖） |
+| `sciverse_sub_queries` | `0` | 查询改写数 0–4；调高召回更好但延迟更高 |
+| `sciverse_timeout_seconds` | `45` | 单次请求读超时（秒） |
 | `use_tor_for_scihub` | `false` | Sci-Hub 走 Tor |
 | `flaresolverr_url` | `http://localhost:8191/v1` | FlareSolverr 服务地址 |
 | `browser_headless` | `false` | 浏览器是否无头运行 |
@@ -301,11 +475,46 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 
 </details>
 
+<details>
+<summary><strong>工作原理：分层竞速（Tier 0–5）</strong></summary>
+
+下载一篇论文时，ScanSci PDF 同时启动多个数据源，按优先级分层竞速，第一个成功立即返回：
+
+```
+Tier 0 (中文) ─ NCPSSD → 期刊官网 → 万方/知网/维普（校园网或 CARSI）
+Tier 1 (4s)  ─ 出版商直链（OA/机构访问）
+Tier 2 (5s)  ─ OpenAlex / Unpaywall / DOAJ
+Tier 3 (8s)  ─ EuropePMC / CORE / PMC / arXiv
+Tier 4 (25s) ─ LibGen / Sci-Hub（带 FlareSolverr 绕过）
+Tier 5 (20s) ─ WebVPN / CARSI 机构代理
+```
+
+架构说明：本项目自有源码（`.py`、`_core/*.pyx`、配置、文档）均以 MIT 授权，Cython 源码随仓库公开；从源码构建时如安装 Cython 可生成平台特定的编译扩展（`.pyd`/`.so`），默认构建或未安装 Cython 时使用纯 Python 回退实现（功能相同，性能略低）。仓库与 sdist 始终包含 `.pyx` 源码。第三方依赖、数据与素材保留其各自许可证。
+
+</details>
+
+<details>
+<summary><strong>近期更新</strong></summary>
+
+- **Sciverse 检索接入** — 语义证据片段、结构化元数据、引文图谱、图表下载四层能力；`scansci-pdf sciverse-setup` 一键配置并验证，未配置时搜索与体检会主动提示。
+- **统一任务管线** — 任意输入（xlsx/csv 表格、文献清单、检索结果、文章页 URL）自动归一成带渠道预测的下载队列；`batch --lanes` 四车道调度：Elsevier API / OA 快车道并行，灰色源竞速与机构级联接续，失败逐级溢流。
+- **SI 附件下载** — `get <DOI> --si` 把补充材料一并拉下来；被 Cloudflare 挡住的 Elsevier 自动切隐身浏览器通道。
+- **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
+- **OpenAIRE 仓储源接入** — 绿色 OA / 机构库副本进入免费竞速池，Unpaywall 漏掉的它来补（现已 20+ 数据源）。
+- **MCP 工具面瘦身** — 45 → 20 个工具，每次会话的 schema token 开销降约 60%，能力零损失。
+- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；cloakbrowser 强制 0.5.9+（Chromium 151 内核）；每周出版商金丝雀巡检。
+
+</details>
+
 ## 故障排查
 
 | 现象 | 先做 |
 |---|---|
 | 下载失败 | `scansci-pdf check`，会话问题再跑 `scansci-pdf session-doctor` |
+| Sciverse 提示 401 / Token 无效 | 重新创建 Token 后运行 `scansci-pdf sciverse-setup --token <token> --test`；MCP 用 `scansci_pdf_sciverse_setup(token="...", test=true)` |
+| Sciverse 提示 403 / 权限不足 | Token 有效但账号缺少字段权限；换 Token 或联系 Sciverse 开通；可用 `scansci-pdf sciverse-search` 单独验证语义检索权限 |
+| Sciverse 提示 429 / 配额不足 | 等配额窗口重置；或 `scansci-pdf config-cmd sciverse_meta_search_enabled false` 关闭每次 search 的第二路请求 |
+| 检索结果没有 Sciverse 语义片段 | 未配置 Key 时属正常：`scansci-pdf check` 会提示，运行 `scansci-pdf sciverse-setup` 即可启用（不影响下载） |
 | Agent 说 Elsevier 需要 insttoken | 不需要：API key + 校园网出口即可（insttoken 仅拿不到校园出口时申请）；NOT_ENTITLED=未连校园网或学校未订阅，连网重试或转其他渠道 |
 | Elsevier 403 Requestor configuration settings insufficient | key 有效但 key+出口未配置全文：`scansci-pdf elsevier-check --doi <DOI>`——未走校园出口则配 `network_proxy`/`SCANSCI_PDF_PROXY`；已走校园出口则是机构未给 key 开 API 全文权限（找机构 Elsevier 管理员，insttoken 为替代路径） |
 | 新申请的 Elsevier key 一直 403 | 注册环节问题：机构邮箱注册 Elsevier 账号 + 校园网/学校 VPN 下创建 key（门户靠邮箱域 + 出口 IP 识别机构）；创建后当场 `scansci-pdf elsevier-check` 验证 |
@@ -334,22 +543,15 @@ scansci-pdf config-cmd proxy_pool "socks5://1.1.1.1:1080,http://2.2.2.2:8080"
 
 </details>
 
-<details>
-<summary><strong>工作原理：五层竞速</strong></summary>
+## 使用边界与合规
 
-下载一篇论文时，ScanSci PDF 同时启动多个数据源，按优先级分层竞速，第一个成功立即返回：
-
-```
-Tier 1 (4s)  ─ 出版商直链（OA/机构访问）
-Tier 2 (5s)  ─ OpenAlex / Unpaywall / DOAJ
-Tier 3 (8s)  ─ EuropePMC / CORE / PMC / arXiv
-Tier 4 (25s) ─ LibGen / Sci-Hub（带 FlareSolverr 绕过）
-Tier 5 (20s) ─ WebVPN / CARSI 机构代理
-```
-
-架构说明：公开层（`.py` 源码、配置、文档）Apache 2.0；`_core/*.pyx`（Cython 源码）为专有层不公开；PyPI 安装自带编译二进制（`.pyd`），GitHub 克隆使用纯 Python 回退实现（功能相同，性能略低）。
-
-</details>
+- 本工具只在你**有权访问**的前提下工作：机构订阅论文需要你自己的学校账号或机构网络；登录在你自己的浏览器完成，密码不经过工具。
+- 没有机构订阅或合法开放副本时，付费墙全文无法凭空获得。
+- Sci-Hub / LibGen 等灰色源默认按配置启用；如果你只想使用合法来源，设置 `download_strategy=legal_only` 或 `scihub_enabled=false`。使用者需自行确认当地法律与机构政策。
+- Sciverse 只提供证据片段、元数据和引文关系，不提供 PDF；`paper-schema BETA` 尚未接入。
+- 扫描版 PDF 可能没有文本层，Markdown 导出和语义检索效果会受影响。
+- Elsevier、Springer、Sciverse 的 API Key 各有使用条款和配额，请遵守对应服务的规定。
+- 第三方依赖、数据与素材保留其各自许可证，详见「致谢」与各上游项目。
 
 ## 交流群 / Community
 
@@ -407,9 +609,9 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)
+[MIT License](LICENSE)
 
-例外：`src/scansci_pdf/_core/` 中的 Cython 编译扩展（`.pyd`/`.so`）为预编译二进制，仅通过 PyPI 分发。其 Cython 源码（`.pyx`）为专有代码，不包含在本仓库中。
+本项目自有源码（包括 `src/scansci_pdf/_core/*.pyx`）均以 MIT 授权。`_core` 中的 `.pyd`/`.so` 只是由这些源码生成的构建产物；无论通过 PyPI 还是 GitHub 获取，都可以获得对应源码。第三方依赖、数据与素材保留其各自许可证，详见「致谢」与各上游项目。
 
 ## Star History
 

@@ -55,7 +55,7 @@ RETIRED_TOOLS = (
     "scansci_pdf_ezproxy_status",
 )
 
-EXPECTED_TOOL_COUNT = 18
+EXPECTED_TOOL_COUNT = 20
 
 
 def _read_version_sources() -> list[tuple[str, str]]:
