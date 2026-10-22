@@ -1,4 +1,8 @@
-"""MCP server exposing scansci-pdf tools for Claude Code."""
+"""Legacy MCP surface (4-tool PaperFetcher server).
+
+Canonical MCP surface: :mod:`scansci_pdf.server`, launched by
+``scansci-pdf run``. This module is kept for old Claude Code configs.
+"""
 
 import logging
 import sys
@@ -60,6 +64,9 @@ async def fetch_paper(identifier: str, format: str = "markdown") -> str:
 @mcp.tool()
 async def search_papers(query: str, limit: int = 10, year_range: str = "") -> str:
     """Search for academic papers via OpenAlex, Semantic Scholar, and Crossref.
+
+    Chinese queries also search NCPSSD (国家哲学社会科学文献中心), which covers
+    humanities/social-science journals absent from the Western indexes.
 
     Returns a list of papers with titles, authors, DOIs, and citation counts.
     Use the DOIs from results with fetch_paper to get full text.

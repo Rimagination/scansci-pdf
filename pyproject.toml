@@ -1,9 +1,10 @@
 [project]
 name = "scansci-pdf"
-version = "1.18.2"
+version = "1.19.0"
 description = "MCP server for academic paper downloading with Sci-Hub, OA sources, multi-university WebVPN, and Tor support"
 readme = "README.md"
-license = {text = "Apache-2.0"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
@@ -41,14 +42,14 @@ compile = ["cython>=3.0"]
 scansci-pdf = "scansci_pdf.main:main"
 
 [build-system]
-requires = ["setuptools>=68.0", "pycryptodome>=3.20"]
+requires = ["setuptools>=77.0", "pycryptodome>=3.20"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-scansci_pdf = ["data/*.json", "data/*.dat", "_core/*.pyd", "_core/*.so", "templates/*.html"]
+scansci_pdf = ["data/*.json", "_core/*.pyx", "templates/*.html"]
 
 [tool.pytest.ini_options]
 # Manual network/browser scripts in the repo root (e.g. test_download_pnas.py)

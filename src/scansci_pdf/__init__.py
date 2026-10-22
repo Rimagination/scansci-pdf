@@ -65,7 +65,7 @@ def _apply_ide_proxy_workarounds() -> None:
 
 _apply_ide_proxy_workarounds()
 
-__version__ = "1.18.2"
+__version__ = "1.19.0"
 
 __all__ = [
     "__version__",

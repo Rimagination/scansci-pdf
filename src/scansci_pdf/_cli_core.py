@@ -1,4 +1,8 @@
-"""CLI interface for InstSci."""
+"""Legacy InstSci-era CLI.
+
+Canonical CLI: :mod:`scansci_pdf.main` (entry point ``scansci-pdf``). This
+module remains for ``scansci_pdf.cli`` compatibility.
+"""
 
 import json
 import logging

@@ -12,9 +12,24 @@ OLD_ARXIV_RE = re.compile(r"^(?:arxiv:)?(?P<id>[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v
 
 def normalize_doi(value: str) -> str:
     value = value.strip()
+    # Chinese users paste DOIs from Word/PDF with full-width digits, slashes,
+    # and trailing Chinese punctuation (１０．３９６９／…。).  NFKC + the
+    # explicit cleanup below makes those usable without special-casing every
+    # caller.
+    from .chinese import to_halfwidth
+
+    value = to_halfwidth(value)
     value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value, flags=re.I)
-    value = re.sub(r"^doi:\s*", "", value, flags=re.I)
+    value = re.sub(r"^doi\s*[:：]\s*", "", value, flags=re.I)
+    value = re.sub(r"[。，；：、]+$", "", value).strip()
     return urllib.parse.unquote(value).strip()
+
+
+def is_chinese_doi(value: str) -> bool:
+    """Whether a DOI belongs to a Chinese registration agency/pattern."""
+    from .chinese import is_chinese_doi as _is_chinese_doi
+
+    return _is_chinese_doi(value)
 
 
 def normalize_arxiv_id(value: str) -> str | None:
@@ -61,7 +76,16 @@ def normalize_doi_unicode(value: str) -> str | None:
 
 
 def validate_doi(doi: str) -> tuple[bool, str]:
-    """Check if a DOI resolves via doi.org. Returns (valid, resolved_url or error)."""
+    """Check if a DOI resolves via doi.org. Returns (valid, resolved_url or error).
+
+    Chinese-registered DOIs (10.3969 / CNKI) are accepted without a doi.org
+    HEAD check: multi-resolution handles frequently answer 404/600 to HEAD
+    even though the DOI is valid, and the CN source lanes validate access
+    themselves.
+    """
+    if is_chinese_doi(doi):
+        return True, "Chinese DOI (validated by CN sources)"
+
     import requests
 
     from .network import thread_session

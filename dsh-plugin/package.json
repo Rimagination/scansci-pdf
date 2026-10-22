@@ -1,9 +1,9 @@
 {
   "name": "scansci-pdf",
-  "version": "1.18.2",
+  "version": "1.19.0",
   "description": "DeepSeek Harness bundle for ScanSci PDF: connects the scansci-pdf MCP server and registers its academic-literature skills.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "author": {
     "name": "Rimagination",
     "url": "https://github.com/Rimagination"

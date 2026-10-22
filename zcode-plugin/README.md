@@ -11,7 +11,7 @@ ScanSci 学术文献全家桶 plugin:大清单嗅探分类 + 全场景下载检�
 | Skill | 场景 |
 |---|---|
 | `scansci-sort` | 大清单(数百篇+)分类摸底:OA / Sci-Hub / 需机构,嗅探优先不下载,产出分桶队列 |
-| `scansci-pdf` | 其余一切:单篇/批量下载、检索引文、机构渠道(Elsevier API/WebVPN/CARSI)、排障(本插件已内置;用户目录若有同名 skill 则优先) |
+| `scansci-pdf` | 其余一切:单篇/批量下载、检索引文、Sciverse 语义检索/元数据、机构渠道(Elsevier API/WebVPN/CARSI)、排障(本插件已内置;用户目录若有同名 skill 则优先) |
 
 **Commands(4 个,快捷入口,不占上下文):**
 

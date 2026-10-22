@@ -23,11 +23,11 @@ description: >
 镜像健康存储曾被重复造过三代）。
 ## 概述
 
-scansci-pdf 是一个 MCP 服务器，提供 **18 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 灰色源 / 机构渠道）、发现与队列准备、引文导出和诊断排障。下载引擎支持 13+ 数据源并行竞速、100+ 中国高校 WebVPN。
+scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 灰色源 / 机构渠道）、Sciverse 语义检索、发现与队列准备、引文导出和诊断排障。下载引擎支持 20+ 数据源并行竞速、100+ 中国高校 WebVPN。
 
 > 工具名可能带宿主的 MCP 命名空间前缀（`mcp__<server>__<tool>`）；以当前工具列表中实际注册的名称为准。
 
-## MCP 工具参考（18 个）
+## MCP 工具参考（20 个）
 
 ### 下载
 
@@ -58,12 +58,15 @@ scansci-pdf 是一个 MCP 服务器，提供 **18 个高层工具**，覆盖学�
 | `scansci_pdf_find` | ScanSci Find 引擎：`action=plan\|estimate\|smoke\|calibrate` 系统综述搜索协议 | `action`、`query`、`domain`、`depth`、`sample_size` |
 | `scansci_pdf_expand_citations` | 引文追踪（Semantic Scholar/OpenCitations） | `query`、`rounds`（≤5）、`citation_source` |
 | `scansci_pdf_prepare_queue` | 准备下载队列：`action=verify\|resolve_oa\|build\|full` | `candidates_json`、`query`、`limit` |
-| `scansci_pdf_search` | 关键词/作者搜索（OpenAlex） | `query`/`author`/`author_id`、`limit`、`year_from`、`year_to`、`sort` |
+| `scansci_pdf_search` | 关键词/作者搜索（OpenAlex；中文并入 NCPSSD；配置 Key 后并入 Sciverse） | `query`/`author`/`author_id`、`limit`、`year_from`、`year_to`、`sort` |
+| `scansci_pdf_sciverse` | Sciverse 全能力分发：`search`（agentic 片段）/ `content`（读全文）/ `meta_search`（元数据）/ `relations`（引文图谱）/ `catalog`（字段目录）/ `resource`（图表附件） | `query`、`doc_id`、`unique_id`、`relation`、`top_k`、`page`/`page_size`、`offset`/`limit`、`file_name`、`filters_json`、`sort_json`、`fields`、`enrich_dois`、年份/语言/期刊/主题/作者/DOI/引用数字段 |
 | `scansci_pdf_parse_list` | 解析论文列表文件（APA/BibTeX/DOI 列表/表格） | `file_path`（必需） |
 | `scansci_pdf_citation` | 导出引文 | `identifier`（必需）、`format`（bibtex/ris/endnote/metadata） |
 | `scansci_pdf_zotero_push` | 推送已下载论文到 Zotero | `identifier`（必需，需先下载） |
 
 **重要**：`verify`/`resolve_oa` 是轻量操作，预算 45 秒内返回；超时会返回结构化错误（`stage`/`timeout_seconds`/`retryable`），不会无反馈地等 180 秒。`resolve_oa` 依赖 Unpaywall 邮箱配置（`scansci_pdf_config(key='email', ...)`），缺失时直接返回 `blocked_configuration` 而不是逐条失败。
+
+**Sciverse 能力**：配置 `sciverse_api_key`（https://sciverse.space/tokens）后，`scansci_pdf_search` 会自动并入 agentic-search 证据片段和 meta-search 元数据（记录带 `doc_id`/`unique_id`/`evidence`/页码）；需要原始 chunk、精确元数据、引文图谱或图表时用 `scansci_pdf_sciverse`。**分场景**：统一 `search` 默认补 DOI（多 1 次 doc_id 定向 meta-search）；单独 `action="search"` 默认不补，需要下载时传 `enrich_dois=true`。`action="relations"` 的 `REFERENCES` 可能只返回 OpenAlex ID、标题为空；实测这些 ID 在 OpenAlex 不可解析，保留 ID 由调用方处理。`meta-search` 的 `total_count` 到 10000 是上限，返回 `total_count_capped=true`。agentic 的 `filters_json` 是对象（字段间 AND、同字段列表内 OR，`doc_ids` 硬范围 ≤1000）；meta-search 的 `filters_json` 是 `{field, operator, value}` 数组，算子用 `FILTER_OP_*`。`sciverse_meta_search_enabled=false` 可省掉每次 search 的第二路 Sciverse 配额（同时关闭统一 search 的 DOI 补全）。
 
 ### 配置、通道与诊断
 
@@ -82,6 +85,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **18 个高层工具**，覆盖学�
 | `scansci_pdf_login` | 统一登录：`kind=publisher\|webvpn\|carsi\|ezproxy\|custom\|cookie_import` | `kind`（默认 publisher）、`identifier`、`publisher`、`custom_url`、`cookie_file` |
 | `scansci_pdf_elsevier_setup` | Elsevier API Key 配置向导（免费，无需机构邮箱） | `test`（验证 key） |
 | `scansci_pdf_springer_setup` | Springer TDM 全文 API Key 配置与权益探测 | `test`（验证 key / 机构订阅） |
+| `scansci_pdf_sciverse_setup` | Sciverse API Token 配置向导（打开控制台、保存并验证；启用语义证据/元数据/引文图谱/图表） | `token`、`test` |
 
 ## 工作流编排
 
@@ -161,12 +165,36 @@ scansci-pdf 是一个 MCP 服务器，提供 **18 个高层工具**，覆盖学�
 
 **NOT_ENTITLED 含义**：未连校园网或学校未订阅该刊，不是缺 insttoken。
 
-### 流程 6：内嵌 Tor（灰色源被墙时）
+### 流程 6：Sciverse 语义检索与元数据（可选，推荐）
+
+```
+1. scansci_pdf_sciverse_setup → 打开 https://sciverse.space/tokens，创建 API Token
+2. scansci_pdf_sciverse_setup(token="...", test=true) → 保存并验证
+3. scansci_pdf_search(...) → 自动并入语义证据片段 + meta-search 元数据
+4. 需要原始片段/元数据/引文图谱/图表：scansci_pdf_sciverse(action="search|meta_search|relations|resource", ...)
+```
+
+**要点**：不配置不影响现有检索与下载；检索时若未配置，结果会带 `config_hint` 提示。每次 search 默认跑 agentic + meta 两路，配额紧张时 `scansci_pdf_config(key="sciverse_meta_search_enabled", value="false")`。
+
+### 流程 7：内嵌 Tor（灰色源被墙时）
 
 ```
 1. scansci_pdf_tor(action="install")   # 首次下载 Tor Expert Bundle
 2. scansci_pdf_tor(action="start")     # 受限网络可 use_bridges=true
 3. scansci_pdf_download(identifier="...", strategy="scihub_only")
+```
+
+### 流程 7：某学者的 TOP-N 被引论文
+
+```
+1. 解析作者 ID（不要用 author=姓名 直接搜，见「已知坑位」）
+   GET https://api.openalex.org/authors?search=<姓名>
+   → 取被引最高、同被引再看 works_count 最大的那条，核对 last_known_institutions 是否含目标单位
+2. 取代表作（务必加 type:article，否则数据集/paratext 会混进榜）
+   GET https://api.openalex.org/works?filter=author.id:<ID>,type:article
+       &sort=cited_by_count:desc&per_page=25
+3. scansci_pdf_batch_download(identifiers=[DOI...], output_dir=<宿主已授权的目录>)
+4. 校验 + 去重（下载器会为每篇留下多份源标记副本，见「已知坑位」）
 ```
 
 ## 能力边界
@@ -181,6 +209,16 @@ scansci-pdf 是一个 MCP 服务器，提供 **18 个高层工具**，覆盖学�
 | 批量 100+ 篇 | `batch_download`，并发数由 `batch_workers` 配置控制 |
 | 需要机构权限的论文 | `login` 登录后重试下载 |
 | 下载失败 | 结果含 `error_type`；`paywall`→登录流程，`rate_limited`→稍后重试，`cloudflare_blocked`→启动 CloakBrowser/配置代理 |
+
+## 已知坑位（2026-10-22 实测，agent 必读）
+
+- **`search` 的 `author=` 曾经会命中同名假档案（2026-10-22 已修）**。传 `author="Shilong Piao"` 时旧版只返回 1 条 figshare 数据集，命中 `A5072538516`（1 篇 / 0 被引）：权威档案 `A5000033522`（999 篇 / 125 224 被引）因为带中间名缩写 `L.` 不算"精确匹配"而被排除，`max()` 于是在假档案里选。现已改为名字 token 兼容（容忍中间名缩写、紧凑缩写 `L.Piao`、姓在前；Jr/Sr/III/IV 不同会被拒绝）后取最大，并在 `_author_match` 里返回 `exact`、`fallback` 与 `alternatives`。**旧版仍会选错**，此时先解析 `author_id` 再用 `author_id=` 调；看到 `exact=false`、`fallback=true` 或 `alternatives` 非空时，核对一下选中的是不是目标学者。
+- **`batch_download` 的 `failed` 计数曾经会骗人（2026-10-22 已修）**。车道模式下重试成功的 DOI 会留两行（先 failed 后 success），旧版按行计数，于是 `total` 大于去重条数（实测 24 > 20）、`failed: 4` 与 `succeeded: 20` 同时出现。现已由 `server._merge_lane_results` 按论文合并（成功覆盖失败，新增 `retried` 计数）。**旧版或其它宿主的返回仍可能这样**，此时以 `failed_dois` 和每条的 `success` 为准。
+- **每篇会落 2–4 个源标记副本**。除自动改名的 `Piao2009_Carbon.pdf` 外，还可能留 `10.xxxx_Sci-Hub.pdf`、`_CrossrefPage.pdf`、`_NatureDirect.pdf`、`_PublisherDirect.pdf`、`_OpenAIRE.pdf`；其中一份与最终改名文件逐字节相同（实测 20 篇留下 34 个多余副本）。**交付前必须去重**，否则文件夹里全是同一篇的多份副本。
+- **`output_dir` 不要指向宿主运行时新建的子目录**。在 DSH 这类沙箱宿主里，由非沙箱进程（MCP server 自己）创建的子目录拿不到沙箱写权限：`write` 工具能写，但 `pwsh` 之后在同一目录里新建或删除任何文件都报 Access denied，把"删几个副本"拖成一轮权限排查。**先让宿主在自己的目录里建好目标文件夹，再下到那里**。
+- **校验用轻量手段**：大小 ≥ `min_pdf_size_bytes`（默认 10 000）+ 头 5 字节 `%PDF-` 即可判定；要页数就用 `pymupdf` 一次跑完。实测 `_check.py` 第一版把 `doc.close()` 写在 `doc.page_count` 之前，20 篇全报 "document closed"，白跑一轮。
+- **非正式版本要点出来**：机构库存档稿（"Accepted Article"、"archived peer-reviewed author-version"）与 early-online-release 都是合法 PDF，但页数和排版与正式版差别很大（实测 71 页 vs 正式版约 20 页），交付时要说明版本性质。
+- **合作者不等于通讯作者**：OpenAlex 按署名计入，大团队论文（Crowther / Luyssaert / Janssens 领衔）会出现在"某人的高被引"列表里；报告时要区分本人主导与合作署名。
 
 ## 常见边界情况
 

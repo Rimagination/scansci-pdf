@@ -601,6 +601,72 @@ def _verify_batch_results(results: dict, output_dir: str) -> None:
                         results["failed"] = results.get("failed", 0) + 1
 
 
+@app.command("sciverse-setup")
+def sciverse_setup(
+    token: str = typer.Option("", "--token", help="Sciverse API token (https://sciverse.space/tokens)"),
+    test: bool = typer.Option(True, "--test/--no-test", help="Validate the token after saving"),
+    open_console: bool = typer.Option(True, "--open/--no-open", help="Open the token console when unconfigured"),
+) -> None:
+    """Configure Sciverse API access (semantic evidence + metadata search + relations)."""
+    import webbrowser
+
+    from .config import load_config, update_config
+    from .sources.sciverse import TOKEN_URL, is_configured, key_preview, validate_key
+
+    config = load_config()
+    supplied = str(token or "").strip()
+
+    if supplied:
+        update_config("sciverse_api_key", supplied)
+        config = load_config()
+        print(f"  Sciverse API token: saved ({key_preview(supplied)})")
+    elif is_configured(config):
+        print(f"  Sciverse API token: set ({key_preview(config.get('sciverse_api_key'))})")
+    else:
+        print("  Sciverse API token: (not set)")
+        if open_console:
+            try:
+                webbrowser.open(TOKEN_URL)
+                print(f"  已打开控制台: {TOKEN_URL}")
+            except Exception:
+                pass
+        print("\n  配置步骤:")
+        print(f"  1. 打开 {TOKEN_URL} 并登录/注册 Sciverse")
+        print("  2. 在「密钥」页面创建 API Token")
+        print("  3. 运行: scansci-pdf sciverse-setup --token <token> --test")
+        print("\n  能力: 语义证据片段 / 元数据检索 / 引文图谱 / 图表下载（可选，不影响现有下载）")
+        print("  配额紧张时可关闭 meta 路: scansci-pdf config-cmd sciverse_meta_search_enabled false")
+        return
+
+    if not config.get("sciverse_enabled", True):
+        print("  ⚠️ sciverse_enabled=false，当前不会调用 Sciverse")
+        print("  开启: scansci-pdf config-cmd sciverse_enabled true")
+        return
+
+    if not test:
+        print("  跳过验证（--no-test）")
+        return
+
+    validation = validate_key(config)
+    status = validation.get("status")
+    if status == "ok":
+        print(f"  ✅ 验证通过: meta-catalog 可用（{validation.get('fields', 0)} 个字段）")
+        print("  Sciverse 已启用：检索会自动并入语义证据与元数据。")
+        print("  配额紧张时可关闭 meta 路: scansci-pdf config-cmd sciverse_meta_search_enabled false")
+    elif status == "invalid":
+        print("  ❌ 验证失败: Token 无效或已过期（HTTP 401）")
+        print("  请重新创建 Token: https://sciverse.space/tokens")
+    elif status == "forbidden":
+        print("  ⚠️ Token 有效但缺少 meta-catalog 权限（HTTP 403）")
+        print("  可尝试 scansci-pdf sciverse-search 验证语义检索权限，或联系 Sciverse 开通字段权限。")
+    elif status == "rate_limited":
+        print("  ⚠️ 触发配额（HTTP 429）。Token 本身可能有效，请稍后重试验证。")
+    else:
+        print(f"  ⚠️ 验证请求失败: {validation.get('message', '未知错误')}")
+        if validation.get("action"):
+            print(f"  action: {validation['action']}")
+
+
 @app.command("elsevier-setup")
 def elsevier_setup(
     api_key: str = typer.Option("", help="Elsevier API key"),
@@ -823,7 +889,7 @@ def search_cmd(
     author_id: str = typer.Option("", "--author-id", help="Search by OpenAlex author ID directly"),
     out: Annotated[str, typer.Option("--out", help="Write results to a channel-annotated queue file (feed to 'batch --lanes')")] = "",
 ) -> None:
-    """Search academic papers via OpenAlex, Semantic Scholar, and Crossref.
+    """Search academic papers (OpenAlex/Crossref/S2; NCPSSD for Chinese; Sciverse when configured).
 
     Results include DOI, title, authors, year, and citation count.
     Use the DOIs with 'scansci-pdf get' or 'scansci-pdf batch' to download.
@@ -868,10 +934,31 @@ def search_cmd(
         p = write_queue(qe, out)
         print(f"  Queue written: {p} ({len(qe)} entries)")
 
+    hint = None
+    try:
+        from .config import load_config
+        from .sources.sciverse import is_configured
+        _cfg = load_config()
+        if not is_configured(_cfg) and _cfg.get("sciverse_enabled", True):
+            hint = (
+                "未配置 Sciverse（sciverse_api_key）；语义证据/元数据/引文图谱未启用。"
+                "运行 scansci-pdf sciverse-setup --token <token> --test 启用（可选）。"
+            )
+    except Exception:
+        pass
+
     if json_output:
         payload = {"results": results}
         if author_match is not None:
             payload["author_match"] = author_match
+        if hint:
+            payload["config_hint"] = {
+                "service": "sciverse",
+                "status": "not_configured",
+                "config_key": "sciverse_api_key",
+                "message": hint,
+                "action": "scansci-pdf sciverse-setup --token <token> --test",
+            }
         print(_json.dumps(payload, indent=2, ensure_ascii=True))
     else:
         if author_match is not None:
@@ -883,6 +970,395 @@ def search_cmd(
             print(f"    {authors}  ({r.get('year', '?')})  cited={cited}  doi:{r.get('doi', '?')}")
             if i < len(results):
                 print()
+        if hint:
+            print(f"\n  提示: {hint}")
+
+
+def _sciverse_config_or_exit():
+    from .config import load_config
+    from .sources.sciverse import is_configured
+
+    config = load_config()
+    if not is_configured(config):
+        print("Error: sciverse_api_key is not configured.")
+        print("  1. Create a key at https://sciverse.space/tokens")
+        print("  2. scansci-pdf config-cmd sciverse_api_key <token>")
+        raise typer.Exit(1)
+    return config
+
+
+def _parse_meta_filters_json(filters_json: str) -> list[dict[str, Any]]:
+    if not filters_json.strip():
+        return []
+    try:
+        parsed = json.loads(filters_json)
+    except json.JSONDecodeError as exc:
+        print(f"Error: invalid --filters-json: {exc}")
+        raise typer.Exit(2) from None
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, dict) and item.get("field") for item in parsed
+    ):
+        print("Error: --filters-json must be a JSON array of {field, operator, value}")
+        raise typer.Exit(2)
+    return parsed
+
+
+@app.command("sciverse-search")
+def sciverse_search_cmd(
+    query: str = typer.Argument(..., help="Natural-language research question"),
+    top_k: int = typer.Option(10, help="Chunks to return (1-100)"),
+    sub_queries: int = typer.Option(0, help="Query-rewrite count (0-4; higher recall/latency)"),
+    year_from: int = typer.Option(None, help="Start year"),
+    year_to: int = typer.Option(None, help="End year"),
+    lang: str = typer.Option("", help="Document language (en/zh/...)"),
+    venue: str = typer.Option("", help="Normalized venue name (e.g. Nature)"),
+    venue_type: str = typer.Option("", help="journal/conference/book series/repository"),
+    topic: str = typer.Option("", help="Primary topic name"),
+    topic_domain: str = typer.Option("", help="Physical/Social/Health/Life Sciences"),
+    citation_min: int = typer.Option(None, help="Minimum citation count"),
+    citation_max: int = typer.Option(None, help="Maximum citation count"),
+    doc_ids: str = typer.Option("", "--doc-ids", help="Comma-separated doc_id hard scope"),
+    filters_json: str = typer.Option("", help="Advanced Sciverse filters JSON (merged last)"),
+    enrich_dois: bool = typer.Option(False, "--enrich-dois", help="Resolve DOI/unique_id for hits (one extra meta-search call)"),
+    json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
+) -> None:
+    """Semantic evidence search via Sciverse agentic-search (needs sciverse_api_key).
+
+    Returns citable chunks with doc_id/chunk_id/offset/page_no. Read more
+    context with 'scansci-pdf sciverse-content <doc_id> --offset N'.
+    Use --enrich-dois when the hits will be fed into download/selection.
+
+    Setup:
+      scansci-pdf config-cmd sciverse_api_key <token>   # https://sciverse.space/tokens
+    """
+    from .sources.sciverse import (
+        SciverseError,
+        agentic_search,
+        build_filters,
+        enrich_hits_with_metadata,
+    )
+
+    config = _sciverse_config_or_exit()
+
+    extra = None
+    if filters_json.strip():
+        try:
+            extra = json.loads(filters_json)
+        except json.JSONDecodeError as exc:
+            print(f"Error: invalid --filters-json: {exc}")
+            raise typer.Exit(2) from None
+        if not isinstance(extra, dict):
+            print("Error: --filters-json must be a JSON object")
+            raise typer.Exit(2)
+
+    filters = build_filters(
+        lang=lang,
+        year_from=year_from,
+        year_to=year_to,
+        venue=venue,
+        venue_type=venue_type,
+        topic=topic,
+        topic_domain=topic_domain,
+        citation_min=citation_min,
+        citation_max=citation_max,
+        doc_ids=[part.strip() for part in doc_ids.split(",") if part.strip()],
+        extra=extra,
+    )
+    try:
+        payload = agentic_search(
+            query, config=config, top_k=top_k, sub_queries=sub_queries, filters=filters
+        )
+    except SciverseError as exc:
+        print(f"Error: {exc}")
+        if exc.action:
+            print(f"  action: {exc.action}")
+        raise typer.Exit(1) from None
+
+    hits = payload.get("hits") if isinstance(payload.get("hits"), list) else []
+    doi_before = sum(1 for hit in hits if hit.get("doi"))
+    if enrich_dois and hits:
+        hits = enrich_hits_with_metadata(hits, config)
+    doi_added = sum(1 for hit in hits if hit.get("doi")) > doi_before
+    if json_output:
+        print(json.dumps(
+            {"count": len(hits), "doi_enriched": doi_added, "hits": hits},
+            indent=2, ensure_ascii=False,
+        ))
+        return
+    if not hits:
+        print("No results. Broadening the query or relaxing filters can help (EMPTY_RESULT).")
+        return
+    print(f"Sciverse agentic-search: {len(hits)} evidence chunk(s)\n")
+    for i, hit in enumerate(hits, 1):
+        title = str(hit.get("title") or "Untitled")
+        year = hit.get("publication_published_year") or ""
+        venue_name = hit.get("publication_venue_name_unified") or ""
+        meta = "  ".join(str(part) for part in (year, venue_name) if part)
+        print(f"{i:2d}. {title[:90]}")
+        if meta:
+            print(f"    {meta}")
+        loc = []
+        if hit.get("page_no") is not None:
+            loc.append(f"page {hit['page_no']}")
+        if hit.get("offset") is not None:
+            loc.append(f"offset {hit['offset']}")
+        if hit.get("score") is not None:
+            loc.append(f"score {hit['score']}")
+        if hit.get("doi"):
+            loc.append(f"doi {hit['doi']}")
+        loc.append(f"doc_id {hit.get('doc_id') or '?'}")
+        print(f"    {'  '.join(loc)}")
+        chunk = str(hit.get("chunk") or "").strip().replace("\n", " ")
+        if chunk:
+            print(f"    {chunk[:300]}{'…' if len(chunk) > 300 else ''}")
+        print()
+
+
+@app.command("sciverse-content")
+def sciverse_content_cmd(
+    doc_id: str = typer.Argument(..., help="doc_id returned by sciverse-search"),
+    offset: int = typer.Option(None, help="Character offset (Unicode code points); omit for full text"),
+    limit: int = typer.Option(700, help="Max characters when offset is given"),
+    json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
+) -> None:
+    """Read Sciverse full text for a doc_id (paged via next_offset/more)."""
+    from .sources.sciverse import SciverseError, content
+
+    config = _sciverse_config_or_exit()
+    try:
+        payload = content(doc_id, config=config, offset=offset, limit=limit)
+    except SciverseError as exc:
+        print(f"Error: {exc}")
+        if exc.action:
+            print(f"  action: {exc.action}")
+        raise typer.Exit(1) from None
+
+    if json_output:
+        print(json.dumps({"doc_id": doc_id, **payload}, indent=2, ensure_ascii=False))
+        return
+    print(str(payload.get("text") or ""))
+    if payload.get("more"):
+        print(
+            f"\n[more=true next_offset={payload.get('next_offset')} "
+            f"chars_returned={payload.get('chars_returned')}]"
+        )
+
+
+@app.command("sciverse-meta-search")
+def sciverse_meta_search_cmd(
+    query: str = typer.Argument("", help="Keywords; omit when using filters only"),
+    collection: str = typer.Option("papers", help="papers/authors/sources"),
+    page: int = typer.Option(1, help="Page number (>=1)"),
+    page_size: int = typer.Option(25, help="Results per page (1-200)"),
+    year_from: int = typer.Option(None, help="Start year"),
+    year_to: int = typer.Option(None, help="End year"),
+    lang: str = typer.Option("", help="Document language"),
+    venue: str = typer.Option("", help="Normalized venue name"),
+    venue_type: str = typer.Option("", help="journal/conference/book series/repository"),
+    topic: str = typer.Option("", help="Primary topic display name"),
+    topic_domain: str = typer.Option("", help="Primary topic domain display name"),
+    author: str = typer.Option("", help="Author name (fuzzy match)"),
+    doi: str = typer.Option("", help="Exact DOI"),
+    citation_min: int = typer.Option(None, help="Minimum citation count"),
+    citation_max: int = typer.Option(None, help="Maximum citation count"),
+    doc_ids: str = typer.Option("", "--doc-ids", help="Comma-separated doc_id scope"),
+    filters_json: str = typer.Option("", help="JSON array of {field, operator, value}"),
+    sort: str = typer.Option("", help="Sort field[:asc|desc], e.g. citation_count:desc"),
+    fields: str = typer.Option("", help="Comma-separated projection fields"),
+    json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
+) -> None:
+    """Structured metadata search via Sciverse meta-search (returns DOI/unique_id)."""
+    from .sources.sciverse import (
+        SciverseError,
+        build_meta_filters,
+        build_meta_sort,
+        meta_search,
+    )
+
+    config = _sciverse_config_or_exit()
+    extra_filters = _parse_meta_filters_json(filters_json)
+    projection = [part.strip() for part in fields.split(",") if part.strip()]
+    try:
+        payload = meta_search(
+            query,
+            config=config,
+            collection=collection,
+            filters=build_meta_filters(
+                year_from=year_from,
+                year_to=year_to,
+                lang=lang,
+                venue=venue,
+                venue_type=venue_type,
+                author=author,
+                topic=topic,
+                topic_domain=topic_domain,
+                doi=doi,
+                doc_ids=[part.strip() for part in doc_ids.split(",") if part.strip()],
+                citation_min=citation_min,
+                citation_max=citation_max,
+                extra=extra_filters,
+            ),
+            sort=build_meta_sort(sort) if sort else None,
+            fields=projection or None,
+            page=page,
+            page_size=page_size,
+        )
+    except SciverseError as exc:
+        print(f"Error: {exc}")
+        if exc.action:
+            print(f"  action: {exc.action}")
+        raise typer.Exit(1) from None
+
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    if json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    total = payload.get("total_count") or payload.get("total") or len(results)
+    total_label = f">={total}" if payload.get("total_count_capped") else str(total)
+    print(f"Sciverse meta-search: {len(results)} result(s), total={total_label}\n")
+    for i, row in enumerate(results, 1):
+        title = str(row.get("title") or "Untitled")
+        authors = row.get("author")
+        if isinstance(authors, list):
+            names = [
+                item.get("name") if isinstance(item, dict) else str(item)
+                for item in authors[:3]
+            ]
+            author_text = ", ".join(str(name) for name in names if name)
+        else:
+            author_text = str(authors or "")
+        year = row.get("publication_published_year") or ""
+        venue_name = row.get("publication_venue_name_unified") or ""
+        cited = row.get("citation_count") or 0
+        print(f"{i:2d}. {title[:90]}")
+        meta = "  ".join(str(part) for part in (author_text, year, venue_name) if part)
+        if meta:
+            print(f"    {meta}")
+        print(f"    cited={cited}  doi:{row.get('doi') or '?'}")
+        ids = [
+            f"{key}={row[key]}"
+            for key in ("unique_id", "doc_id")
+            if row.get(key)
+        ]
+        if ids:
+            print(f"    {'  '.join(ids)}")
+        print()
+    if payload.get("next_cursor"):
+        print(f"[next_cursor={payload['next_cursor']}]")
+
+
+@app.command("sciverse-relations")
+def sciverse_relations_cmd(
+    unique_id: str = typer.Argument(..., help="unique_id from sciverse-meta-search"),
+    relation: str = typer.Option("REFERENCES", help="CITATIONS/REFERENCES/RELATED_WORKS"),
+    page: int = typer.Option(1, help="Page number (>=1)"),
+    page_size: int = typer.Option(25, help="Items per page (1-200)"),
+    json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
+) -> None:
+    """Page through a paper's citations, references, or related works."""
+    from .sources.sciverse import SciverseError, paper_relations
+
+    config = _sciverse_config_or_exit()
+    try:
+        payload = paper_relations(
+            unique_id,
+            relation=relation,
+            page=page,
+            page_size=page_size,
+            config=config,
+        )
+    except SciverseError as exc:
+        print(f"Error: {exc}")
+        if exc.action:
+            print(f"  action: {exc.action}")
+        raise typer.Exit(1) from None
+
+    if json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    total = payload.get("total_count") or len(items)
+    print(f"{relation.upper()}: {len(items)} item(s), total={total}\n")
+    for i, item in enumerate(items, 1):
+        print(f"{i:2d}. {item.get('title') or 'Untitled'}")
+        print(f"    id:{item.get('id') or '?'}  type:{item.get('id_type') or '?'}")
+    pages = payload.get("total_pages")
+    if pages:
+        print(f"\n[page={payload.get('page')}/{pages}]")
+
+
+@app.command("sciverse-resource")
+def sciverse_resource_cmd(
+    file_name: str = typer.Argument(..., help="Relative resource path from content Markdown"),
+    output_dir: str = typer.Option("", "--output-dir", help="Directory (or file path) to save into"),
+    json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
+) -> None:
+    """Download a Sciverse figure/table/attachment binary to disk."""
+    from .sources.sciverse import SciverseError, save_resource
+
+    config = _sciverse_config_or_exit()
+    try:
+        saved = save_resource(file_name, output_dir or "", config=config)
+    except SciverseError as exc:
+        print(f"Error: {exc}")
+        if exc.action:
+            print(f"  action: {exc.action}")
+        raise typer.Exit(1) from None
+    if json_output:
+        print(json.dumps(saved, indent=2, ensure_ascii=False))
+        return
+    print(f"Saved: {saved['path']}")
+    print(f"  type: {saved['content_type']}  size: {saved['size']} bytes")
+
+
+@app.command("sciverse-catalog")
+def sciverse_catalog_cmd(
+    collection: str = typer.Option("papers", help="papers/authors/sources"),
+    samples: bool = typer.Option(False, "--samples", help="Include sample values for enum fields"),
+    json_output: bool = typer.Option(False, "--json", help="Print the raw JSON payload"),
+) -> None:
+    """Show the Sciverse meta-search field/operator catalog."""
+    from .sources.sciverse import SciverseError, meta_catalog
+
+    config = _sciverse_config_or_exit()
+    try:
+        payload = meta_catalog(
+            collection=collection,
+            include_sample_values=samples,
+            config=config,
+        )
+    except SciverseError as exc:
+        print(f"Error: {exc}")
+        if exc.action:
+            print(f"  action: {exc.action}")
+        raise typer.Exit(1) from None
+
+    if json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    fields = payload.get("fields") if isinstance(payload.get("fields"), list) else []
+    print(f"Collection: {collection}  fields: {len(fields)}")
+    operators = payload.get("filter_operators") or []
+    if operators:
+        print(f"Operators: {', '.join(str(op) for op in operators)}")
+    default_fields = payload.get("default_fields") or []
+    if default_fields:
+        print(f"Default fields: {', '.join(str(field) for field in default_fields)}")
+    print()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        flags = []
+        if field.get("filterable"):
+            flags.append("filter")
+        if field.get("sortable"):
+            flags.append("sort")
+        if field.get("searchable"):
+            flags.append("search")
+        suffix = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"- {field.get('name')}: {field.get('type')}{suffix}")
 
 
 @app.command("plan")

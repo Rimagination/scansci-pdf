@@ -125,4 +125,23 @@ def print_status() -> None:
     if has_optional:
         log.info("  Install optional deps: pip install scansci-pdf[fast,vpnsci]")
 
+    # Service credentials are optional but high-leverage; surface them during
+    # every `scansci-pdf check` so users know they can enable fast/semantic lanes.
+    try:
+        from .config import load_config
+        config = load_config()
+        log.info("=== Service Configuration ===")
+        elsevier_state = "OK" if config.get("elsevier_api_key") else "optional"
+        log.info(
+            f"  [{elsevier_state}] elsevier_api_key - ScienceDirect fast-track"
+            + ("" if config.get("elsevier_api_key") else " (run: scansci-pdf elsevier-setup)")
+        )
+        sciverse_state = "OK" if config.get("sciverse_api_key") else "optional"
+        log.info(
+            f"  [{sciverse_state}] sciverse_api_key - semantic evidence/metadata/relations"
+            + ("" if config.get("sciverse_api_key") else " (run: scansci-pdf sciverse-setup --token <token> --test)")
+        )
+    except Exception:
+        pass
+
     log.info("========================")

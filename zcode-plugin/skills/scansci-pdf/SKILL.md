@@ -1,6 +1,6 @@
 ---
 name: scansci-pdf
-description: 下载学术论文。支持 DOI、arXiv ID、关键词搜索、批量下载、Elsevier API、WebVPN/CARSI 机构访问、下载失败排障。当用户要求下载论文(单篇或批量)、搜索文献、获取引文、配置 Elsevier/ScienceDirect API、或下载遇到 Cloudflare/验证页/代理问题时使用。用户仅讨论 PDF 解析/转换工具的对比或选型(如 pymupdf4llm vs MinerU)而无需检索文献证据时不要使用;只有确实要检索或下载文献时才加载本 skill。
+description: 下载学术论文。支持 DOI、arXiv ID、关键词搜索、批量下载、Sciverse 语义检索/元数据、Elsevier API、WebVPN/CARSI 机构访问、下载失败排障。当用户要求下载论文(单篇或批量)、搜索文献、获取引文、配置 Sciverse/Elsevier API、或下载遇到 Cloudflare/验证页/代理问题时使用。用户仅讨论 PDF 解析/转换工具的对比或选型(如 pymupdf4llm vs MinerU)而无需检索文献证据时不要使用;只有确实要检索或下载文献时才加载本 skill。
 ---
 
 # ScanSci PDF — 学术论文下载与检索
@@ -100,6 +100,7 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
    ```
 2. **`10.1007`(Springer)→ Springer TDM API**(`scansci_pdf_springer_setup`):机构订阅+TDM 授权的 key(dev.springernature.com 注册,ORCID 关联机构),交付 **JATS XML 全文**(无 PDF 端点),1–2 s/篇。`test=true` 用已知付费文章探测权限:`entitled`=通,`not_entitled`=key 有效但机构无订阅/TDM 权限(此时走 WebVPN/CARSI),`invalid_key`=重生成。竞速引擎与车道模式都已接入;无 key 时该车道零成本让位。
 3. **其余出版商 → WebVPN/CARSI**:`scansci-pdf schools 清华` → `setup 清华大学` → `login`(浏览器 CAS,cookie 自动保存,勿让用户手动复制)→ 正常 `get`。CARSI:`config-cmd carsi_idp_name <学校>` + `federated-login elsevier`。卡登录页 = session 过期,重新 login。
+4. **Sciverse 语义检索/元数据(可选,推荐)**:`scansci-pdf sciverse-setup --token <token> --test`(Token 在 https://sciverse.space/tokens 创建;MCP 用 `scansci_pdf_sciverse_setup(token="...", test=true)`)。配置后 `search` 自动并入语义证据片段与 meta-search 元数据;原始片段/引文图谱/图表用 `scansci_pdf_sciverse`。不配置不影响下载,`scansci-pdf check` 与搜索结果会提示。
 
 ## 排障速查
 
@@ -110,6 +111,8 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 | cloakbrowser 内核过老 | `config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"` |
 | 所有源超时 | 查 `network_proxy`;本机代理可能没启动,先测端口 |
 | Elsevier 只回 1 页预览 | key 无效/无权限,重新 setup --validate |
+| Sciverse 401 / Token 无效 | `scansci-pdf sciverse-setup --token <token> --test` 重新配置；MCP `scansci_pdf_sciverse_setup(token="...", test=true)` |
+| Sciverse 429 / 配额不足 | 等配额窗口；或 `config-cmd sciverse_meta_search_enabled false` 关闭每次 search 的 meta 路 |
 | 下载失败结果带 `source_failures` | 逐渠道失败明细(渠道多为**临时**不可用):`error_type=rate_limited/network` → 稍后重试;`config_needed` → 缺用户决策,按 `action` 处理(如 `ask_user_email`)。不要静默换渠道了事,把明细告诉用户让其选择 |
 | `config_needed`/`ask_user_email` | Unpaywall 必须真实邮箱(占位邮箱 422)。**问用户要邮箱**,然后 `scansci_pdf_config(key="email", value="<用户邮箱>")` 并重试 |
 | 想恢复旧版齐发竞速 | `config set race_mode full`(默认 hedge 对冲级联,请求量已降 3-5 倍) |

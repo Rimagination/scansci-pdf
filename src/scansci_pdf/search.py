@@ -1,4 +1,4 @@
-"""Paper search via OpenAlex, Semantic Scholar, and Crossref."""
+"""Paper search via OpenAlex, Semantic Scholar, Crossref, and NCPSSD (CJK)."""
 
 from __future__ import annotations
 
@@ -290,6 +290,80 @@ def _search_openalex_by_author(
     return _parse_openalex_works(data.get("results", []))
 
 
+def _sciverse_ready() -> bool:
+    """True when a Sciverse API key is configured (cheap, no network)."""
+    try:
+        from .sources.sciverse import is_configured
+        return is_configured(load_config())
+    except Exception:
+        return False
+
+
+def _search_sciverse(
+    query: str,
+    limit: int = 10,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[dict[str, Any]]:
+    """Sciverse agentic-search source; never raises into the search race."""
+    from .sources.sciverse import SciverseError, is_configured, search_sciverse
+    config = load_config()
+    if not is_configured(config):
+        return []
+    try:
+        return search_sciverse(
+            query,
+            limit=limit,
+            year_from=year_from,
+            year_to=year_to,
+            config=config,
+            # Discovery/download scenario: spend one extra meta call to make
+            # evidence hits DOI-ready. Disabling the meta lane disables this.
+            enrich_dois=bool(config.get("sciverse_meta_search_enabled", True)),
+        )
+    except SciverseError as exc:
+        logger.warning("search: sciverse failed (%s: %s)", exc.code or exc.status_code, exc)
+    except Exception as exc:  # noqa: BLE001 - one source must not break search
+        logger.warning("search: sciverse failed (%s)", exc)
+    return []
+
+
+def _sciverse_meta_ready() -> bool:
+    """True when meta-search is enabled and a Sciverse key is configured."""
+    try:
+        from .sources.sciverse import is_configured
+        config = load_config()
+        return bool(config.get("sciverse_meta_search_enabled", True)) and is_configured(config)
+    except Exception:
+        return False
+
+
+def _search_sciverse_meta(
+    query: str,
+    limit: int = 10,
+    year_from: int | None = None,
+    year_to: int | None = None,
+) -> list[dict[str, Any]]:
+    """Sciverse meta-search lane; never raises into the search race."""
+    from .sources.sciverse import SciverseError, is_configured, meta_search_papers
+    config = load_config()
+    if not config.get("sciverse_meta_search_enabled", True) or not is_configured(config):
+        return []
+    try:
+        return meta_search_papers(
+            query,
+            limit=limit,
+            year_from=year_from,
+            year_to=year_to,
+            config=config,
+        )
+    except SciverseError as exc:
+        logger.warning("search: sciverse meta-search failed (%s: %s)", exc.code or exc.status_code, exc)
+    except Exception as exc:  # noqa: BLE001 - one source must not break search
+        logger.warning("search: sciverse meta-search failed (%s)", exc)
+    return []
+
+
 def search_papers_v2(
     query: str = "",
     limit: int = 10,
@@ -306,6 +380,10 @@ def search_papers_v2(
     when the scansci-find CLI is missing or the discovery call fails. Author
     search always stays on the built-in OpenAlex path (ScanSci Find exposes
     no author-specific endpoint through its CLI).
+
+    When ``sciverse_api_key`` is configured, Sciverse agentic-search is merged
+    in as an additional semantic source (merged records carry ``doc_id`` and
+    citation-safe ``evidence`` chunks).
 
     Result fields are unchanged (doi/title/authors/year/cited_by_count/is_oa/
     oa_url/source) so existing callers are unaffected.
@@ -333,11 +411,176 @@ def search_papers_v2(
         logger.warning("search: discovery engine failed (%s), falling back to 3-source", exc)
         return search_papers(query, limit=limit, year_from=year_from, year_to=year_to, sort=sort)
 
+    extra_tasks: list[tuple[Any, tuple[Any, ...]]] = []
+    if _sciverse_ready():
+        extra_tasks.append((_search_sciverse, (query, max(limit, 10), year_from, year_to)))
+    if _sciverse_meta_ready():
+        extra_tasks.append((_search_sciverse_meta, (query, max(limit, 10), year_from, year_to)))
+    if _query_has_cjk(query):
+        extra_tasks.append((_search_ncpssd, (query, max(limit, 10), year_from, year_to)))
+    if extra_tasks:
+        pool = ThreadPoolExecutor(max_workers=len(extra_tasks))
+        futures = [pool.submit(fn, *args) for fn, args in extra_tasks]
+        try:
+            for future in as_completed(futures, timeout=30):
+                try:
+                    results = _merge_search_results(results, future.result())
+                except Exception:
+                    pass
+        except TimeoutError:
+            logger.warning("search: optional extra sources timed out; using partial results")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
     if sort == "cited_by_count":
         results.sort(key=lambda x: x.get("cited_by_count", 0), reverse=True)
     elif sort == "publication_date":
         results.sort(key=lambda x: x.get("year", 0), reverse=True)
     return results[:limit]
+
+
+def _query_has_cjk(query: str) -> bool:
+    try:
+        from .chinese import has_cjk
+        return has_cjk(query)
+    except Exception:
+        return False
+
+
+def _search_ncpssd(
+    query: str, limit: int = 10,
+    year_from: int | None = None, year_to: int | None = None,
+) -> list[dict[str, Any]]:
+    """Search NCPSSD's Chinese humanities/social-science archive."""
+    from .chinese import normalize_cn_text, normalize_doi_loose
+    from .sources.ncpssd import ncpssd_record_url, search_ncpssd
+
+    config = load_config()
+    if not config.get("ncpssd_enabled", True):
+        return []
+    rows = search_ncpssd(query, config, page_size=max(limit, 10))
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        year = str(row.get("years") or "")
+        try:
+            year_value: Any = int(year) if year else ""
+        except ValueError:
+            year_value = ""
+        if year_from and isinstance(year_value, int) and year_value < year_from:
+            continue
+        if year_to and isinstance(year_value, int) and year_value > year_to:
+            continue
+        doi = normalize_doi_loose(str(row.get("doi") or ""))
+        authors = [
+            name for name in (
+                normalize_cn_text(part.split("[", 1)[0])
+                for part in re.split(r"[;；]", str(row.get("creator") or ""))
+            ) if name
+        ]
+        results.append({
+            "title": normalize_cn_text(str(row.get("title") or "")),
+            "doi": doi,
+            "url": ncpssd_record_url(str(row.get("id") or "")) if row.get("id") else (
+                f"https://doi.org/{doi}" if doi else ""
+            ),
+            "authors": authors[:5],
+            "year": year_value,
+            "cited_by_count": 0,
+            "abstract": normalize_cn_text(str(row.get("remark") or ""))[:500],
+            "is_oa": bool(row.get("pdfurl")),
+            "oa_url": str(row.get("pdfurl") or ""),
+            "source": "ncpssd",
+            "ncpssd_id": str(row.get("id") or ""),
+            "journal": normalize_cn_text(str(row.get("cbw_name") or "")),
+        })
+    return results
+
+
+def _merge_search_results(
+    base: list[dict[str, Any]], extra: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge result lists across doc_id, DOI and title, preserving provenance.
+
+    ``doc_id`` is Sciverse's full-text content hash: when the agentic and
+    meta lanes return the same paper under different titles, this joins them
+    so the DOI-less evidence hit inherits the meta hit's DOI/`unique_id`.
+    DOI-bearing and DOI-less duplicates are then unified by DOI/title.
+    """
+    try:
+        from .chinese import normalize_title_for_match
+    except Exception:
+        def normalize_title_for_match(value: str) -> str:
+            return (value or "").lower()
+
+    records: list[dict[str, Any]] = []
+    by_doc_id: dict[str, dict[str, Any]] = {}
+    by_doi: dict[str, dict[str, Any]] = {}
+    by_title: dict[str, dict[str, Any]] = {}
+
+    for item in [*base, *extra]:
+        doc_id = str(item.get("doc_id") or "").strip()
+        doi = str(item.get("doi") or "").strip().lower()
+        title_key = normalize_title_for_match(str(item.get("title") or ""))
+        existing = by_doc_id.get(doc_id) if doc_id else None
+        if existing is None:
+            existing = by_doi.get(doi) if doi else None
+        if existing is None and title_key:
+            candidate = by_title.get(title_key)
+            # Never collapse two records that carry different DOIs merely
+            # because their titles match.
+            if candidate is not None and (not doi or not candidate.get("doi")):
+                existing = candidate
+
+        if existing is None:
+            records.append(item)
+            existing = item
+        else:
+            if not existing.get("doi") and item.get("doi"):
+                existing["doi"] = item["doi"]
+            if not existing.get("url") and item.get("url"):
+                existing["url"] = item["url"]
+            if not existing.get("abstract") and item.get("abstract"):
+                existing["abstract"] = item["abstract"]
+            if not existing.get("is_oa") and item.get("is_oa"):
+                existing["is_oa"] = True
+                existing["oa_url"] = item.get("oa_url", "")
+            if item.get("cited_by_count", 0) > existing.get("cited_by_count", 0):
+                existing["cited_by_count"] = item["cited_by_count"]
+            for field in (
+                "doc_id", "unique_id", "snippet", "primary_topic",
+                "primary_topic_domain", "journal", "venue_type", "score",
+                "language", "fwci", "influential_citation_count", "year",
+                "ncpssd_id", "arxiv_id",
+            ):
+                if not existing.get(field) and item.get(field):
+                    existing[field] = item[field]
+            if item.get("evidence"):
+                evidence = existing.setdefault("evidence", [])
+                if isinstance(evidence, list):
+                    seen_chunks = {
+                        e.get("chunk_id") for e in evidence if isinstance(e, dict)
+                    }
+                    for chunk in item["evidence"]:
+                        if isinstance(chunk, dict) and chunk.get("chunk_id") not in seen_chunks:
+                            evidence.append(chunk)
+                            seen_chunks.add(chunk.get("chunk_id"))
+
+            sources = [
+                source for source in str(existing.get("source") or "").split("+") if source
+            ]
+            new_source = str(item.get("source") or "")
+            if new_source and new_source not in sources:
+                sources.append(new_source)
+                existing["source"] = "+".join(sources)
+
+        if doc_id:
+            by_doc_id[doc_id] = existing
+        if doi:
+            by_doi[doi] = existing
+        if title_key:
+            by_title[title_key] = existing
+
+    return records
 
 
 def search_papers(
@@ -351,6 +594,9 @@ def search_papers(
     author_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search papers from OpenAlex + Semantic Scholar + Crossref in parallel.
+
+    Chinese queries additionally hit NCPSSD (国家哲学社会科学文献中心), which
+    indexes humanities/social-science journals that the Western indexes miss.
 
     When `author` or `author_id` is provided, searches by author instead of keyword.
     - `author`: resolves author name → OpenAlex author ID → works
@@ -396,40 +642,36 @@ def search_papers(
     all_results: list[dict[str, Any]] = []
     per_source = max(5, limit)
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {
-            pool.submit(_search_openalex, query, per_source, year_from, year_to, sort): "openalex",
-            pool.submit(_search_semantic_scholar, query, per_source, year_from, year_to): "semantic_scholar",
-            pool.submit(_search_crossref, query, per_source, year_from, year_to): "crossref",
-        }
+    has_cjk = _query_has_cjk(query)
+    sciverse_on = _sciverse_ready()
+    sciverse_meta_on = _sciverse_meta_ready()
+    worker_count = 3 + (1 if has_cjk else 0) + (1 if sciverse_on else 0) + (1 if sciverse_meta_on else 0)
+    pool = ThreadPoolExecutor(max_workers=worker_count)
+    futures = {
+        pool.submit(_search_openalex, query, per_source, year_from, year_to, sort): "openalex",
+        pool.submit(_search_semantic_scholar, query, per_source, year_from, year_to): "semantic_scholar",
+        pool.submit(_search_crossref, query, per_source, year_from, year_to): "crossref",
+    }
+    if has_cjk:
+        futures[pool.submit(_search_ncpssd, query, per_source, year_from, year_to)] = "ncpssd"
+    if sciverse_on:
+        futures[pool.submit(_search_sciverse, query, per_source, year_from, year_to)] = "sciverse"
+    if sciverse_meta_on:
+        futures[pool.submit(_search_sciverse_meta, query, per_source, year_from, year_to)] = "sciverse-meta"
+    try:
         for future in as_completed(futures, timeout=30):
             try:
                 all_results.extend(future.result())
             except Exception:
                 pass
+    except TimeoutError:
+        logger.warning("search: some sources timed out; using partial results")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
-    # Deduplicate by DOI (prefer entry with more info)
-    seen: dict[str, dict[str, Any]] = {}
-    for r in all_results:
-        doi = r.get("doi", "").lower()
-        if not doi:
-            continue
-        if doi not in seen:
-            seen[doi] = r
-        else:
-            existing = seen[doi]
-            # Merge: keep fields from whichever entry has more data
-            if not existing.get("abstract") and r.get("abstract"):
-                existing["abstract"] = r["abstract"]
-            if not existing.get("is_oa") and r.get("is_oa"):
-                existing["is_oa"] = True
-                existing["oa_url"] = r.get("oa_url", "")
-            if r.get("cited_by_count", 0) > existing.get("cited_by_count", 0):
-                existing["cited_by_count"] = r["cited_by_count"]
-            existing["source"] = existing.get("source", "") + "+" + r.get("source", "")
-
-    # Sort by relevance or citations
-    merged = list(seen.values())
+    # Deduplicate by DOI, falling back to normalized title for DOI-less rows
+    # (Chinese NCPSSD records and Sciverse hits can lack a DOI).
+    merged = _merge_search_results(all_results, [])
     if sort == "cited_by_count":
         merged.sort(key=lambda x: x.get("cited_by_count", 0), reverse=True)
     elif sort == "publication_date":

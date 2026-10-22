@@ -13,7 +13,7 @@ except ModuleNotFoundError:  # mcp >= 2.0 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP
 
 from .cache import cache_clear, cache_get
-from .config import get_config_safe, load_config, mask_config_value, update_config
+from .config import SENSITIVE_KEYS, get_config_safe, load_config, mask_config_value, update_config
 from .network import fetch_json
 from .paperlist import parse_paper_list
 from .resolver import batch_resolve
@@ -99,7 +99,25 @@ def scansci_pdf_download(
                         "也可连接校园网后重试，或改走灰色源/机构浏览器渠道。"
                     )
 
-    if result.get("success") and download_si:
+    is_caj = (
+        result.get("format") == "caj"
+        or str(result.get("file") or "").lower().endswith(".caj")
+    )
+    if is_caj:
+        from .caj import caj_hints
+        hints = caj_hints(result.get("file"))
+        result.setdefault("hint", {})
+        if isinstance(result["hint"], str):
+            result["hint"] = {"message": result["hint"]}
+        result["hint"].update({
+            "format": "caj",
+            "how_to_open": hints["how_to_open"],
+            "cajviewer_url": hints["cajviewer_url"],
+            "caj2pdf_url": hints["caj2pdf_url"],
+        })
+        result["agent_hint"] = hints["agent_hint"]
+
+    if result.get("success") and not is_caj and download_si:
         try:
             from pathlib import Path as _P
 
@@ -113,7 +131,7 @@ def scansci_pdf_download(
         except Exception as exc:
             result["supplementary_error"] = str(exc)
 
-    if result.get("success") and markdown:
+    if result.get("success") and not is_caj and markdown:
         try:
             from .md_export import pdf_to_markdown_detailed
 
@@ -127,6 +145,26 @@ def scansci_pdf_download(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _sciverse_config_hint() -> dict[str, Any] | None:
+    """Prompt for optional Sciverse setup when it is enabled but unconfigured."""
+    from .sources.sciverse import is_configured
+
+    config = load_config()
+    if is_configured(config) or not config.get("sciverse_enabled", True):
+        return None
+    return {
+        "service": "sciverse",
+        "status": "not_configured",
+        "config_key": "sciverse_api_key",
+        "message": (
+            "未配置 sciverse_api_key；Sciverse 的语义证据片段 / 元数据检索 / "
+            "引文图谱 / 图表下载不可用（不影响现有检索与下载）。"
+        ),
+        "action": (
+            "运行 scansci_pdf_sciverse_setup（会打开 https://sciverse.space/tokens），"
+            "或 CLI: scansci-pdf sciverse-setup --token <token> --test"
+        ),
+    }
 def _result_key(result: dict[str, Any]) -> str:
     """Identity of the paper a lane result refers to ('' when unrecognizable)."""
     raw = result.get("doi") or result.get("identifier") or ""
@@ -296,7 +334,7 @@ def scansci_pdf_search(
     author_id: str | None = None,
     out_file: str | None = None,
 ) -> str:
-    """Search papers by keyword or author (OpenAlex; year/sort filters). out_file writes a channel-annotated queue for scansci_pdf_batch_download."""
+    """Search papers by keyword/author (OpenAlex, NCPSSD, Sciverse when configured; year/sort filters); out_file writes a download queue."""
     results = search_papers(
         query,
         limit=min(limit, 50),
@@ -306,6 +344,11 @@ def scansci_pdf_search(
         author=author,
         author_id=author_id,
     )
+    payload: dict[str, Any] = {"results": results}
+    hint = _sciverse_config_hint()
+    if hint:
+        payload["config_hint"] = hint
+
     if out_file and results:
         from .pipeline import QueueEntry, predict_channel, write_queue
 
@@ -319,11 +362,423 @@ def scansci_pdf_search(
             if r.get("doi") or r.get("arxiv_id")
         ]
         path = write_queue(qe, out_file)
-        return json.dumps(
-            {"results": results, "queue_file": str(path), "queued": len(qe)},
-            ensure_ascii=False,
+        payload.update({"queue_file": str(path), "queued": len(qe)})
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _sciverse_unconfigured() -> str:
+    return json.dumps(
+        {
+            "success": False,
+            "source": "sciverse",
+            "error": "sciverse_api_key is not configured",
+            "action": "create a key at https://sciverse.space/tokens, then run "
+                      'scansci_pdf_config(key="sciverse_api_key", value="<key>")',
+        },
+        ensure_ascii=False,
+    )
+
+
+def _sciverse_search_impl(
+    query: str,
+    top_k: int = 10,
+    sub_queries: int = 0,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    lang: str = "",
+    venue: str = "",
+    venue_type: str = "",
+    topic: str = "",
+    topic_domain: str = "",
+    citation_min: int | None = None,
+    citation_max: int | None = None,
+    doc_ids: list[str] | None = None,
+    filters_json: str = "",
+    enrich_dois: bool = False,
+) -> str:
+    """Semantic evidence search via Sciverse agentic-search."""
+    from .sources.sciverse import (
+        SciverseError,
+        agentic_search,
+        build_filters,
+        enrich_hits_with_metadata,
+        is_configured,
+    )
+
+    config = load_config()
+    if not is_configured(config):
+        return _sciverse_unconfigured()
+
+    extra: dict[str, Any] | None = None
+    if filters_json.strip():
+        try:
+            parsed = json.loads(filters_json)
+        except json.JSONDecodeError as exc:
+            return json.dumps({"success": False, "error": f"invalid filters_json: {exc}"})
+        if not isinstance(parsed, dict):
+            return json.dumps({"success": False, "error": "filters_json must be a JSON object"})
+        extra = parsed
+
+    filters = build_filters(
+        lang=lang,
+        year_from=year_from,
+        year_to=year_to,
+        venue=venue,
+        venue_type=venue_type,
+        topic=topic,
+        topic_domain=topic_domain,
+        doc_ids=doc_ids,
+        citation_min=citation_min,
+        citation_max=citation_max,
+        extra=extra,
+    )
+    try:
+        payload = agentic_search(
+            query,
+            config=config,
+            top_k=top_k,
+            sub_queries=sub_queries,
+            filters=filters,
         )
-    return json.dumps({"results": results}, ensure_ascii=False)
+    except SciverseError as exc:
+        return json.dumps(exc.to_dict(), ensure_ascii=False)
+
+    hits = payload.get("hits") if isinstance(payload.get("hits"), list) else []
+    doi_before = sum(1 for hit in hits if hit.get("doi"))
+    if enrich_dois and hits:
+        hits = enrich_hits_with_metadata(hits, config)
+    doi_added = sum(1 for hit in hits if hit.get("doi")) > doi_before
+    return json.dumps(
+        {
+            "success": True,
+            "source": "sciverse",
+            "count": len(hits),
+            "doi_enriched": doi_added,
+            "hits": hits,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _sciverse_content_impl(
+    doc_id: str,
+    offset: int | None = None,
+    limit: int = 700,
+) -> str:
+    """Read a Sciverse full-text segment by doc_id."""
+    from .sources.sciverse import SciverseError, content, is_configured
+
+    config = load_config()
+    if not is_configured(config):
+        return _sciverse_unconfigured()
+    try:
+        payload = content(doc_id, config=config, offset=offset, limit=limit)
+    except SciverseError as exc:
+        return json.dumps(exc.to_dict(), ensure_ascii=False)
+    return json.dumps(
+        {"success": True, "source": "sciverse", "doc_id": doc_id, **payload},
+        ensure_ascii=False,
+    )
+
+
+def _sciverse_meta_search_impl(
+    query: str = "",
+    *,
+    collection: str = "papers",
+    page: int = 1,
+    page_size: int = 25,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    lang: str = "",
+    venue: str = "",
+    venue_type: str = "",
+    topic: str = "",
+    topic_domain: str = "",
+    author: str = "",
+    doi: str = "",
+    citation_min: int | None = None,
+    citation_max: int | None = None,
+    doc_ids: list[str] | None = None,
+    filters_json: str = "",
+    sort_json: str = "",
+    fields: list[str] | None = None,
+) -> str:
+    """Structured metadata search via Sciverse meta-search."""
+    from .sources.sciverse import (
+        SciverseError,
+        build_meta_filters,
+        build_meta_sort,
+        is_configured,
+        meta_search,
+    )
+
+    config = load_config()
+    if not is_configured(config):
+        return _sciverse_unconfigured()
+
+    extra_filters: list[dict[str, Any]] = []
+    if filters_json.strip():
+        try:
+            parsed = json.loads(filters_json)
+        except json.JSONDecodeError as exc:
+            return json.dumps({"success": False, "error": f"invalid filters_json: {exc}"})
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list) or not all(
+            isinstance(item, dict) and item.get("field") for item in parsed
+        ):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "filters_json must be a JSON array of "
+                             "{field, operator, value} items",
+                },
+                ensure_ascii=False,
+            )
+        extra_filters = parsed
+
+    sort = None
+    if sort_json.strip():
+        try:
+            parsed_sort = json.loads(sort_json)
+        except json.JSONDecodeError as exc:
+            return json.dumps({"success": False, "error": f"invalid sort_json: {exc}"})
+        if isinstance(parsed_sort, str):
+            sort = build_meta_sort(parsed_sort)
+        elif isinstance(parsed_sort, dict):
+            sort = build_meta_sort([parsed_sort])
+        elif isinstance(parsed_sort, list):
+            sort = build_meta_sort(parsed_sort)
+        else:
+            return json.dumps(
+                {"success": False, "error": "sort_json must be a JSON array, object, or string"}
+            )
+
+    filters = build_meta_filters(
+        year_from=year_from,
+        year_to=year_to,
+        lang=lang,
+        venue=venue,
+        venue_type=venue_type,
+        author=author,
+        topic=topic,
+        topic_domain=topic_domain,
+        doi=doi,
+        doc_ids=doc_ids,
+        citation_min=citation_min,
+        citation_max=citation_max,
+        extra=extra_filters,
+    )
+    try:
+        payload = meta_search(
+            query,
+            config=config,
+            collection=collection,
+            filters=filters,
+            sort=sort,
+            fields=fields,
+            page=page,
+            page_size=page_size,
+        )
+    except SciverseError as exc:
+        return json.dumps(exc.to_dict(), ensure_ascii=False)
+
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    return json.dumps(
+        {
+            "success": True,
+            "source": "sciverse-meta",
+            "collection": collection,
+            "count": len(results),
+            "total_count": payload.get("total_count") or payload.get("total"),
+            "total_count_capped": bool(payload.get("total_count_capped")),
+            "page": payload.get("page"),
+            "page_size": payload.get("page_size"),
+            "next_cursor": payload.get("next_cursor"),
+            "results": results,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _sciverse_relations_impl(
+    unique_id: str,
+    relation: str = "REFERENCES",
+    page: int = 1,
+    page_size: int = 25,
+) -> str:
+    """Citation / reference / related-work graph for one paper."""
+    from .sources.sciverse import SciverseError, is_configured, paper_relations
+
+    config = load_config()
+    if not is_configured(config):
+        return _sciverse_unconfigured()
+    try:
+        payload = paper_relations(
+            unique_id,
+            relation=relation,
+            page=page,
+            page_size=page_size,
+            config=config,
+        )
+    except SciverseError as exc:
+        return json.dumps(exc.to_dict(), ensure_ascii=False)
+    return json.dumps(
+        {
+            "success": True,
+            "source": "sciverse",
+            "unique_id": unique_id,
+            "relation": str(relation or "REFERENCES").upper(),
+            **payload,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _sciverse_catalog_impl(
+    collection: str = "papers",
+    include_sample_values: bool = False,
+) -> str:
+    """Runtime field/operator catalog for meta-search."""
+    from .sources.sciverse import SciverseError, is_configured, meta_catalog
+
+    config = load_config()
+    if not is_configured(config):
+        return _sciverse_unconfigured()
+    try:
+        payload = meta_catalog(
+            collection=collection,
+            include_sample_values=include_sample_values,
+            config=config,
+        )
+    except SciverseError as exc:
+        return json.dumps(exc.to_dict(), ensure_ascii=False)
+    return json.dumps(
+        {"success": True, "source": "sciverse", "collection": collection, **payload},
+        ensure_ascii=False,
+    )
+
+
+def _sciverse_resource_impl(
+    file_name: str,
+    output_dir: str = "",
+) -> str:
+    """Download a figure/table/attachment from Sciverse to disk."""
+    from .sources.sciverse import SciverseError, is_configured, save_resource
+
+    config = load_config()
+    if not is_configured(config):
+        return _sciverse_unconfigured()
+    try:
+        saved = save_resource(file_name, output_dir or "", config=config)
+    except SciverseError as exc:
+        return json.dumps(exc.to_dict(), ensure_ascii=False)
+    return json.dumps(
+        {"success": True, "source": "sciverse", **saved},
+        ensure_ascii=False,
+    )
+
+
+@mcp_app.tool()
+def scansci_pdf_sciverse(
+    action: str = "search",
+    query: str = "",
+    doc_id: str = "",
+    unique_id: str = "",
+    relation: str = "REFERENCES",
+    top_k: int = 10,
+    sub_queries: int = 0,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    lang: str = "",
+    venue: str = "",
+    venue_type: str = "",
+    topic: str = "",
+    topic_domain: str = "",
+    author: str = "",
+    doi: str = "",
+    citation_min: int | None = None,
+    citation_max: int | None = None,
+    doc_ids: list[str] | None = None,
+    filters_json: str = "",
+    sort_json: str = "",
+    fields: list[str] | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    offset: int | None = None,
+    limit: int = 700,
+    file_name: str = "",
+    output_dir: str = "",
+    collection: str = "papers",
+    include_sample_values: bool = False,
+    enrich_dois: bool = False,
+) -> str:
+    """Sciverse: action=search|content|meta_search|relations|resource|catalog (evidence, metadata, citations, figures; needs key)."""
+    if action == "search":
+        return _sciverse_search_impl(
+            query=query,
+            top_k=top_k,
+            sub_queries=sub_queries,
+            year_from=year_from,
+            year_to=year_to,
+            lang=lang,
+            venue=venue,
+            venue_type=venue_type,
+            topic=topic,
+            topic_domain=topic_domain,
+            citation_min=citation_min,
+            citation_max=citation_max,
+            doc_ids=doc_ids,
+            filters_json=filters_json,
+            enrich_dois=enrich_dois,
+        )
+    if action == "content":
+        return _sciverse_content_impl(doc_id=doc_id, offset=offset, limit=limit)
+    if action == "meta_search":
+        return _sciverse_meta_search_impl(
+            query=query,
+            collection=collection,
+            page=page,
+            page_size=page_size,
+            year_from=year_from,
+            year_to=year_to,
+            lang=lang,
+            venue=venue,
+            venue_type=venue_type,
+            topic=topic,
+            topic_domain=topic_domain,
+            author=author,
+            doi=doi,
+            citation_min=citation_min,
+            citation_max=citation_max,
+            doc_ids=doc_ids,
+            filters_json=filters_json,
+            sort_json=sort_json,
+            fields=fields,
+        )
+    if action == "relations":
+        return _sciverse_relations_impl(
+            unique_id=unique_id,
+            relation=relation,
+            page=page,
+            page_size=page_size,
+        )
+    if action == "catalog":
+        return _sciverse_catalog_impl(
+            collection=collection,
+            include_sample_values=include_sample_values,
+        )
+    if action == "resource":
+        return _sciverse_resource_impl(file_name=file_name, output_dir=output_dir)
+    return json.dumps(
+        {
+            "error": f"unknown action: {action}",
+            "allowed": [
+                "search", "content", "meta_search", "relations", "resource", "catalog",
+            ],
+        },
+        ensure_ascii=False,
+    )
 
 
 def scansci_pdf_plan_search(
@@ -541,7 +996,16 @@ def scansci_pdf_health_check(detailed: bool = False) -> str:
         "overall": overall,
         "scihub_enabled": config.get("scihub_enabled", True),
         "checks": checks,
+        "services": {
+            "elsevier_api": "configured" if config.get("elsevier_api_key") else "not_configured",
+            "sciverse": "configured" if config.get("sciverse_api_key") else "not_configured",
+        },
     }
+    if not config.get("sciverse_api_key") and config.get("sciverse_enabled", True):
+        result["recommendations"] = [
+            "Sciverse 未配置：运行 scansci_pdf_sciverse_setup 或 "
+            "scansci-pdf sciverse-setup --token <token> --test，启用语义证据/元数据/引文图谱"
+        ]
 
     if detailed:
         from .domain_db import load_stats
@@ -664,8 +1128,117 @@ def scansci_pdf_auto_setup() -> str:
             "Run scansci_pdf_elsevier_setup to configure (free, recommended)."
         )
 
+    # 6. Check Sciverse API key (optional semantic/metadata layer)
+    from .sources.sciverse import is_configured as sciverse_configured
+    if sciverse_configured(config):
+        report["status"]["sciverse"] = "configured"
+        report["actions"].append(
+            "Sciverse API configured (semantic evidence + metadata search enabled)"
+        )
+    else:
+        report["status"]["sciverse"] = "not_configured"
+        report["actions"].append(
+            "Sciverse API token not set — semantic evidence/metadata/relations disabled "
+            "(downloads unaffected). Run scansci_pdf_sciverse_setup to configure."
+        )
+
     report["summary"] = "Ready to download. Use scansci_pdf_download with a DOI."
     return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+@mcp_app.tool()
+def scansci_pdf_sciverse_setup(token: str = "", test: bool = True) -> str:
+    """Set up the Sciverse API key (opens token console, saves and validates). Adds semantic evidence, metadata search, citation graph, and figure downloads."""
+    import webbrowser
+
+    from .sources.sciverse import TOKEN_URL, key_preview, validate_key
+
+    result: dict[str, Any] = {}
+    config = load_config()
+    supplied = str(token or "").strip()
+
+    if supplied:
+        try:
+            update_config("sciverse_api_key", supplied)
+        except Exception as exc:
+            return json.dumps(
+                {"success": False, "status": "error", "error": f"failed to save token: {exc}"},
+                ensure_ascii=False,
+            )
+        config = load_config()
+        result["saved"] = True
+        result["key_preview"] = key_preview(supplied)
+    elif config.get("sciverse_api_key"):
+        result["key_preview"] = key_preview(config.get("sciverse_api_key"))
+    else:
+        result["status"] = "not_configured"
+        try:
+            webbrowser.open(TOKEN_URL)
+            result["browser_opened"] = True
+        except Exception:
+            result["browser_opened"] = False
+        result["message"] = (
+            "Sciverse API Token 未配置。Sciverse 为检索增加语义证据片段、元数据检索、"
+            "引文图谱和图表下载；不配置不影响现有检索与下载。\n\n"
+            f"1. 浏览器已打开 Sciverse 控制台（如未打开请访问 {TOKEN_URL}）\n"
+            "2. 登录/注册 Sciverse 账号，在「密钥」页面创建 API Token\n"
+            "3. 复制 Token，运行：\n"
+            '   scansci_pdf_sciverse_setup(token="你的Token", test=true)\n'
+            "   或 CLI: scansci-pdf sciverse-setup --token 你的Token --test\n\n"
+            "配置后 scansci_pdf_search 会自动并入 Sciverse；配额紧张可关闭 meta 路：\n"
+            '   scansci_pdf_config(key="sciverse_meta_search_enabled", value="false")'
+        )
+        result["setup_command"] = "scansci-pdf sciverse-setup --token <token> --test"
+        result["capabilities"] = [
+            "semantic evidence chunks (agentic-search)",
+            "structured metadata search (meta-search)",
+            "citations/references/related works",
+            "figures and attachments (resource)",
+        ]
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    result["status"] = "configured"
+    result["enabled"] = bool(config.get("sciverse_enabled", True))
+    result["message"] = "Sciverse API Token 已配置。"
+    if not result["enabled"]:
+        result["message"] += (
+            " 但 sciverse_enabled=false，当前不会调用 Sciverse；运行 "
+            'scansci_pdf_config(key="sciverse_enabled", value="true") 开启。'
+        )
+
+    if test and not result["enabled"]:
+        result["test"] = "disabled"
+    elif test:
+        validation = validate_key(config)
+        result["test"] = validation.get("status")
+        if validation.get("status") == "ok":
+            result["message"] += (
+                f" ✅ 验证通过：meta-catalog 可用（{validation.get('fields', 0)} 个字段）。"
+                " 检索会自动并入语义证据与元数据。"
+            )
+        elif validation.get("status") == "invalid":
+            result["message"] += (
+                " ❌ 验证失败：Token 无效或已过期（HTTP 401）。请重新创建 Token 后重试。"
+            )
+        elif validation.get("status") == "forbidden":
+            result["message"] += (
+                " ⚠️ Token 有效但当前账号缺少 meta-catalog 字段权限（HTTP 403）。"
+                " 可尝试 scansci_pdf_sciverse(action=\"search\")，或联系 Sciverse 开通权限。"
+            )
+        elif validation.get("status") == "rate_limited":
+            result["message"] += " ⚠️ 触发配额（HTTP 429）。Token 本身可能有效，请稍后重试验证。"
+        else:
+            result["message"] += f" ⚠️ 验证请求失败：{validation.get('message', '未知错误')}"
+    else:
+        result["message"] += " 运行 scansci_pdf_sciverse_setup(test=true) 验证 Token 有效性。"
+
+    result["capabilities"] = {
+        "semantic_search": True,
+        "meta_search": bool(config.get("sciverse_meta_search_enabled", True)),
+        "relations": True,
+        "resource": True,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp_app.tool()
@@ -1084,7 +1657,8 @@ def scansci_pdf_carsi_login(publisher: str | None = None) -> str:
     and reused for subsequent downloads. Works with ScienceDirect, Springer, Wiley, etc.
 
     Args:
-        publisher: Publisher key (sciencedirect, springer, wiley, ieee, tandfonline, nature).
+        publisher: Publisher key (sciencedirect, springer, wiley, ieee, tandfonline,
+                   nature, cnki, wanfang, cqvip).
                    Auto-detected from DOI if omitted.
     """
     from .sources.carsi import CARSIClient
@@ -1103,7 +1677,14 @@ def scansci_pdf_carsi_login(publisher: str | None = None) -> str:
         available = list(client._publisher_configs.keys())
         return json.dumps({"success": False, "error": f"Unknown publisher: {target_publisher}", "available": available})
 
-    ok = client.login(target_publisher)
+    if target_publisher in ("cnki", "wanfang", "cqvip"):
+        # Chinese databases redirect to their own portal after the IdP login,
+        # so they use the CN-specific detector rather than the Shibboleth
+        # cookie heuristic.
+        from .sources.cn_databases import _ensure_cn_login
+        ok = _ensure_cn_login(target_publisher, config)
+    else:
+        ok = client.login(target_publisher)
     if ok:
         return json.dumps({"success": True, "message": f"CARSI login successful for {target_publisher}.", "idp": idp_name})
     return json.dumps({"success": False, "error": "Login failed or timed out. Make sure Chrome is installed."})
@@ -1615,7 +2196,22 @@ def scansci_pdf_config(key: str = "", value: str = "", confirmed: bool = False) 
         return _config_set_impl(key=key, value=value, confirmed=confirmed)
     if key:
         cfg = json.loads(scansci_pdf_config_get())
-        return json.dumps({"key": key, "value": cfg.get(key, "(unset)")}, ensure_ascii=False)
+        raw = load_config()
+        configured = bool(str(raw.get(key) or "").strip())
+        value = cfg.get(key, "(unset)")
+        if key in SENSITIVE_KEYS:
+            value = "***" if configured else "(unset)"
+        payload: dict[str, Any] = {
+            "key": key,
+            "value": value,
+            "configured": configured,
+        }
+        if key == "sciverse_api_key" and not configured:
+            payload["setup"] = (
+                "run scansci_pdf_sciverse_setup (opens https://sciverse.space/tokens), "
+                "or CLI: scansci-pdf sciverse-setup --token <token> --test"
+            )
+        return json.dumps(payload, ensure_ascii=False)
     return scansci_pdf_config_get()
 
 

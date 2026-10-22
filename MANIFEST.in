@@ -1,0 +1,2 @@
+# Source distributions ship the .pyx sources, not local build artifacts.
+global-exclude *.pyd *.so *.c *.dat
