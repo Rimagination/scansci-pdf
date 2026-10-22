@@ -60,7 +60,7 @@ npm publish --access public
 
 DSH 的插件管理会把本地目录以 `link:` 方式装进当前 profile，因此**本仓库目录需要保留在原位**（不要只复制 `dsh-plugin/`）。
 
-**方式一：Web UI**
+**方式一：DSH 插件管理界面**
 
 1. 侧边栏 **Plugins** → **Add plugin**
 2. 填入本目录的绝对路径，例如 `D:\path\to\scansci-pdf\dsh-plugin`

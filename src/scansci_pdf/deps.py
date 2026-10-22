@@ -15,9 +15,7 @@ CORE_DEPS = {
     "bs4": "HTML parsing (beautifulsoup4)",
     "mcp": "MCP protocol",
     "typer": "CLI framework",
-    "uvicorn": "ASGI server",
-    "fastapi": "Web UI / HTTP transport",
-    "jinja2": "Web UI templates",
+    "uvicorn": "ASGI server (MCP HTTP transport)",
     "pymupdf": "PDF text extraction (PyMuPDF)",
 }
 
