@@ -64,13 +64,9 @@ DSH 可以直接从插件管理界面安装，不需要手动配置：
 
 安装后会自动注册论文下载和中文清单整理两个技能，通常不需要重启。
 
-### ZCode
+### ZCode / Claude Code / Codex / Cursor
 
-打开插件市场，搜索 **`scansci-pdf`**，点安装即可。
-
-### Claude Code / Codex / Cursor
-
-对 Agent 说：
+对 Agent 说一句话即可：
 
 > 帮我安装或更新这个插件：https://github.com/Rimagination/scansci-pdf
 
