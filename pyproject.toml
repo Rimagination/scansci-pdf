@@ -17,7 +17,11 @@ dependencies = [
     "jinja2>=3.1",
     "pymupdf>=1.24",
     "openpyxl>=3.1",
-    "pymupdf4llm>=0.0.17",
+    # Capped below 2.0: upstream ships pymupdf4llm 2.0 as an *empty* shim for
+    # pymupdf 2.x ("this is an empty package"), so an unbounded floor resolves
+    # to a distribution with no importable module and breaks markdown export on
+    # a stock pymupdf 1.x install.
+    "pymupdf4llm>=0.0.17,<2",
 ]
 
 [project.optional-dependencies]
