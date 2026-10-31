@@ -1,6 +1,6 @@
 {
  "repo": "Rimagination/scansci-pdf",
- "updated": "2026-10-30",
+ "updated": "2026-10-31",
  "stars": 1178,
  "daily": [
   {
@@ -725,6 +725,10 @@
   },
   {
    "date": "2026-10-30",
+   "stars": 1178
+  },
+  {
+   "date": "2026-10-31",
    "stars": 1178
   }
  ]
