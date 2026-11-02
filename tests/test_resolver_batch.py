@@ -224,8 +224,12 @@ def test_title_search_releases_host_slot_on_error(monkeypatch):
     session = _FakeSession()
     session.get = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
     monkeypatch.setattr(network, "_get_session", lambda config: session)
-    monkeypatch.setattr(network, "host_concurrency_acquire", lambda url, config: events.append("acquire"))
-    monkeypatch.setattr(network, "host_concurrency_release", lambda url, config: events.append("release"))
+    def acquire(url, config):
+        events.append("acquire")
+        return object()
+
+    monkeypatch.setattr(network, "host_concurrency_acquire", acquire)
+    monkeypatch.setattr(network, "host_concurrency_release", lambda url, config, lease: events.append("release"))
 
     assert resolver.resolve_title_to_doi("Deep learning", {}) is None
     assert events == ["acquire", "release"]
@@ -277,3 +281,92 @@ def test_custom_worker_count_cannot_bypass_the_openalex_host_cap(monkeypatch):
     resolver.batch_resolve(entries, {}, delay=0, max_workers=8)
 
     assert session.peak == 5
+
+
+def test_host_gate_cold_start_creates_one_gate_and_enforces_custom_cap(monkeypatch):
+    from scansci_pdf import network
+
+    created = []
+    original_gate = network._HostConcurrencyGate
+
+    class SlowGate(original_gate):
+        def __init__(self):
+            created.append(self)
+            time.sleep(0.02)
+            super().__init__()
+
+    monkeypatch.setattr(network, "_HostConcurrencyGate", SlowGate)
+    monkeypatch.setattr(network, "_host_semaphores", {})
+    config = {"host_concurrency": {"api.openalex.org": 1}}
+    state = {"active": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def worker():
+        lease = network.host_concurrency_acquire(resolver._OPENALEX_WORKS_URL, config)
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.02)
+        with lock:
+            state["active"] -= 1
+        network.host_concurrency_release(resolver._OPENALEX_WORKS_URL, config, lease)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(created) == 1
+    assert state["peak"] == 1
+
+
+def test_host_gate_custom_cap_applies_after_default_warmup(monkeypatch):
+    from scansci_pdf import network
+
+    monkeypatch.setattr(network, "_host_semaphores", {})
+    lease = network.host_concurrency_acquire(resolver._OPENALEX_WORKS_URL, {})
+    network.host_concurrency_release(resolver._OPENALEX_WORKS_URL, {}, lease)
+
+    config = {"host_concurrency": {"api.openalex.org": 1}}
+    state = {"active": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def worker():
+        lease = network.host_concurrency_acquire(resolver._OPENALEX_WORKS_URL, config)
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.02)
+        with lock:
+            state["active"] -= 1
+        network.host_concurrency_release(resolver._OPENALEX_WORKS_URL, config, lease)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert state["peak"] == 1
+
+
+def test_host_gate_lower_limit_waits_for_existing_default_request(monkeypatch):
+    from scansci_pdf import network
+
+    monkeypatch.setattr(network, "_host_semaphores", {})
+    default_lease = network.host_concurrency_acquire(resolver._OPENALEX_WORKS_URL, {})
+    acquired = threading.Event()
+    config = {"host_concurrency": {"api.openalex.org": 1}}
+
+    def worker():
+        lease = network.host_concurrency_acquire(resolver._OPENALEX_WORKS_URL, config)
+        acquired.set()
+        network.host_concurrency_release(resolver._OPENALEX_WORKS_URL, config, lease)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert not acquired.wait(0.05)
+    network.host_concurrency_release(resolver._OPENALEX_WORKS_URL, {}, default_lease)
+    assert acquired.wait(1)
+    thread.join()

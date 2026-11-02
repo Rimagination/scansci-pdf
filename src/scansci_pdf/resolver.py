@@ -44,7 +44,7 @@ def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
     if not title or len(title) < 10:
         return None
 
-    host_concurrency_acquire(_OPENALEX_WORKS_URL, config)
+    host_lease = host_concurrency_acquire(_OPENALEX_WORKS_URL, config)
     try:
         session = _get_session(config)
         resp = session.get(
@@ -60,7 +60,7 @@ def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
         log.debug("Title search failed for '%s': %s", title[:50], exc)
         return None
     finally:
-        host_concurrency_release(_OPENALEX_WORKS_URL, config)
+        host_concurrency_release(_OPENALEX_WORKS_URL, config, host_lease)
 
     best_doi = None
     best_score = 0.0
