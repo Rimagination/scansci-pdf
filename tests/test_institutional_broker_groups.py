@@ -12,6 +12,9 @@ from scansci_pdf.identifiers import safe_filename
 from scansci_pdf.institutional import instsci_bridge
 
 
+_REAL_SAVE_PROGRESS = sources._save_progress
+
+
 @pytest.fixture(autouse=True)
 def _no_external_state(monkeypatch):
     monkeypatch.setattr(sources, "_save_progress", lambda *args: None)
@@ -479,3 +482,79 @@ def test_batch_download_passes_explicit_authorization_to_phase_two(monkeypatch, 
 
 def test_instsci_browser_source_uses_the_global_browser_budget():
     assert "InstSci" in sources._BROWSER_SOURCE_LABELS
+
+
+@pytest.mark.parametrize(
+    "profile,alias",
+    [(profile, alias) for profile in publisher_profiles.PUBLISHER_PROFILES.values()
+     for alias in profile.aliases],
+)
+def test_every_legacy_alias_broker_is_discovered(monkeypatch, tmp_path, profile, alias):
+    doi = "10.1/a1"
+    alias_key = session_broker.broker_key(alias.strip().lower().replace(" ", "-"))
+    _profile_inference(monkeypatch, {doi: profile})
+    monkeypatch.setattr(session_broker, "broker_is_running", lambda key: key == alias_key)
+    monkeypatch.setattr(
+        publisher_batch, "PublisherBatchDownloader",
+        lambda **kwargs: pytest.fail("a legacy alias broker must be reused"),
+    )
+    jobs = []
+
+    def submit(**kwargs):
+        jobs.append(kwargs["publisher"])
+        records = [SimpleNamespace(**record) for record in kwargs["records"]]
+        _write_manifest(kwargs["output_dir"], records, success=True)
+        return {}
+
+    monkeypatch.setattr(session_broker, "submit_broker_job", submit)
+    results = {doi: {"success": False}}
+
+    sources._batch_institutional_phase([doi], tmp_path, {}, "batch", results)
+
+    assert jobs == [alias_key]
+    assert results[doi]["success"]
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("late"), RuntimeError("unknown")])
+def test_public_batch_retains_broker_outcome_failures(monkeypatch, tmp_path, failure):
+    from scansci_pdf import identifiers as identifier_module
+
+    doi = "10.1/a1"
+    acs = _profile("ACS")
+    state_dir = tmp_path / "state"
+    batch_id = f"broker-{type(failure).__name__}"
+    monkeypatch.setattr(sources, "DATA_DIR", state_dir)
+    monkeypatch.setattr(sources, "_save_progress", _REAL_SAVE_PROGRESS)
+    monkeypatch.setattr(sources, "load_config", lambda: {
+        "batch_workers": 1,
+        "batch_stagger_seconds": 0,
+        "batch_total_timeout": 5,
+        "output_dir": str(tmp_path),
+    })
+    monkeypatch.setattr(identifier_module, "validate_doi", lambda _doi: (True, ""))
+    _profile_inference(monkeypatch, {doi: acs})
+    monkeypatch.setattr(session_broker, "broker_is_running", lambda _key: True)
+    monkeypatch.setattr(
+        session_broker, "submit_broker_job",
+        lambda **kwargs: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(
+        publisher_batch, "PublisherBatchDownloader",
+        lambda **kwargs: pytest.fail("an unresolved broker outcome must not start direct"),
+    )
+
+    def phase_one_download(_doi, _output_dir, **_kwargs):
+        return {"doi": doi, "identifier": doi, "success": False, "error": "phase one"}
+
+    monkeypatch.setattr(sources, "download", phase_one_download)
+
+    summary = sources.batch_download(
+        [doi], tmp_path, resume=False, batch_id=batch_id,
+    )
+
+    row = summary["results"][0]
+    assert not row["success"]
+    assert "broker job" in row["reason"]
+    assert "suppressed" in row["reason"]
+    progress = (state_dir / "batch_progress" / f"{batch_id}.jsonl").read_text(encoding="utf-8")
+    assert row["reason"] in progress

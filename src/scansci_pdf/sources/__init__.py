@@ -1301,6 +1301,8 @@ def _save_progress(batch_id: str, identifier: str, result: dict[str, Any]) -> No
         "source": result.get("source", "none"),
         "file": result.get("file", ""),
         "doi": result.get("doi", ""),
+        "error": result.get("error", ""),
+        "reason": result.get("reason", ""),
     }
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     with _progress_lock:
@@ -1501,9 +1503,14 @@ def _batch_institutional_phase(
 
         with _get_browser_semaphore(config):
             legacy_key = session_broker.broker_key(profile_name)
+            broker_candidates = [key, legacy_key]
+            broker_candidates.extend(
+                session_broker.broker_key(alias.strip().lower().replace(" ", "-"))
+                for alias in getattr(profile, "aliases", ())
+            )
             active_broker = None
             try:
-                for candidate in dict.fromkeys((key, legacy_key)):
+                for candidate in dict.fromkeys(broker_candidates):
                     if session_broker.broker_is_running(candidate):
                         active_broker = candidate
                         break
@@ -1859,11 +1866,9 @@ def batch_download(
             config, batch_id, phase1_results,
             scihub_enabled=scihub_enabled, use_vpnsci=use_vpnsci,
         )
-        # Update results list with Phase 2 outcomes from progress file
-        phase2_progress = _load_progress(batch_id)
-        for i, ident in enumerate(pending_identifiers):
-            if ident in phase2_progress:
-                results[i] = phase2_progress[ident]
+        # Merge every Phase 2 outcome, including explicit failures that progress
+        # resume intentionally does not retain.
+        results = [phase1_results[ident] for ident in pending_identifiers]
 
     # Reload progress to include newly-saved invalid results
     final_map = _load_progress(batch_id)
