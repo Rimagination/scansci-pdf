@@ -15,47 +15,42 @@ log = logging.getLogger(__name__)
 
 TITLE_SIMILARITY_THRESHOLD = 0.75
 
-# `api.openalex.org` is capped at 5 concurrent requests by
-# `network._DEFAULT_HOST_CONCURRENCY`. That cap is only enforced inside
-# `network.fetch`, and routing the resolver through `fetch` would also inherit
-# its 0.5 s domain spacing -- slower than the 0.3 s budget the serial loop
-# already spends, which is exactly the trade the maintainer rejected on #72.
-# So the worker count is a promise made here instead: 4 stays under the
-# published cap by construction.
+# Keep the resolver's 0.3 s spacing independent from network.fetch's 0.5 s
+# domain spacing. The host semaphore is shared process-wide, so concurrent
+# batches and custom worker counts cannot exceed OpenAlex's configured cap.
 BATCH_RESOLVE_WORKERS = 4
+_OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 
 
-def _title_search_params(title: str, config: dict[str, Any]) -> dict[str, Any]:
-    """Query parameters for the OpenAlex title search.
+def _title_search_params(title: str) -> dict[str, Any]:
+    return {"search": title, "per_page": 5}
 
-    Unauthenticated OpenAlex traffic defaults to roughly 1 request/s since the
-    mailto polite pool was retired (2026-02), so a concurrent resolver that
-    sends neither `mailto` nor `api_key` collects 429s the serial one did not
-    (#72 item 6). `email` is the same key `pipeline._enrich_oa` already uses.
-    """
-    params: dict[str, Any] = {"search": title, "per_page": 5}
-    email = str(config.get("email") or "").strip()
-    if email:
-        params["mailto"] = email
+
+def _title_search_headers(config: dict[str, Any]) -> dict[str, str]:
     api_key = str(config.get("openalex_api_key") or "").strip()
-    if api_key:
-        params["api_key"] = api_key
-    return params
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
 def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
     """Search OpenAlex by title and return best-matching DOI."""
-    from .network import _get_session, request_timeout
+    from .network import (
+        _get_session,
+        host_concurrency_acquire,
+        host_concurrency_release,
+        request_timeout,
+    )
     from .search import _reconstruct_abstract
 
     if not title or len(title) < 10:
         return None
 
+    host_concurrency_acquire(_OPENALEX_WORKS_URL, config)
     try:
         session = _get_session(config)
         resp = session.get(
-            "https://api.openalex.org/works",
-            params=_title_search_params(title, config),
+            _OPENALEX_WORKS_URL,
+            params=_title_search_params(title),
+            headers=_title_search_headers(config),
             timeout=request_timeout(config),
         )
         if resp.status_code != 200:
@@ -64,6 +59,8 @@ def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
     except Exception as exc:
         log.debug("Title search failed for '%s': %s", title[:50], exc)
         return None
+    finally:
+        host_concurrency_release(_OPENALEX_WORKS_URL, config)
 
     best_doi = None
     best_score = 0.0
@@ -90,12 +87,12 @@ def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
 class _SpacingGate:
     """Aggregate spacing for a pool of workers, with the sleep outside the lock.
 
-    The serial loop this replaces slept `delay` seconds between requests, so
-    the batch spent one request per `delay`. Sleeping per worker instead would
-    multiply that rate by the worker count, which is the one thing a
-    performance fix must not do to a rate-limited API. Each caller therefore
-    reserves a slot under the lock and sleeps until its own slot -- the batch
-    keeps the serial rate, only the waiting overlaps.
+    The serial loop slept `delay` after each round trip, so its achieved rate
+    was `1 / (delay + latency)`. Reserving one start slot per `delay` restores
+    the intended budget while overlapping the round trips; it does not preserve
+    the lower achieved rate. Per-worker sleeps would instead multiply the
+    budget by the worker count. Each caller reserves under the lock and sleeps
+    after releasing it.
 
     `clock` and `sleep` are injectable so the reservation order can be tested
     without real time passing.
@@ -133,10 +130,11 @@ def batch_resolve(
 ) -> dict[str, Any]:
     """Batch resolve: fix DOI format + search by title for missing DOIs.
 
-    The title searches run on `max_workers` threads under one `_SpacingGate`,
-    so the aggregate request rate is the one the serial loop spent while the
-    round trips overlap (#72 item 6). Entries are mutated in place, which keeps
-    the output order identical to the input order without a reorder step.
+    The title searches run on `max_workers` threads under one `_SpacingGate`.
+    Start reservations retain the intended `1 / delay` budget while round trips
+    overlap; `resolve_title_to_doi` separately enforces the process-wide host
+    concurrency cap (#72 item 6). Entries are mutated in place, which keeps the
+    output order identical to the input order without a reorder step.
 
     Returns dict with 'entries' (resolved list) and 'stats'.
     """

@@ -1,9 +1,8 @@
-"""Batch title resolution: overlap the round trips, keep the request rate.
+"""Batch title resolution: overlap round trips within explicit API boundaries.
 
-#72 item 6. The serial loop spent one OpenAlex search per `delay`; the fix is
-to overlap the waiting, not to raise the rate. These tests pin both halves:
-the spacing gate stays aggregate (concurrency cannot multiply it), and the
-batch still returns entries in input order with the same stats.
+#72 item 6. Start reservations retain the intended aggregate spacing while a
+process-wide semaphore caps actual OpenAlex requests across batches. Entries
+keep their input order and stats, and credentials stay out of query strings.
 """
 
 from __future__ import annotations
@@ -163,7 +162,7 @@ def test_batch_resolve_single_entry_still_resolves(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 3. the request identifies itself, or the concurrent version collects 429s
+# 3. credentials stay in headers and the host cap covers every batch
 # --------------------------------------------------------------------------- #
 
 
@@ -187,7 +186,7 @@ class _FakeSession:
         return _FakeResponse()
 
 
-def test_title_search_sends_mailto_and_api_key(monkeypatch):
+def test_title_search_sends_bearer_key_without_query_credentials(monkeypatch):
     from scansci_pdf import network
 
     session = _FakeSession()
@@ -199,11 +198,9 @@ def test_title_search_sends_mailto_and_api_key(monkeypatch):
     )
 
     assert doi == "10.1038/nature14539"
-    params = session.calls[0]["params"]
-    assert params["search"] == "Deep learning"
-    assert params["per_page"] == 5
-    assert params["mailto"] == "someone@example.org"
-    assert params["api_key"] == "key-123"
+    call = session.calls[0]
+    assert call["params"] == {"search": "Deep learning", "per_page": 5}
+    assert call["headers"] == {"Authorization": "Bearer key-123"}
 
 
 def test_title_search_omits_empty_credentials(monkeypatch):
@@ -212,8 +209,71 @@ def test_title_search_omits_empty_credentials(monkeypatch):
     session = _FakeSession()
     monkeypatch.setattr(network, "_get_session", lambda config: session)
 
-    resolver.resolve_title_to_doi("Deep learning", {})
+    resolver.resolve_title_to_doi("Deep learning", {"email": "scansci-pdf@example.invalid"})
 
-    params = session.calls[0]["params"]
-    assert "mailto" not in params
-    assert "api_key" not in params
+    call = session.calls[0]
+    assert "api_key" not in call["params"]
+    assert "mailto" not in call["params"]
+    assert call["headers"] == {}
+
+
+def test_title_search_releases_host_slot_on_error(monkeypatch):
+    from scansci_pdf import network
+
+    events: list[str] = []
+    session = _FakeSession()
+    session.get = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+    monkeypatch.setattr(network, "_get_session", lambda config: session)
+    monkeypatch.setattr(network, "host_concurrency_acquire", lambda url, config: events.append("acquire"))
+    monkeypatch.setattr(network, "host_concurrency_release", lambda url, config: events.append("release"))
+
+    assert resolver.resolve_title_to_doi("Deep learning", {}) is None
+    assert events == ["acquire", "release"]
+
+
+class _TrackingSession:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active = 0
+        self.peak = 0
+
+    def get(self, url, **kwargs):
+        with self._lock:
+            self._active += 1
+            self.peak = max(self.peak, self._active)
+        try:
+            time.sleep(0.05)
+            return _FakeResponse()
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
+def _tracking_session(monkeypatch) -> _TrackingSession:
+    from scansci_pdf import network
+
+    session = _TrackingSession()
+    monkeypatch.setattr(network, "_get_session", lambda config: session)
+    monkeypatch.setattr(network, "_host_semaphores", {})
+    return session
+
+
+def test_concurrent_batches_share_the_openalex_host_cap(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    session = _tracking_session(monkeypatch)
+    batches = [[_entry("Deep learning") for _ in range(8)] for _ in range(2)]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda entries: resolver.batch_resolve(entries, {}, delay=0), batches))
+
+    assert session.peak == 5
+
+
+def test_custom_worker_count_cannot_bypass_the_openalex_host_cap(monkeypatch):
+    session = _tracking_session(monkeypatch)
+    entries = [_entry("Deep learning") for _ in range(8)]
+
+    resolver.batch_resolve(entries, {}, delay=0, max_workers=8)
+
+    assert session.peak == 5
