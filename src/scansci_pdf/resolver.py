@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -12,6 +14,33 @@ from .paperlist import PaperEntry
 log = logging.getLogger(__name__)
 
 TITLE_SIMILARITY_THRESHOLD = 0.75
+
+# `api.openalex.org` is capped at 5 concurrent requests by
+# `network._DEFAULT_HOST_CONCURRENCY`. That cap is only enforced inside
+# `network.fetch`, and routing the resolver through `fetch` would also inherit
+# its 0.5 s domain spacing -- slower than the 0.3 s budget the serial loop
+# already spends, which is exactly the trade the maintainer rejected on #72.
+# So the worker count is a promise made here instead: 4 stays under the
+# published cap by construction.
+BATCH_RESOLVE_WORKERS = 4
+
+
+def _title_search_params(title: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Query parameters for the OpenAlex title search.
+
+    Unauthenticated OpenAlex traffic defaults to roughly 1 request/s since the
+    mailto polite pool was retired (2026-02), so a concurrent resolver that
+    sends neither `mailto` nor `api_key` collects 429s the serial one did not
+    (#72 item 6). `email` is the same key `pipeline._enrich_oa` already uses.
+    """
+    params: dict[str, Any] = {"search": title, "per_page": 5}
+    email = str(config.get("email") or "").strip()
+    if email:
+        params["mailto"] = email
+    api_key = str(config.get("openalex_api_key") or "").strip()
+    if api_key:
+        params["api_key"] = api_key
+    return params
 
 
 def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
@@ -26,7 +55,7 @@ def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
         session = _get_session(config)
         resp = session.get(
             "https://api.openalex.org/works",
-            params={"search": title, "per_page": 5},
+            params=_title_search_params(title, config),
             timeout=request_timeout(config),
         )
         if resp.status_code != 200:
@@ -58,48 +87,91 @@ def resolve_title_to_doi(title: str, config: dict[str, Any]) -> str | None:
     return None
 
 
+class _SpacingGate:
+    """Aggregate spacing for a pool of workers, with the sleep outside the lock.
+
+    The serial loop this replaces slept `delay` seconds between requests, so
+    the batch spent one request per `delay`. Sleeping per worker instead would
+    multiply that rate by the worker count, which is the one thing a
+    performance fix must not do to a rate-limited API. Each caller therefore
+    reserves a slot under the lock and sleeps until its own slot -- the batch
+    keeps the serial rate, only the waiting overlaps.
+
+    `clock` and `sleep` are injectable so the reservation order can be tested
+    without real time passing.
+    """
+
+    def __init__(self, spacing: float, *, clock=time.monotonic, sleep=time.sleep):
+        self._spacing = max(0.0, float(spacing))
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    @property
+    def spacing(self) -> float:
+        return self._spacing
+
+    def wait(self) -> None:
+        if self._spacing <= 0:
+            return
+        with self._lock:
+            now = self._clock()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + self._spacing
+        pause = slot - self._clock()
+        if pause > 0:
+            self._sleep(pause)
+
+
 def batch_resolve(
     entries: list[PaperEntry],
     config: dict[str, Any],
     delay: float = 0.3,
+    *,
+    max_workers: int = BATCH_RESOLVE_WORKERS,
 ) -> dict[str, Any]:
     """Batch resolve: fix DOI format + search by title for missing DOIs.
+
+    The title searches run on `max_workers` threads under one `_SpacingGate`,
+    so the aggregate request rate is the one the serial loop spent while the
+    round trips overlap (#72 item 6). Entries are mutated in place, which keeps
+    the output order identical to the input order without a reorder step.
 
     Returns dict with 'entries' (resolved list) and 'stats'.
     """
     total = len(entries)
-    fixed_unicode = 0
-    resolved_by_title = 0
-    already_has_doi = 0
-    unresolvable = 0
+    already_has_doi = sum(1 for entry in entries if entry.doi)
+    no_title = sum(1 for entry in entries if not entry.doi and not entry.title)
+    pending = [(index, entry) for index, entry in enumerate(entries) if not entry.doi and entry.title]
 
-    for i, entry in enumerate(entries):
-        if entry.doi:
-            already_has_doi += 1
-            continue
+    gate = _SpacingGate(delay)
+    resolved = [False] * len(pending)
 
-        if not entry.title:
-            unresolvable += 1
-            continue
-
-        # Search by title
+    def _resolve_one(slot: int, entry: PaperEntry) -> None:
+        gate.wait()
         doi = resolve_title_to_doi(entry.title, config)
         if doi:
             entry.doi = doi
-            resolved_by_title += 1
-        else:
-            unresolvable += 1
+            resolved[slot] = True
 
-        # Rate limit for OpenAlex API
-        if delay > 0 and i < total - 1:
-            time.sleep(delay)
+    workers = min(max(1, int(max_workers)), len(pending))
+    if workers <= 1:
+        for slot, (_, entry) in enumerate(pending):
+            _resolve_one(slot, entry)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_resolve_one, slot, entry) for slot, (_, entry) in enumerate(pending)]
+            for future in futures:
+                future.result()
 
+    resolved_by_title = sum(resolved)
     return {
         "entries": entries,
         "stats": {
             "total": total,
             "already_has_doi": already_has_doi,
             "resolved_by_title": resolved_by_title,
-            "unresolvable": unresolvable,
+            "unresolvable": no_title + (len(pending) - resolved_by_title),
         },
     }
