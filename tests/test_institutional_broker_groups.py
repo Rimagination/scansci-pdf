@@ -21,7 +21,7 @@ def _no_external_state(monkeypatch):
 
 
 def _profile(name):
-    return SimpleNamespace(name=name)
+    return publisher_profiles.get_publisher_profile(name)
 
 
 def _profile_inference(monkeypatch, by_doi=None, by_url=None):
@@ -74,11 +74,12 @@ class _DirectDownloader:
         self.profile = profile
 
     def run_records(self, records, run_dir, *, retry_failed, concurrency, report_progress):
-        key = session_broker.broker_key(self.profile.name)
+        key = publisher_profiles.publisher_profile_key(self.profile)
         with self.lock:
             type(self).calls.append({
                 "key": key,
                 "dois": [record.doi for record in records],
+                "run_dir": str(run_dir),
                 "concurrency": concurrency,
                 "report_progress": report_progress,
             })
@@ -172,7 +173,8 @@ def test_broker_failure_uses_one_direct_session_and_reports_browser(monkeypatch,
     acs = _profile("ACS")
     dois = ["10.1/a1", "10.1/a2"]
     _profile_inference(monkeypatch, {doi: acs for doi in dois})
-    monkeypatch.setattr(session_broker, "broker_is_running", lambda _key: True)
+    broker_states = iter([True, False])
+    monkeypatch.setattr(session_broker, "broker_is_running", lambda _key: next(broker_states, False))
     monkeypatch.setattr(
         session_broker, "submit_broker_job",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker stopped")),
@@ -208,6 +210,7 @@ def test_broker_failures_retry_only_the_failed_subset_directly(monkeypatch, tmp_
         manifest[1]["status"] = "failed"
         manifest[1]["reason"] = "transient"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return {}
 
     monkeypatch.setattr(session_broker, "submit_broker_job", submit)
     direct_calls = []
@@ -290,3 +293,189 @@ def test_run_records_progress_opt_out_preserves_the_default(monkeypatch, tmp_pat
     downloader.run_records([], tmp_path / "default")
     assert events == ["start", "finish"]
     assert downloader._progress_active is False
+
+
+@pytest.mark.parametrize("key,profile", list(publisher_profiles.PUBLISHER_PROFILES.items()))
+def test_broker_key_is_the_canonical_registry_key(key, profile):
+    assert publisher_profiles.publisher_profile_key(profile) == key
+
+
+def test_same_key_is_serialized_across_batches_and_run_dirs_are_unique(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    acs = _profile("ACS")
+    dois = ["10.1/a1", "10.1/a2"]
+    _profile_inference(monkeypatch, {doi: acs for doi in dois})
+    _DirectDownloader.reset()
+    monkeypatch.setattr(publisher_batch, "PublisherBatchDownloader", _DirectDownloader)
+
+    def run(_):
+        results = {doi: {"success": False} for doi in dois}
+        sources._batch_institutional_phase(
+            dois, tmp_path,
+            {"institutional_workers": 2, "max_browser_workers": 2},
+            "batch", results,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(run, range(2)))
+
+    assert len(_DirectDownloader.calls) == 2
+    assert _DirectDownloader.peak == 1
+    assert len({call["run_dir"] for call in _DirectDownloader.calls}) == 2
+
+
+def test_broker_timeout_never_overlaps_a_direct_or_per_doi_fallback(monkeypatch, tmp_path):
+    acs = _profile("ACS")
+    doi = "10.1/a1"
+    _profile_inference(monkeypatch, {doi: acs})
+    monkeypatch.setattr(session_broker, "broker_is_running", lambda _key: True)
+    monkeypatch.setattr(
+        session_broker, "submit_broker_job",
+        lambda **kwargs: (_ for _ in ()).throw(TimeoutError("late job")),
+    )
+    monkeypatch.setattr(
+        publisher_batch, "PublisherBatchDownloader",
+        lambda **kwargs: pytest.fail("a timed-out broker job may still be active"),
+    )
+    monkeypatch.setattr(
+        sources, "download",
+        lambda *args, **kwargs: pytest.fail("a timed-out broker job must not fall back"),
+    )
+    results = {doi: {"success": False}}
+
+    sources._batch_institutional_phase([doi], tmp_path, {}, "batch", results)
+
+    assert not results[doi]["success"]
+    assert "suppressed" in results[doi]["reason"]
+
+
+def test_broker_discovery_error_still_uses_direct_fallback(monkeypatch, tmp_path):
+    acs = _profile("ACS")
+    doi = "10.1/a1"
+    _profile_inference(monkeypatch, {doi: acs})
+    monkeypatch.setattr(
+        session_broker, "broker_is_running",
+        lambda _key: (_ for _ in ()).throw(ValueError("bad pid")),
+    )
+    _DirectDownloader.reset()
+    monkeypatch.setattr(publisher_batch, "PublisherBatchDownloader", _DirectDownloader)
+
+    sources._batch_institutional_phase([doi], tmp_path, {}, "batch", {doi: {"success": False}})
+
+    assert len(_DirectDownloader.calls) == 1
+
+
+def test_bad_manifest_fields_reach_the_per_doi_fallback(monkeypatch, tmp_path):
+    acs = _profile("ACS")
+    doi = "10.1/a1"
+    _profile_inference(monkeypatch, {doi: acs})
+
+    class BadManifest:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_records(self, records, run_dir, **_kwargs):
+            complete = run_dir / "complete"
+            complete.mkdir(parents=True, exist_ok=True)
+            (complete / "manifest.json").write_text(json.dumps([
+                {"doi": doi, "status": "success", "pdf_path": 1}
+            ]), encoding="utf-8")
+
+    monkeypatch.setattr(publisher_batch, "PublisherBatchDownloader", BadManifest)
+    attempted = []
+
+    def fallback(fallback_doi, *_args, **_kwargs):
+        attempted.append(fallback_doi)
+        return {"doi": fallback_doi, "identifier": fallback_doi, "success": False}
+
+    monkeypatch.setattr(sources, "download", fallback)
+
+    sources._batch_institutional_phase([doi], tmp_path, {}, "batch", {doi: {"success": False}})
+
+    assert attempted == [doi]
+
+
+def test_legacy_display_name_broker_state_remains_compatible(monkeypatch, tmp_path):
+    profile = _profile("Springer Nature")
+    doi = "10.1/s1"
+    _profile_inference(monkeypatch, {doi: profile})
+    monkeypatch.setattr(
+        session_broker, "broker_is_running", lambda key: key == "springer-nature"
+    )
+    jobs = []
+
+    def submit(**kwargs):
+        jobs.append(kwargs["publisher"])
+        records = [SimpleNamespace(**record) for record in kwargs["records"]]
+        _write_manifest(kwargs["output_dir"], records, success=True)
+        return {}
+
+    monkeypatch.setattr(session_broker, "submit_broker_job", submit)
+    results = {doi: {"success": False}}
+
+    sources._batch_institutional_phase([doi], tmp_path, {}, "batch", results)
+
+    assert jobs == ["springer-nature"]
+    assert results[doi]["source"].split(":")[1] == "broker"
+
+
+def test_unresolved_fallback_preserves_explicit_authorization(monkeypatch, tmp_path):
+    doi = "10.9/x1"
+    _profile_inference(monkeypatch)
+    monkeypatch.setattr(instsci_bridge, "_resolve_doi", lambda _doi: None)
+    captured = {}
+
+    def fallback(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"doi": doi, "identifier": doi, "success": False}
+
+    monkeypatch.setattr(sources, "download", fallback)
+
+    sources._batch_institutional_phase(
+        [doi], tmp_path, {"scihub_enabled": True}, "batch", {doi: {"success": False}},
+        scihub_enabled=False, use_vpnsci=False,
+    )
+
+    assert captured["scihub_enabled"] is False
+    assert captured["use_vpnsci"] is False
+
+
+def test_batch_download_passes_explicit_authorization_to_phase_two(monkeypatch, tmp_path):
+    from scansci_pdf import identifiers as identifier_module
+
+    doi = "10.1/a1"
+    monkeypatch.setattr(sources, "load_config", lambda: {
+        "batch_workers": 1,
+        "batch_stagger_seconds": 0,
+        "batch_total_timeout": 5,
+        "output_dir": str(tmp_path),
+    })
+    monkeypatch.setattr(identifier_module, "validate_doi", lambda _doi: (True, ""))
+    monkeypatch.setattr(sources, "_load_progress", lambda _batch_id: {})
+    monkeypatch.setattr(sources, "_write_download_results", lambda *args, **kwargs: None)
+    phase_one = {}
+
+    def phase_one_download(_doi, _output_dir, **kwargs):
+        phase_one.update(kwargs)
+        return {"doi": doi, "identifier": doi, "success": False, "error": "phase one"}
+
+    monkeypatch.setattr(sources, "download", phase_one_download)
+    phase_two = {}
+    monkeypatch.setattr(
+        sources, "_batch_institutional_phase",
+        lambda *args, **kwargs: phase_two.update(kwargs),
+    )
+
+    sources.batch_download(
+        [doi], tmp_path, resume=False, scihub_enabled=False, use_vpnsci=False,
+    )
+
+    assert phase_one["scihub_enabled"] is False
+    assert phase_one["use_vpnsci"] is False
+    assert phase_two["scihub_enabled"] is False
+    assert phase_two["use_vpnsci"] is False
+
+
+def test_instsci_browser_source_uses_the_global_browser_budget():
+    assert "InstSci" in sources._BROWSER_SOURCE_LABELS
