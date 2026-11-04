@@ -634,7 +634,10 @@ def papers(
 ):
     """Recommended browser workflow for closed-access publisher PDFs."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
-    from .publisher_profiles import get_publisher_profile, infer_publisher_profile, list_publisher_profiles
+    from .publisher_profiles import (
+        get_publisher_profile, infer_publisher_profile, list_publisher_profiles,
+        publisher_profile_key,
+    )
 
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
@@ -675,8 +678,7 @@ def papers(
     _bp = cfg.get("chrome_profile_dir", "")
     console.print(f"[bold]Browser profile:[/bold] {_bp}")
 
-    profile_key_arg = publisher.strip().lower().replace(" ", "-")
-    broker_publisher = profile_key_arg if profile_key_arg != "auto" else profile.name.lower().replace(" ", "-")
+    broker_publisher = publisher_profile_key(profile)
     if broker:
         from . import session_broker
 

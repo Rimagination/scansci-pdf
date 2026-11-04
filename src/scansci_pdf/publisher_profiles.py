@@ -873,6 +873,14 @@ _PROFILE_ALIASES = {
 }
 
 
+def publisher_profile_key(profile: PublisherProfile) -> str:
+    """Return the registry key used by CLI workflows and session brokers."""
+    for key, candidate in PUBLISHER_PROFILES.items():
+        if candidate is profile:
+            return key
+    raise ValueError(f"Unregistered publisher profile '{profile.name}'")
+
+
 def list_publisher_profiles() -> list[str]:
     """Return stable publisher profile keys available to deterministic workflows."""
     return sorted(PUBLISHER_PROFILES)

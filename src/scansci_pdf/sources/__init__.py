@@ -69,7 +69,7 @@ _BROWSER_SOURCE_LABELS = frozenset({
     "TandFBrowser", "IOPBrowser", "OxfordBrowser", "ACMBrowser",
     "NatureBrowser", "ScienceBrowser", "SAGEBrowser", "ASCEBrowser",
     "RoyalSocietyBrowser", "CopernicusDirect",
-    "GenericBrowser", "WebVPN", "CARSI", "EZProxy",
+    "GenericBrowser", "WebVPN", "CARSI", "EZProxy", "InstSci",
     # CNKI/VIP need a visible browser for CARSI login / download clicks;
     # Wanfang and NCPSSD are pure HTTP but share the same lane label.
     "CNDatabase", "CNKI", "Wanfang", "VIP",
@@ -131,6 +131,21 @@ def _get_browser_semaphore(config: dict[str, Any]) -> threading.Semaphore:
             if _browser_semaphore is None:
                 _browser_semaphore = threading.Semaphore(max_workers)
     return _browser_semaphore
+
+
+_institutional_key_locks: dict[str, threading.Lock] = {}
+_institutional_key_locks_lock = threading.Lock()
+
+
+def _institutional_key_lock(key: str) -> threading.Lock:
+    with _institutional_key_locks_lock:
+        lock = _institutional_key_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _institutional_key_locks[key] = lock
+        return lock
+
+
 from .carsi_source import try_carsi
 
 __all__ = ["download", "batch_download"]
@@ -1301,6 +1316,8 @@ def _save_progress(batch_id: str, identifier: str, result: dict[str, Any]) -> No
         "source": result.get("source", "none"),
         "file": result.get("file", ""),
         "doi": result.get("doi", ""),
+        "error": result.get("error", ""),
+        "reason": result.get("reason", ""),
     }
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     with _progress_lock:
@@ -1340,7 +1357,7 @@ def _clear_progress(batch_id: str) -> None:
 
 
 def _publisher_result_to_standard(
-    result: Any, doi: str, output_dir: Path, publisher_name: str
+    result: Any, doi: str, output_dir: Path, publisher_name: str, transport: str = "browser"
 ) -> dict[str, Any]:
     """Convert a PublisherBatchDownloader DownloadResult to the standard result format."""
     if result.ok and result.pdf_path:
@@ -1356,7 +1373,7 @@ def _publisher_result_to_standard(
             dst = src
         return {
             "success": True, "doi": doi, "identifier": doi,
-            "file": str(dst), "source": f"institutional:browser:{publisher_name}",
+            "file": str(dst), "source": f"institutional:{transport}:{publisher_name}",
             "full_text_length": result.text_length,
         }
     return fail(doi, result.reason or "institutional download failed")
@@ -1368,14 +1385,19 @@ def _batch_institutional_phase(
     config: dict[str, Any],
     batch_id: str,
     results_map: dict[str, dict[str, Any]],
+    *,
+    scihub_enabled: bool | None = None,
+    use_vpnsci: bool = True,
 ) -> None:
-    """Phase 2 for batch downloads: group DOIs by publisher, batch-download per group.
-
-    Modifies results_map in-place with successful results.
-    """
+    """Group phase-2 DOIs by broker key and keep each key on one browser session."""
     try:
-        from ..institutional.publisher_profiles import infer_publisher_profile
-        from ..institutional.publisher_batch import DownloadResult, PaperRecord, PublisherBatchDownloader
+        from .. import session_broker
+        from ..institutional.publisher_profiles import (
+            infer_publisher_profile,
+            infer_publisher_profile_from_url,
+            publisher_profile_key,
+        )
+        from ..institutional.publisher_batch import PaperRecord, PublisherBatchDownloader
     except ImportError:
         log.info("   [Batch] publisher_batch not available, skipping institutional phase")
         return
@@ -1390,105 +1412,224 @@ def _batch_institutional_phase(
         log.info("   [Batch] no browser backend available, skipping institutional phase")
         return
 
-    # Group DOIs by publisher profile
-    grouped: dict[str, list[str]] = {}  # profile_name -> [doi, ...]
+    def _local_cache(doi: str) -> dict[str, Any] | None:
+        safe_name = safe_filename(doi)
+        for path in output_dir.glob(f"{safe_name}*.pdf"):
+            if path.stat().st_size > 5000:
+                return {
+                    "success": True, "doi": doi, "identifier": doi,
+                    "file": str(path), "source": "local_cache",
+                }
+        return None
+
+    grouped: dict[str, dict[str, Any]] = {}
     ungrouped: list[str] = []
+
+    def _add_to_group(profile: Any, doi: str) -> None:
+        key = publisher_profile_key(profile)
+        group = grouped.setdefault(key, {"profile": profile, "dois": []})
+        group["dois"].append(doi)
+
     for doi in failed_dois:
         profile = infer_publisher_profile(doi)
         if profile:
-            grouped.setdefault(profile.name, []).append(doi)
+            _add_to_group(profile, doi)
         else:
             ungrouped.append(doi)
+
+    if ungrouped:
+        from ..institutional.instsci_bridge import _resolve_doi
+
+        needs_resolution: list[str] = []
+        for doi in ungrouped:
+            cached = _local_cache(doi)
+            if cached:
+                results_map[doi] = cached
+                _save_progress(batch_id, doi, cached)
+            else:
+                needs_resolution.append(doi)
+
+        ungrouped = []
+        if needs_resolution:
+            with ThreadPoolExecutor(max_workers=min(2, len(needs_resolution))) as pool:
+                resolved_urls = list(pool.map(_resolve_doi, needs_resolution))
+            for doi, resolved_url in zip(needs_resolution, resolved_urls):
+                profile = infer_publisher_profile_from_url(resolved_url) if resolved_url else None
+                if profile:
+                    _add_to_group(profile, doi)
+                else:
+                    ungrouped.append(doi)
 
     if not grouped and not ungrouped:
         return
 
     institution_query = config.get("vpnsci_school", "")
-    login_timeout = config.get("browser_login_timeout", 300)
+    login_timeout = int(config.get("browser_login_timeout", 300))
+    post_login_hold = int(config.get("post_login_hold", 0))
+    workers_inst = max(1, min(int(config.get("institutional_workers", 1) or 1), 2))
 
-    # Process each publisher group
-    for profile_name, dois in grouped.items():
-        profile = infer_publisher_profile(dois[0])
-        if not profile:
-            ungrouped.extend(dois)
-            continue
-
-        log.info(f"   [Batch] Phase 2: {len(dois)} DOIs via {profile_name} (one login)")
-
-        records = [PaperRecord(doi=doi) for doi in dois]
-        run_dir = output_dir / ".publisher_runs" / profile_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        downloader = PublisherBatchDownloader(
-            config=config,
-            profile=profile,
-            institution_query=institution_query,
-            login_timeout_sec=login_timeout,
-            pdf_timeout_sec=60,
-            post_login_hold_sec=config.get("post_login_hold", 0),
-            post_run_hold_sec=0,
-            # The institutional phase logs in by hand (SSO/2FA), so the browser
-            # must stay visible whatever browser_headless says.
-            require_interactive_browser=True,
-        )
-
-        try:
-            summary = downloader.run_records(records, run_dir, retry_failed=True)
-        except Exception as e:
-            log.info(f"   [Batch] {profile_name} batch failed: {e}")
-            ungrouped.extend(dois)
-            continue
-
-        # Map DOIs to results from the manifest
+    def _manifest_results(
+        profile_name: str, dois: list[str], run_dir: Path, transport: str
+    ) -> dict[str, dict[str, Any]]:
         manifest_path = run_dir / "complete" / "manifest.json"
-        if manifest_path.exists():
-            try:
-                import json
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                doi_to_manifest = {entry.get("doi", ""): entry for entry in manifest}
-                for doi in dois:
-                    entry = doi_to_manifest.get(doi, {})
-                    if entry.get("status") == "success":
-                        pdf_path = entry.get("pdf_path", "")
-                        if pdf_path and Path(pdf_path).exists():
-                            result = _publisher_result_to_standard(
-                                type("R", (), {"ok": True, "pdf_path": pdf_path, "text_length": 0})(),
-                                doi, output_dir, profile_name,
-                            )
-                        else:
-                            result = fail(doi, "PDF not found after batch download")
+        if not manifest_path.exists():
+            return {}
+        rows: dict[str, dict[str, Any]] = {}
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, list):
+                raise TypeError("manifest must be a list")
+            doi_to_manifest = {}
+            for entry in manifest:
+                if not isinstance(entry, dict):
+                    raise TypeError("manifest entries must be objects")
+                doi_to_manifest[str(entry.get("doi", ""))] = entry
+            for doi in dois:
+                entry = doi_to_manifest.get(doi, {})
+                if entry.get("status") == "success":
+                    pdf_path = entry.get("pdf_path", "")
+                    if not isinstance(pdf_path, str):
+                        raise TypeError("manifest pdf_path must be a string")
+                    if pdf_path and Path(pdf_path).exists():
+                        rows[doi] = _publisher_result_to_standard(
+                            type("R", (), {"ok": True, "pdf_path": pdf_path, "text_length": 0})(),
+                            doi, output_dir, profile_name, transport,
+                        )
                     else:
-                        result = fail(doi, entry.get("reason", "institutional download failed"))
-                    results_map[doi] = result
-                    _save_progress(batch_id, doi, result)
-            except Exception as e:
-                log.info(f"   [Batch] Failed to parse manifest for {profile_name}: {e}")
-                ungrouped.extend(dois)
-        else:
-            log.info(f"   [Batch] No manifest found for {profile_name}")
-            ungrouped.extend(dois)
+                        rows[doi] = fail(doi, "PDF not found after batch download")
+                else:
+                    rows[doi] = fail(doi, entry.get("reason", "institutional download failed"))
+        except Exception as exc:
+            log.info(f"   [Batch] Failed to consume manifest for {profile_name}: {exc}")
+            return {doi: row for doi, row in rows.items() if row.get("success")}
+        return rows
 
-    # Fallback: ungrouped DOIs get per-DOI institutional access
+    def _run_group(key: str, profile: Any, dois: list[str]) -> dict[str, dict[str, Any]]:
+        from uuid import uuid4
+
+        profile_name = profile.name
+        log.info(f"   [Batch] Phase 2: {len(dois)} DOIs via {profile_name} (one session)")
+        records = [PaperRecord(doi=doi) for doi in dois]
+        run_root = output_dir / ".publisher_runs" / profile_name / uuid4().hex
+        broker_dir = run_root / "broker"
+        direct_dir = run_root / "browser"
+        run_root.mkdir(parents=True, exist_ok=True)
+        broker_rows: dict[str, dict[str, Any]] = {}
+
+        with _get_browser_semaphore(config):
+            legacy_key = session_broker.broker_key(profile_name)
+            broker_candidates = [key, legacy_key]
+            broker_candidates.extend(
+                session_broker.broker_key(alias.strip().lower().replace(" ", "-"))
+                for alias in getattr(profile, "aliases", ())
+            )
+            active_broker = None
+            try:
+                for candidate in dict.fromkeys(broker_candidates):
+                    if session_broker.broker_is_running(candidate):
+                        active_broker = candidate
+                        break
+            except Exception as exc:
+                log.info(f"   [Batch] {profile_name} broker discovery failed, using one-shot session: {exc}")
+
+            if active_broker:
+                try:
+                    summary = session_broker.submit_broker_job(
+                        publisher=active_broker,
+                        records=[
+                            {"doi": record.doi, "title": record.title,
+                             "published": record.published, "url": record.url}
+                            for record in records
+                        ],
+                        output_dir=str(broker_dir),
+                        institution=institution_query,
+                        login_timeout=login_timeout,
+                        pdf_timeout=60,
+                        post_login_hold=post_login_hold,
+                        post_run_hold=0,
+                        timeout_seconds=max(120, login_timeout + len(records) * (post_login_hold + 120)),
+                    )
+                    if summary.get("error"):
+                        log.info(f"   [Batch] {profile_name} broker job failed, using one-shot session: {summary['error']}")
+                    else:
+                        broker_rows = _manifest_results(profile_name, dois, broker_dir, "broker")
+                        if broker_rows and all(row.get("success") for row in broker_rows.values()):
+                            return broker_rows
+                except TimeoutError:
+                    return {
+                        doi: fail(doi, "broker job timed out; direct fallback suppressed while the job may be active")
+                        for doi in dois
+                    }
+                except Exception as exc:
+                    try:
+                        broker_may_be_active = session_broker.broker_is_running(active_broker)
+                    except Exception:
+                        broker_may_be_active = True
+                    if broker_may_be_active:
+                        return {
+                            doi: fail(doi, "broker job outcome unknown; direct fallback suppressed")
+                            for doi in dois
+                        }
+                    log.info(f"   [Batch] {profile_name} broker stopped, using one-shot session: {exc}")
+
+            direct_dois = [doi for doi in dois if not broker_rows.get(doi, {}).get("success")]
+            direct_records = [record for record in records if record.doi in direct_dois]
+            try:
+                downloader = PublisherBatchDownloader(
+                    config=config,
+                    profile=profile,
+                    institution_query=institution_query,
+                    login_timeout_sec=login_timeout,
+                    pdf_timeout_sec=60,
+                    post_login_hold_sec=post_login_hold,
+                    post_run_hold_sec=0,
+                    require_interactive_browser=True,
+                )
+                downloader.run_records(
+                    direct_records, direct_dir, retry_failed=True, concurrency=1,
+                    report_progress=workers_inst <= 1,
+                )
+            except Exception as exc:
+                log.info(f"   [Batch] {profile_name} batch failed: {exc}")
+                return {doi: row for doi, row in broker_rows.items() if row.get("success")}
+
+            direct_rows = _manifest_results(profile_name, direct_dois, direct_dir, "browser")
+            if not direct_rows:
+                return {doi: row for doi, row in broker_rows.items() if row.get("success")}
+            return {**broker_rows, **direct_rows}
+
+    def _collect_group(item: tuple[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        key, group = item
+        with _institutional_key_lock(key):
+            return _run_group(key, group["profile"], group["dois"])
+
+    items = list(grouped.items())
+    if workers_inst <= 1 or len(items) < 2:
+        group_results = [_collect_group(item) for item in items]
+    else:
+        with ThreadPoolExecutor(max_workers=workers_inst) as pool:
+            group_results = list(pool.map(_collect_group, items))
+
+    for (_, group), rows in zip(items, group_results):
+        for doi, result in rows.items():
+            results_map[doi] = result
+            _save_progress(batch_id, doi, result)
+        ungrouped.extend(doi for doi in group["dois"] if doi not in rows)
+
     for doi in ungrouped:
         if doi in results_map and results_map[doi].get("success"):
             continue
-        # Check if a PDF already exists on disk (from prior run, doi_index, or partial download)
-        safe_name = safe_filename(doi)
-        existing = None
-        for p in output_dir.glob(f"{safe_name}*.pdf"):
-            if p.stat().st_size > 5000:
-                existing = p
-                break
-        if existing:
-            result = {
-                "success": True, "doi": doi, "identifier": doi,
-                "file": str(existing), "source": "local_cache",
-            }
-            results_map[doi] = result
-            _save_progress(batch_id, doi, result)
+        cached = _local_cache(doi)
+        if cached:
+            results_map[doi] = cached
+            _save_progress(batch_id, doi, cached)
             continue
         log.info(f"   [Batch] Phase 2 fallback: {doi}")
-        result = download(doi, output_dir, scihub_enabled=config.get("scihub_enabled", True), use_vpnsci=True, _institutional=True)
+        result = download(
+            doi, output_dir,
+            scihub_enabled=(config.get("scihub_enabled", True) if scihub_enabled is None else scihub_enabled),
+            use_vpnsci=use_vpnsci, _institutional=True,
+        )
         results_map[doi] = result
         _save_progress(batch_id, doi, result)
 
@@ -1735,12 +1876,14 @@ def batch_download(
     failed_phase1 = [doi for doi, r in phase1_results.items() if r and not r.get("success")]
     if failed_phase1:
         log.info(f"Batch {batch_id}: Phase 1 failed for {len(failed_phase1)} DOIs, starting Phase 2...")
-        _batch_institutional_phase(failed_phase1, Path(config["output_dir"]) if not output_dir else Path(output_dir), config, batch_id, phase1_results)
-        # Update results list with Phase 2 outcomes from progress file
-        phase2_progress = _load_progress(batch_id)
-        for i, ident in enumerate(pending_identifiers):
-            if ident in phase2_progress:
-                results[i] = phase2_progress[ident]
+        _batch_institutional_phase(
+            failed_phase1, Path(config["output_dir"]) if not output_dir else Path(output_dir),
+            config, batch_id, phase1_results,
+            scihub_enabled=scihub_enabled, use_vpnsci=use_vpnsci,
+        )
+        # Merge every Phase 2 outcome, including explicit failures that progress
+        # resume intentionally does not retain.
+        results = [phase1_results[ident] for ident in pending_identifiers]
 
     # Reload progress to include newly-saved invalid results
     final_map = _load_progress(batch_id)
