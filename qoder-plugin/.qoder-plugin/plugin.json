@@ -1,0 +1,26 @@
+{
+  "name": "scansci-pdf",
+  "version": "1.19.0",
+  "displayName": "ScanSci 文献获取",
+  "description": "面向科研与文献工作的学术获取套件：检索与引文追踪、按用户已授权渠道启用的开放获取/出版商 API/高校 WebVPN·CARSI 多通道下载、大型清单的分类摸底与分批续传、BibTeX/RIS/EndNote 引文导出，以及逐渠道失败诊断。前置条件：本机已安装 Python 3.11+ 与 scansci-pdf 包（详见 CONNECTORS.md）。",
+  "author": {
+    "name": "Rimagination",
+    "url": "https://github.com/Rimagination"
+  },
+  "homepage": "https://github.com/Rimagination/scansci-pdf",
+  "repository": "https://github.com/Rimagination/scansci-pdf",
+  "license": "MIT",
+  "keywords": [
+    "academic papers",
+    "literature search",
+    "DOI",
+    "citation",
+    "open access",
+    "institutional access",
+    "zotero",
+    "MCP",
+    "research"
+  ],
+  "skills": "skills",
+  "commands": "commands"
+}
