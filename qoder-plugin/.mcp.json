@@ -3,7 +3,9 @@
     "scansci-pdf": {
       "command": "scansci-pdf",
       "args": [
-        "run"
+        "run",
+        "--profile",
+        "qoder"
       ]
     }
   }

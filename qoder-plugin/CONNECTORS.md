@@ -2,15 +2,19 @@
 
 本插件通过 `.mcp.json` 声明一个**本地 stdio** MCP 连接器 `scansci-pdf`。它不是远程 HTTPS 服务，而是启动本机已安装的 Python 包，因此安装插件本身不会自动装依赖——需要先完成下面两步。
 
+连接器固定使用 `scansci-pdf run --profile qoder`。该 profile 强制 `legal_only`：即使调用方传入 `scihub_enabled=true` 或灰色源 strategy，服务端也会拒绝。这个限制只收紧、不会放宽任何渠道。
+
 ## 安装顺序
 
 ```bash
 # 1. 安装 Python 包（建议带上机构通道所需的加密依赖）
-python -m pip install "scansci-pdf[fast,vpnsci]"
+python -m pip install -U "scansci-pdf[fast,vpnsci]"
 
 # 2. 校验运行环境
 scansci-pdf check
 ```
+
+> 本插件使用 `--profile qoder`，需要包含该参数的 scansci-pdf 版本。如果启动时报 unknown option，先执行上面的 `pip install -U` 升级。
 
 装好后在 Qoder 的「扩展管理 → 连接器」里应能看到 `scansci-pdf`，状态为就绪、20 个工具。若显示启动失败，通常是 CLI 不在 PATH：把 `command` 改成绝对路径即可，例如 Windows 上形如
 
