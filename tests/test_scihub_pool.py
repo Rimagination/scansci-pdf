@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 from scansci_pdf.sources import scihub
 
+from tests._browser_test_helpers import is_cloakbrowser_license_error
+
 
 def _own_close_calls(pool, calls):
     """The close calls made by `pool`'s own workers.
@@ -198,17 +200,30 @@ class PersistentPoolTests(unittest.TestCase):
             self.skipTest("no browser backend installed")
         pool = scihub._race_pool({"scihub_browser_workers": 1})
         cfg = {"browser_backend": "patchright", "browser_headless": True}
+        license_error = None
         try:
             first = pool.submit(scihub._is_browser_available, {"scihub_enabled": True}).result()
-            pool.submit(be._get_shared_browser, cfg).result()  # launch in worker
-            second = pool.submit(scihub._is_browser_available, {"scihub_enabled": True}).result()
-            self.assertTrue(first)
-            self.assertTrue(
-                second,
-                "browser availability must not flip off after the first launch",
-            )
+            try:
+                pool.submit(be._get_shared_browser, cfg).result()  # launch in worker
+            except Exception as exc:
+                if not is_cloakbrowser_license_error(exc):
+                    raise
+                license_error = exc
+            if license_error is None:
+                second = pool.submit(scihub._is_browser_available, {"scihub_enabled": True}).result()
+                self.assertTrue(first)
+                self.assertTrue(
+                    second,
+                    "browser availability must not flip off after the first launch",
+                )
         finally:
-            pool.submit(scihub._close_my_browser).result()
+            try:
+                pool.submit(scihub._close_my_browser).result()
+            except Exception:
+                if license_error is None:
+                    raise
+        if license_error is not None:
+            self.skipTest("CloakBrowser license key is not configured")
 
 
 if __name__ == "__main__":

@@ -37,3 +37,20 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
+
+  # The Qoder plugin bundle ships generated copies of the skills; a stale copy
+  # would be submitted to the marketplace as-is, so fail the pull request here.
+  # The same check asserts the manifest version matches pyproject.toml; the
+  # manual "Qoder release check" workflow verifies that version is actually on
+  # PyPI and exposes --profile before the ZIP is submitted.
+  qoder-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify generated skills are in sync
+        run: node qoder-plugin/scripts/sync-skills.mjs --check

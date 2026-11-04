@@ -1,0 +1,28 @@
+name: Qoder release check
+
+# Manual pre-submission gate. Run this after publishing the Python package and
+# before rebuilding/uploading the Qoder plugin ZIP. It installs the exact
+# manifest version from PyPI in a clean venv and verifies the CLI exposes
+# --profile, so a legal-only connector cannot be shipped against an older
+# package that silently lacks the flag.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  qoder-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify the published package accepts --profile
+        run: node qoder-plugin/scripts/check-release.mjs --smoke

@@ -19,7 +19,7 @@ ScanSci PDF 是一个论文助手。你告诉它想下哪篇论文，或者想�
 - 找到后自动下载、按“作者_年份_标题”命名；
 - 需要的话，顺手导出引用、抓补充材料、整理成可读的 Markdown。
 
-**你不需要懂代码，也不需要记命令。** 装好之后，对 Agent 说一句话就行——Claude Code、Codex、Cursor、ZCode、DeepSeek Harness 都可以。
+**你不需要懂代码，也不需要记命令。** 装好之后，对 Agent 说一句话就行——Qoder、Claude Code、Codex、Cursor、ZCode、DeepSeek Harness 都可以。
 
 > 不知道 DOI 也没关系。DOI 就是论文页面上以 `10.` 开头的那串编号；不知道的话，直接发论文标题或链接即可。
 
@@ -64,7 +64,7 @@ DSH 可以直接从插件管理界面安装，不需要手动配置：
 
 安装后会自动注册论文下载和中文清单整理两个技能，通常不需要重启。
 
-### ZCode / Claude Code / Codex / Cursor
+### Qoder / ZCode / Claude Code / Codex / Cursor
 
 对 Agent 说一句话即可：
 
