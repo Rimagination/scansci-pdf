@@ -164,7 +164,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command '$p=Join-Path $HOME "plug
 
 ZCode：插件市场搜 `scansci-pdf` 一键安装，MCP、skills、快捷命令一次带齐。
 
-**插件入口**：Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](../zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置；DeepSeek Harness = npm 包 `scansci-pdf` 或 [`dsh-plugin/`](../dsh-plugin/)（bundle：MCP client + skills + locale/icon）。
+**插件入口**：Qoder = [`qoder-plugin/`](../qoder-plugin/)（bundle：`.qoder-plugin/plugin.json` + skills + `/scansci` 快捷命令 + `.mcp.json`，技能由 `scripts/sync-skills.mjs` 从本仓库生成）；Codex = `.codex-plugin/plugin.json` + `.mcp.json`（自动注册 MCP server）+ `skills/`；ZCode = [`zcode-plugin/`](../zcode-plugin/)（marketplace 包：skills + `/scansci` 快捷命令）；Claude Code = `.claude/skills/` + 上面的标准 MCP 配置；DeepSeek Harness = npm 包 `scansci-pdf` 或 [`dsh-plugin/`](../dsh-plugin/)（bundle：MCP client + skills + locale/icon）。
 
 手动安装（Codex）：仓库放到 `%USERPROFILE%\plugins\scansci-pdf` → `python -m pip install -e .` → 插件管理页刷新个人 marketplace；Codex CLI 可用时执行 `codex plugin add scansci-pdf@local-plugins`。
 
