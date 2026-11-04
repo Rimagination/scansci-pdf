@@ -1995,7 +1995,7 @@ vpnsci = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "camoufox", extras = ["geoip"], marker = "extra == 'camoufox'", specifier = ">=0.4.11" },
-    { name = "cloakbrowser", marker = "extra == 'cloakbrowser'", specifier = ">=0.5.9" },
+    { name = "cloakbrowser", marker = "extra == 'cloakbrowser'", specifier = ">=0.5.9,<0.7" },
     { name = "cython", marker = "extra == 'compile'", specifier = ">=3.0" },
     { name = "lxml", marker = "extra == 'fast'", specifier = ">=4.9" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12,<3.0" },

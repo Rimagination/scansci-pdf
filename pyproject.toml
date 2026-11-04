@@ -29,7 +29,10 @@ fast = ["lxml>=4.9"]
 # so existing `pip install scansci-pdf[instsci]` commands keep working.
 vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
-cloakbrowser = ["cloakbrowser>=0.5.9"]
+# 0.7+ requires a CloakBrowser license key (0.6.x does not). Keep the extra
+# usable out of the box; users who opt into a newer major can install it
+# themselves, and the browser tests skip when no key is present.
+cloakbrowser = ["cloakbrowser>=0.5.9,<0.7"]
 camoufox = ["camoufox[geoip]>=0.4.11"]
 patchright = ["patchright>=1.61"]
 dev = ["pytest>=8.0"]

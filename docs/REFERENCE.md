@@ -87,7 +87,7 @@ scansci-pdf config-cmd download_strategy legal_only
 
 | 配置项 | 建议 | 说明 |
 |---|---|---|
-| `browser_backend` | `cloakbrowser` 或 `camoufox` | 回退顺序为 `patchright → cloakbrowser → camoufox`；cloakbrowser 低于 0.5.9 会被**硬拒绝**（内核过旧会被出版商标记并拒绝服务），camoufox 是反指纹 Firefox 内核 |
+| `browser_backend` | `cloakbrowser` 或 `camoufox` | 回退顺序为 `patchright → cloakbrowser → camoufox`；cloakbrowser 0.5.9–0.6.x 可用，0.7+ 需要免费 license key（`[cloakbrowser]` extra 已 cap 在 <0.7），低于 0.5.9 会被**硬拒绝**（内核过旧会被出版商标记并拒绝服务）；camoufox 是反指纹 Firefox 内核 |
 | `browser_headless` | `false` | 机构登录 / CAPTCHA / Cloudflare 都需要可见窗口 |
 | `browser_executable` | 你装的 Chrome 路径 | **坚持用自己的浏览器就用这一条**：让工具拿你装的 Chrome 当内核，而不是把登录态留在工具外面 |
 
@@ -648,7 +648,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 - **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
 - **OpenAIRE 仓储源接入** — 绿色 OA / 机构库副本进入免费竞速池，Unpaywall 漏掉的它来补（现已 20+ 数据源）。
 - **MCP 工具面瘦身** — 45 → 20 个工具，每次会话的 schema token 开销降约 60%，能力零损失。
-- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；cloakbrowser 强制 0.5.9+（Chromium 151 内核）；每周出版商金丝雀巡检。
+- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；cloakbrowser 0.5.9–0.6.x（Chromium 151 内核；0.7+ 需 license key，extra 暂 cap <0.7）；每周出版商金丝雀巡检。
 
 </details>
 
@@ -666,7 +666,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 | 新申请的 Elsevier key 一直 403 | 注册环节问题：机构邮箱注册 Elsevier 账号 + 校园网/学校 VPN 下创建 key（门户靠邮箱域 + 出口 IP 识别机构）；创建后当场 `scansci-pdf elsevier-check` 验证 |
 | 10.1007 论文没走 Springer TDM | `scansci_pdf_springer_setup(test=true)` 确认权限；`not_entitled` 表示机构订阅未含 TDM 权利 |
 | 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_diagnostics(check="network")`，给出针对性修复建议 |
-| 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U cloakbrowser`（`scansci-pdf browser-doctor` 会标出 outdated） |
+| 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U "cloakbrowser<0.7"`（0.7+ 需先 `cloakbrowser login` 配置免费 key；`scansci-pdf browser-doctor` 会标出 outdated） |
 | Sci-Hub 连不上 | 内嵌 Tor：`scansci_pdf_tor(action="start", use_bridges=true)`，或配置 `network_proxy` |
 | 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；数据源延迟用 `scansci_pdf_diagnostics(check="health")` 查看 |
 | 装完提示 `pycryptodome required for WebVPN` | 基础安装不含该依赖：`pip install "scansci-pdf[vpnsci]"` |
