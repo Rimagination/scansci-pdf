@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # 2.x is an empty shim for pymupdf 2.x; allowing it breaks markdown
+      # export on a stock pymupdf 1.x install. Keep the deliberate <2 cap.
+      - dependency-name: "pymupdf4llm"
+        versions: [">=2.0.0"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
