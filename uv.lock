@@ -294,20 +294,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cloakbrowser"
-version = "0.5.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cryptography" },
-    { name = "httpx" },
-    { name = "playwright" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b3/48/08bc8e11d57564f60fcd08267d3c9cc524e148fb21309caa1c159d89a68e/cloakbrowser-0.5.9.tar.gz", hash = "sha256:92718d5f5ab0b3f8c51c8e0f66312ad545c083707a23ea8d5c951635167b94ad", size = 5752064, upload-time = "2026-08-25T14:20:14.946Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/0e/a376db979ea602446ef2882be632a1961e443d2933038e813c628025abb2/cloakbrowser-0.5.9-py3-none-any.whl", hash = "sha256:c095efa87ad1265348e6508f91b3fd4540329ea14c12ce697da8d2a2376280d2", size = 134189, upload-time = "2026-08-25T14:20:13.386Z" },
-]
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1969,9 +1955,6 @@ dependencies = [
 camoufox = [
     { name = "camoufox", extra = ["geoip"] },
 ]
-cloakbrowser = [
-    { name = "cloakbrowser" },
-]
 compile = [
     { name = "cython" },
 ]
@@ -1995,7 +1978,6 @@ vpnsci = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "camoufox", extras = ["geoip"], marker = "extra == 'camoufox'", specifier = ">=0.4.11" },
-    { name = "cloakbrowser", marker = "extra == 'cloakbrowser'", specifier = ">=0.5.9,<0.7" },
     { name = "cython", marker = "extra == 'compile'", specifier = ">=3.0" },
     { name = "lxml", marker = "extra == 'fast'", specifier = ">=4.9" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12,<3.0" },
@@ -2012,7 +1994,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.7.0" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
-provides-extras = ["fast", "vpnsci", "instsci", "cloakbrowser", "camoufox", "patchright", "dev", "compile"]
+provides-extras = ["fast", "vpnsci", "instsci", "camoufox", "patchright", "dev", "compile"]
 
 [[package]]
 name = "screeninfo"

@@ -250,7 +250,7 @@ def fetch_with_browser(
     *,
     stream: bool = False,
 ) -> requests.Response | None:
-    """Fetch URL using CloakBrowser to bypass Cloudflare challenges."""
+    """Fetch URL using browser to bypass Cloudflare challenges."""
     from .browser_engine import solve_url, is_available
     if not is_available(config):
         return None

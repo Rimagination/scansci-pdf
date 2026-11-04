@@ -112,7 +112,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 
 机构失败大多不是"下不下来"，而是这两件事没定：
 
-**① 浏览器**：`scansci_pdf_login` 打开的是工具自带的可见反检测浏览器，**cookie 是从那个上下文抓取并落盘的**——用户在自带的 Safari/Edge/日常 Chrome 里登录、或用无头模式，登录态都拿不到。要求：`browser_headless=false`（机构登录/CAPTCHA/Cloudflare 都需要可见窗口）；后端用 `camoufox` 或 `cloakbrowser`（`patchright` 1.56~1.61 有 Turnstile 空白页 bug）。用户坚持用自己的浏览器时不必硬拦，两条兜底：`config-cmd browser_executable "<他的 Chrome 路径>"` 把内核指过去；或 `scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")` 导入 Netscape cookie（CARSI 另会自动读本机 Chrome 的 cookie 库）。
+**① 浏览器**：`scansci_pdf_login` 打开的是工具自带的可见反检测浏览器，**cookie 是从那个上下文抓取并落盘的**——用户在自带的 Safari/Edge/日常 Chrome 里登录、或用无头模式，登录态都拿不到。要求：`browser_headless=false`（机构登录/CAPTCHA/Cloudflare 都需要可见窗口）；后端默认 `patchright`，遇到 Turnstile 空白页可切 `camoufox`；`ego-lite` 通过 CDP 连接已运行的 ego lite 桌面浏览器。用户坚持用自己的浏览器时不必硬拦，两条兜底：`config-cmd browser_executable "<他的 Chrome 路径>"` 把内核指过去；或 `scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")` 导入 Netscape cookie（CARSI 另会自动读本机 Chrome 的 cookie 库）。
 
 **② 出口 IP**：出版商（尤其 Elsevier）按请求源 IP 判权益。机器一旦开系统/全局代理，**工具与浏览器的出口就变成代理出口，机构授权当场失效**——典型症状是 `pdf.sciencedirectassets.com` 返回 "There was a problem providing the content you requested"（带 `CPE` 码，页面上会打印它看到的 IP）。**先拿那个 IP 核对是否属于机构网段，再判断"学校没订阅"。** 工具只认 `network_proxy`/`SCANSCI_PDF_PROXY`，**忽略** `HTTP_PROXY`/`HTTPS_PROXY`。
 
@@ -152,7 +152,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 **要点**：
 - 任何有机构账号的用户都能用，无需预配置 WebVPN/CARSI
 - Cookies 持久化，同一出版商登录一次即可
-- 浏览器引擎为 **CloakBrowser**（Playwright 兼容反检测浏览器），能通过 Cloudflare Turnstile；出版社检测 TLS 指纹，Python HTTP 客户端即使带 cookies 也可能 403
+- 浏览器引擎默认 **patchright**（Playwright 兼容，驱动本机 Chrome）；可选 **camoufox**（反检测 Firefox）或 **ego-lite**（CDP 连接桌面浏览器）；出版社检测 TLS 指纹，Python HTTP 客户端即使带 cookies 也可能 403
 
 ### 流程 5：Elsevier API 快速通道（1-2 秒下载）
 
@@ -208,7 +208,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 | 用户给了标题没有 DOI | 先 `search` 获取 DOI 再下载 |
 | 批量 100+ 篇 | `batch_download`，并发数由 `batch_workers` 配置控制 |
 | 需要机构权限的论文 | `login` 登录后重试下载 |
-| 下载失败 | 结果含 `error_type`；`paywall`→登录流程，`rate_limited`→稍后重试，`cloudflare_blocked`→启动 CloakBrowser/配置代理 |
+| 下载失败 | 结果含 `error_type`；`paywall`→登录流程，`rate_limited`→稍后重试，`cloudflare_blocked`→启动浏览器后端/配置代理 |
 
 ## 已知坑位（2026-10-22 实测，agent 必读）
 
@@ -231,13 +231,14 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 ```
 1. scansci_pdf_diagnostics(check="setup") → 环境状态
 2. 按 readiness 处理：ready / partial / limited
-3. 缺少组件时按建议安装（pymupdf4llm 用于 markdown、cloakbrowser 用于反爬登录）
+3. 缺少组件时按建议安装（pymupdf4llm 用于 markdown、patchright/camoufox 用于反爬登录）
 ```
 
 ## 快速安装
 
 ```
 pip install -U scansci-pdf
-pip install -U cloakbrowser    # 反爬浏览器（Chromium 内核）
+pip install -U "scansci-pdf[patchright]"   # 默认浏览器后端
+# 可选：pip install -U "scansci-pdf[camoufox]"；ego-lite 需先运行桌面浏览器并开 CDP 端口
 scansci-pdf doctor             # 或 MCP: scansci_pdf_diagnostics(check="health")
 ```

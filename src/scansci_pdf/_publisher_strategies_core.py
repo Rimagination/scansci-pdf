@@ -19,11 +19,14 @@ from typing import Any
 try:
     from .browser_backend import launch, launch_persistent_context
     from .browser_backend import is_available as _browser_backend_available
-    _HAS_CLOAKBROWSER = _browser_backend_available()
+    from .browser_backend import BACKEND_EGO_LITE
+    _HAS_BROWSER = _browser_backend_available()
 except ImportError:
     launch = None  # type: ignore[assignment]
     launch_persistent_context = None  # type: ignore[assignment]
-    _HAS_CLOAKBROWSER = False
+    BACKEND_EGO_LITE = "ego-lite"
+    _browser_backend_available = lambda *a, **k: False  # noqa: E731
+    _HAS_BROWSER = False
 from .log import get_logger
 
 log = get_logger()
@@ -84,11 +87,11 @@ def _visible_browser(config: dict[str, Any], publisher: str, *, viewport: dict |
     """Open visible stealth browser with persistent profile. Falls back to ephemeral."""
     from .browser_engine import close_shared_browser, is_available
 
-    # Any resolved backend works (camoufox included); the old _HAS_CLOAKBROWSER
-    # gate wrongly required the cloakbrowser package.
+    # Any resolved backend works (patchright default, camoufox fallback).
     if not is_available(config):
         raise RuntimeError(
-            "no browser backend available. Run: pip install patchright / cloakbrowser / camoufox")
+            "no browser backend available. Run: pip install 'scansci-pdf[patchright]' "
+            "or 'scansci-pdf[camoufox]'")
     # The shared headless browser holds this thread's sync-API loop — a second
     # (visible) launch on the same thread dies with "Sync API inside the
     # asyncio loop". Tear it down first; it relaunches lazily when needed.
@@ -1354,7 +1357,7 @@ def _browser_download_visible(
     config: dict[str, Any],
     publisher: str,
 ) -> bool:
-    """Launch visible CloakBrowser to download PDF when browser service is offline.
+    """Launch visible browser to download PDF when browser service is offline.
 
     Opens a visible browser window, navigates to the article page, finds the
     PDF link via CSS selectors, and downloads it. If paywall is detected,
@@ -1650,10 +1653,10 @@ def _browser_download(
 
     _clear_error()
 
-    # Campus network fast-path: skip HTTP, go directly to CloakBrowser
-    # Campus networks use IP authentication, so CloakBrowser can access directly
+    # Campus network fast-path: skip HTTP, go directly to browser
+    # Campus networks use IP authentication, so browser can access directly
     if _is_campus_network(config) and is_available(config):
-        log.info(f"   [{publisher}] campus network detected, using CloakBrowser directly")
+        log.info(f"   [{publisher}] campus network detected, using browser directly")
         if download_pdf_via_browser(article_url, output_path, config):
             from .pdf_utils import is_pdf_file, success
             if is_pdf_file(output_path):
@@ -2056,16 +2059,18 @@ def _browser_download_with_fallback(
 
     err_type, err_action = get_last_error()
 
-    # browser service offline + CloakBrowser available → launch visible browser directly
+    # browser service offline + browser available → launch visible browser directly
     global _visible_browser_active
-    if err_type == "browser_unavailable" and _HAS_CLOAKBROWSER:
+    if err_type == "browser_unavailable" and (
+        _HAS_BROWSER or _browser_backend_available(BACKEND_EGO_LITE, config)
+    ):
         if _visible_browser_lock.acquire(blocking=False):
             try:
                 if _visible_browser_active:
                     log.info(f"   [{publisher}] visible browser already active, skipping")
                     return False
                 _visible_browser_active = True
-                log.info(f"   [{publisher}] browser service offline, launching CloakBrowser directly")
+                log.info(f"   [{publisher}] browser service offline, launching browser directly")
                 if _browser_download_visible(doi, article_url, output_path, config, publisher):
                     return True
             except Exception as e:
@@ -3055,11 +3060,11 @@ def try_elsevier_browser(
     from .pdf_utils import success
     from .browser_engine import is_available as browser_available, download_pdf_via_browser
 
-    # Campus network fast-path: skip HTTP, go directly to CloakBrowser
+    # Campus network fast-path: skip HTTP, go directly to browser
     if _is_campus_network(config) and browser_available(config):
         cell_url = _build_cell_press_url(doi)
         if cell_url:
-            log.info(f"   [Elsevier] campus network detected, trying CloakBrowser directly: {cell_url[:80]}")
+            log.info(f"   [Elsevier] campus network detected, trying browser directly: {cell_url[:80]}")
             if download_pdf_via_browser(cell_url, output_path, config):
                 if is_pdf_file(output_path):
                     log.info(f"   [Elsevier] campus network download succeeded")
@@ -3252,10 +3257,10 @@ def try_wiley_browser(
     from .pdf_utils import success
     from .browser_engine import is_available as browser_available, download_pdf_via_browser
 
-    # Campus network fast-path: skip HTTP, go directly to CloakBrowser
+    # Campus network fast-path: skip HTTP, go directly to browser
     if _is_campus_network(config) and browser_available(config):
         article_url = f"https://doi.org/{doi}"
-        log.info(f"   [Wiley] campus network detected, trying CloakBrowser directly")
+        log.info(f"   [Wiley] campus network detected, trying browser directly")
         if download_pdf_via_browser(article_url, output_path, config):
             if is_pdf_file(output_path):
                 log.info(f"   [Wiley] campus network download succeeded")

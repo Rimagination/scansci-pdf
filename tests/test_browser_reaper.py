@@ -12,8 +12,6 @@ from unittest.mock import Mock, patch
 
 from scansci_pdf import browser_engine as be
 
-from tests._browser_test_helpers import is_cloakbrowser_license_error
-
 
 def _make_broken(proc):
     """A pooled browser whose owner thread is gone: close() fails, but the
@@ -127,12 +125,7 @@ class RealBrowserTests(unittest.TestCase):
         if not be.is_available({}):
             self.skipTest("no browser backend installed")
         cfg = {"browser_backend": "patchright", "browser_headless": True}
-        try:
-            b, _ = be._get_shared_browser(cfg)
-        except Exception as exc:
-            if is_cloakbrowser_license_error(exc):
-                self.skipTest("CloakBrowser license key is not configured")
-            raise
+        b, _ = be._get_shared_browser(cfg)
         self.assertIn(b, be._LIVE_BROWSERS)
         be._reap_browsers_at_exit()
         self.assertNotIn(b, be._LIVE_BROWSERS)

@@ -200,7 +200,7 @@ ScanSci PDF 默认把灰色源作为候选之一；你也可以明确要求“�
 <a href="https://github.com/annsyun"><img src="https://avatars.githubusercontent.com/u/151621087?v=4" width="50" height="50" alt="annsyun" title="annsyun"/></a>
 
 - **[annsyun](https://github.com/annsyun)** — SAGE 中国站机构授权下载通道
-- 感谢 FlareSolverr、ref-downloader、paper-fetch-skill、paper-fetcher、cloakbrowser 等开源项目
+- 感谢 FlareSolverr、ref-downloader、paper-fetch-skill、paper-fetcher、patchright、camoufox 等开源项目
 
 </details>
 

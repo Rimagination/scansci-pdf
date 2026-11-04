@@ -87,12 +87,12 @@ scansci-pdf config-cmd download_strategy legal_only
 
 | 配置项 | 建议 | 说明 |
 |---|---|---|
-| `browser_backend` | `cloakbrowser` 或 `camoufox` | 回退顺序为 `patchright → cloakbrowser → camoufox`；cloakbrowser 0.5.9–0.6.x 可用，0.7+ 需要免费 license key（`[cloakbrowser]` extra 已 cap 在 <0.7），低于 0.5.9 会被**硬拒绝**（内核过旧会被出版商标记并拒绝服务）；camoufox 是反指纹 Firefox 内核 |
+| `browser_backend` | `patchright` / `camoufox` / `ego-lite` | 回退顺序为 `patchright → camoufox`；`patchright` 是默认后端（驱动本机 Chrome 或自带 Chromium）；`camoufox` 是反指纹 Firefox 回退；`ego-lite` 通过 CDP 连接已运行的 ego lite 桌面浏览器（显式选择，macOS/Windows） |
 | `browser_headless` | `false` | 机构登录 / CAPTCHA / Cloudflare 都需要可见窗口 |
 | `browser_executable` | 你装的 Chrome 路径 | **坚持用自己的浏览器就用这一条**：让工具拿你装的 Chrome 当内核，而不是把登录态留在工具外面 |
 
 ```bash
-scansci-pdf config-cmd browser_backend cloakbrowser
+scansci-pdf config-cmd browser_backend patchright
 scansci-pdf config-cmd browser_headless false
 ```
 
@@ -139,9 +139,10 @@ pip install scansci-pdf
 | 想做什么 | 装什么 |
 |---|---|
 | WebVPN / 校园连接器 | `pip install "scansci-pdf[vpnsci]"`（提供 `pycryptodome`，WebVPN 的 URL 加密必需） |
-| 浏览器登录、CARSI、绕过 Cloudflare | `pip install "scansci-pdf[cloakbrowser]"`（隐身 Chromium 内核） |
-| 一组装齐（推荐） | `pip install "scansci-pdf[cloakbrowser,vpnsci]"` |
-| 换用 Camoufox / Patchright 内核 | `pip install "scansci-pdf[camoufox]"` 或 `pip install "scansci-pdf[patchright]"` |
+| 浏览器登录、CARSI、绕过 Cloudflare | `pip install "scansci-pdf[patchright]"`（默认；驱动本机 Chrome） |
+| 一组装齐（推荐） | `pip install "scansci-pdf[patchright,vpnsci]"` |
+| 换用 Camoufox 内核 | `pip install "scansci-pdf[camoufox]"` |
+| ego-lite 桌面浏览器 | 无需 Python 包；启动 ego lite 并开启 remote debugging port，再设 `browser_backend=ego-lite` |
 
 标准 MCP 配置（Claude Desktop / Cursor / Windsurf / Cline / Cherry Studio…）：
 
@@ -556,10 +557,15 @@ scansci-pdf config-cmd institutional_allow_self_signed true
 | `sciverse_base_url` | `https://api.sciverse.space` | API 地址（测试/代理时可覆盖） |
 | `sciverse_sub_queries` | `0` | 查询改写数 0–4；调高召回更好但延迟更高 |
 | `sciverse_timeout_seconds` | `45` | 单次请求读超时（秒） |
-| `browser_backend` | `patchright` | 浏览器内核：`patchright` / `camoufox` / `cloakbrowser` |
+| `browser_backend` | `patchright` | 浏览器内核：`patchright` / `camoufox` / `ego-lite` |
 | `browser_executable` | 空 | 指定 Chrome/Edge 路径；留空自动探测 |
 | `browser_headless` | `false` | 浏览器是否无头运行（机构登录建议 `false`） |
 | `browser_humanize` | `true` | 浏览器人性化操作 |
+| `ego_lite_cdp_url` | 空 | ego lite 的 CDP 地址；留空自动探测 `9351` / `9222` |
+| `ego_lite_executable` | 空 | ego lite 可执行文件；仅在自动启动时使用 |
+| `ego_lite_auto_launch` | `false` | 允许 scansci-pdf 启动本机 ego lite（未配置 CDP 地址时） |
+| `ego_lite_user_data_dir` | 空 | 自动启动 ego lite 时使用的 profile 目录 |
+| `ego_lite_launch_timeout` | `20` | 自动启动等待 CDP 就绪的秒数 |
 | `race_mode` | `hedge` | 单篇竞速模式：`hedge`（对冲级联，省请求）/ `full`（全部齐发） |
 | `use_tor_for_scihub` | `true` | Sci-Hub 走内嵌 Tor（国内直连域名常不稳时有用） |
 | `tor_binary_path` | 空 | 指定 tor 二进制；留空则用内嵌安装，最后才回退 PATH |
@@ -648,7 +654,7 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 - **AI 阅读层** — `get <DOI> --md` 顺手把 PDF 转成 agent 友好的 Markdown（PDF 仍是默认交付物）。
 - **OpenAIRE 仓储源接入** — 绿色 OA / 机构库副本进入免费竞速池，Unpaywall 漏掉的它来补（现已 20+ 数据源）。
 - **MCP 工具面瘦身** — 45 → 20 个工具，每次会话的 schema token 开销降约 60%，能力零损失。
-- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；cloakbrowser 0.5.9–0.6.x（Chromium 151 内核；0.7+ 需 license key，extra 暂 cap <0.7）；每周出版商金丝雀巡检。
+- **更抗封、更稳** — 竞速引擎新增 (源 × 出版商) 负缓存，被 Cloudflare 拦一次不再反复烧超时；浏览器后端默认 `patchright`、可切 `camoufox`/`ego-lite`；每周出版商金丝雀巡检。
 
 </details>
 
@@ -666,12 +672,12 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 | 新申请的 Elsevier key 一直 403 | 注册环节问题：机构邮箱注册 Elsevier 账号 + 校园网/学校 VPN 下创建 key（门户靠邮箱域 + 出口 IP 识别机构）；创建后当场 `scansci-pdf elsevier-check` 验证 |
 | 10.1007 论文没走 Springer TDM | `scansci_pdf_springer_setup(test=true)` 确认权限；`not_entitled` 表示机构订阅未含 TDM 权利 |
 | 数据源全红 / 打不开 | Agent 里调 `scansci_pdf_diagnostics(check="network")`，给出针对性修复建议 |
-| 以前能下的站点突然 403 / 弹 Cloudflare | 大概率 cloakbrowser 过旧：`pip install -U "cloakbrowser<0.7"`（0.7+ 需先 `cloakbrowser login` 配置免费 key；`scansci-pdf browser-doctor` 会标出 outdated） |
+| 以前能下的站点突然 403 / 弹 Cloudflare | 先 `scansci-pdf browser-status` 看后端；`patchright` 启动失败时安装本机 Chrome 或运行 `patchright install chromium`，也可切 `config-cmd browser_backend camoufox`；ego-lite 需先开启 CDP 端口 |
 | Sci-Hub 连不上 | 内嵌 Tor：`scansci_pdf_tor(action="start", use_bridges=true)`，或配置 `network_proxy` |
 | 下载速度慢 | 配置 Elsevier API Key；调 `batch_workers`；数据源延迟用 `scansci_pdf_diagnostics(check="health")` 查看 |
 | 装完提示 `pycryptodome required for WebVPN` | 基础安装不含该依赖：`pip install "scansci-pdf[vpnsci]"` |
-| 机构登录弹不出浏览器 / 登录后仍失败 | `pip install "scansci-pdf[cloakbrowser]"`，确认 `browser_headless=false`；也可用 `browser_executable` 指向本机 Chrome 或导入 cookie |
-| Cloudflare 验证框不出现 / 一直转 | `scansci-pdf browser-status` 看内核；换 `config-cmd browser_backend cloakbrowser`（或 `camoufox`），patchright 1.56–1.61 有 Turnstile 空白页问题 |
+| 机构登录弹不出浏览器 / 登录后仍失败 | `pip install "scansci-pdf[patchright]"`，确认 `browser_headless=false`；也可用 `browser_executable` 指向本机 Chrome 或导入 cookie |
+| Cloudflare 验证框不出现 / 一直转 | `scansci-pdf browser-status` 看内核；切 `config-cmd browser_backend camoufox`，或使用 ego-lite |
 | 签名 PDF 报 "There was a problem providing the content"（带 CPE 码） | 先看页面打印的 IP 是否属于机构网段；多半是系统/全局代理把出口带离校园，核对 `network_proxy` |
 | 校园连接器报 SSL 证书错误 | 自签名证书：`scansci-pdf config-cmd institutional_allow_self_signed true`（确认可信后再开） |
 | 灰源通道在宿主里被拦 | 宿主策略所致；可固定 `download_strategy=legal_only` 与策略对齐 |
@@ -760,7 +766,8 @@ Tier 5 (20s) ─ WebVPN / CARSI 机构代理
 - **[ref-downloader](https://github.com/ltczding-gif/ref-downloader)** — Publisher 专用下载策略（Elsevier crasolve 检测、Wiley PDFDirect、AIP loading page 等）
 - **[paper-fetch-skill](https://github.com/Dictation354/paper-fetch-skill)** — 论文获取 Agent Skill 设计
 - **[paper-fetcher](https://github.com/fermionoid/paper-fetcher)** — 论文下载流程参考
-- **[cloakbrowser](https://github.com/CloakHQ/CloakBrowser)** — Chromium stealth 浏览器引擎
+- **[patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)** — Playwright 的 stealth 分支（默认浏览器后端）
+- **[camoufox](https://github.com/daijro/camoufox)** — 反检测 Firefox 内核（可选回退）
 
 感谢以上项目作者的开源贡献。问题报告同样让项目更准，感谢 **lwz20210407**、**Furfuryl-Alcohol**（出版商抓取与 MDPI 路由缺陷）、**JackieLiang1111**（Elsevier 正式版/录用稿选择）、**NkAntony777**（TLS 校验、进程全局状态、批量 I/O 与架构问题）。
 

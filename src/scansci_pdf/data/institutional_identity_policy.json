@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "last_review": "2026-06-07",
+  "last_review": "2026-11-05",
   "purpose": "Reusable policy for choosing institutional identity routes before browser-backed publisher PDF downloads.",
   "default_mode": "auto",
   "default_identity": "publisher_broker",
@@ -17,7 +17,7 @@
     "prompt_label": "Subscription institution",
     "notes": "Ask for the user's own subscription institution at the point of use. Do not default to Tsinghua University or any other school."
   },
-  "final_pdf_verdict_requires": "visible_cloakbrowser",
+  "final_pdf_verdict_requires": "visible_browser",
   "identity_order": [
     "publisher_broker",
     "federated_sso",
@@ -45,8 +45,8 @@
     "Do not make WebVPN a global default because not every institution provides a WebVPN gateway.",
     "Use WebVPN only when the configured institution has a WebVPN-style gateway and the publisher route has been browser-verified through that gateway.",
     "Do not treat exported cookies as full browser session persistence. Cookie stores are useful for HTTP preflight and some request reuse only.",
-    "For closed-access publisher PDFs, keep the visible CloakBrowser context alive when SSO, CAPTCHA, 2FA, Cloudflare, or publisher-generated PDF tokens are involved.",
-    "A final claim that a publisher can or cannot provide a PDF must come from a visible CloakBrowser workflow, not requests, curl, or cookie replay alone.",
+    "For closed-access publisher PDFs, keep the visible browser context alive when SSO, CAPTCHA, 2FA, Cloudflare, or publisher-generated PDF tokens are involved.",
+    "A final claim that a publisher can or cannot provide a PDF must come from a visible browser workflow, not requests, curl, or cookie replay alone.",
     "When WebVPN fails to provide a PDF, fall back to the publisher-specific broker and article-page institutional login flow before marking the publisher failed."
   ],
   "identities": {
@@ -54,12 +54,12 @@
       "global_default": true,
       "recommended_role": "primary_closed_access_pdf_route",
       "recommended_persistence": [
-        "same_live_cloakbrowser_context",
+        "same_live_browser_context",
         "browser_profile_dir",
         "carsi_cookie_dir/<publisher>.json",
         "attempt_cache"
       ],
-      "persistence_notes": "The same visible CloakBrowser context preserves browser storage, challenge state, page-generated PDF tokens, and session cookies. The persistent profile is the disk-backed fallback when the broker is restarted.",
+      "persistence_notes": "The same visible browser context preserves browser storage, challenge state, page-generated PDF tokens, and session cookies. The persistent profile is the disk-backed fallback when the broker is restarted.",
       "final_verdict_scope": "browser verified"
     },
     "webvpn": {
@@ -68,10 +68,10 @@
       "enable_when": [
         "configured_school_type_is_webvpn",
         "webvpn_base_url_is_set",
-        "user_can_complete_institution_login_in_visible_cloakbrowser"
+        "user_can_complete_institution_login_in_visible_browser"
       ],
       "recommended_persistence": [
-        "same_live_cloakbrowser_context",
+        "same_live_browser_context",
         "browser_profile_dir",
         "webvpn_gateway_cookies",
         "publisher_broker_fallback"
@@ -94,7 +94,7 @@
         "page_generated_pdf_token",
         "live_http2_connection_state"
       ],
-      "final_verdict_scope": "browser verified only when the PDF is captured in the active WebVPN CloakBrowser context"
+      "final_verdict_scope": "browser verified only when the PDF is captured in the active WebVPN browser context"
     },
     "federated_sso": {
       "global_default": false,
@@ -110,7 +110,7 @@
         }
       },
       "recommended_persistence": [
-        "same_live_cloakbrowser_context",
+        "same_live_browser_context",
         "browser_profile_dir",
         "carsi_cookie_dir/<publisher>.json"
       ],

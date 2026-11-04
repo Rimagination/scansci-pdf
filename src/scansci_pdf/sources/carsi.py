@@ -127,11 +127,11 @@ class CARSIClient:
             return None
 
     def download_via_browser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
-        """Download PDF via CloakBrowser with CARSI auth."""
-        return self._download_via_cloakbrowser(doi, article_url, output_path)
+        """Download PDF via the browser backend with CARSI auth."""
+        return self._download_via_browser(doi, article_url, output_path)
 
-    def _download_via_cloakbrowser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
-        """Download PDF via CloakBrowser with CARSI auth. Single session: login + download."""
+    def _download_via_browser(self, doi: str, article_url: str, output_path: Path) -> dict[str, Any] | None:
+        """Download PDF via the browser backend with CARSI auth. Single session: login + download."""
         publisher = detect_publisher(article_url)
         if not publisher:
             return None
@@ -142,7 +142,7 @@ class CARSIClient:
         try:
             from ..browser_backend import launch  # noqa: F401
             from ..browser_backend import is_available as _browser_backend_available
-            if not _browser_backend_available():
+            if not _browser_backend_available(config=self.config):
                 log.info("   [CARSI-Browser] no browser backend available")
                 return None
         except ImportError:
@@ -343,7 +343,7 @@ class CARSIClient:
                                 is_auth = any(x in title for x in _at)
                                 is_auth_url = any(x in url.lower() for x in _ak)
                                 if not is_auth and not is_auth_url:
-                                    # Login success - save cookies in all formats + bridge to CloakBrowser
+                                    # Login success - save cookies in all formats + bridge to browser
                                     try:
                                         cookies = context.cookies()
                                         _save_all_cookie_formats(cookies, publisher, self.config)
@@ -514,7 +514,7 @@ class CARSIClient:
             return False
 
     def _browser_login(self, publisher: str) -> bool:
-        """Login via CARSI using CloakBrowser."""
+        """Login via CARSI using browser."""
         cfg = self._publisher_configs.get(publisher)
         if not cfg:
             log.error(f"   [CARSI] Unknown publisher: {publisher}")
@@ -524,7 +524,7 @@ class CARSIClient:
             from ..browser_login import carsi_login
             return carsi_login(publisher, self.config, login_url=cfg.login_url, domains=cfg.domains)
         except Exception as exc:
-            log.error(f"   [CARSI] CloakBrowser login failed: {exc}")
+            log.error(f"   [CARSI] browser login failed: {exc}")
             return False
 
     def _extract_chrome_cookies(self, publisher: str) -> None:

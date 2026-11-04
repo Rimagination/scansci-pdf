@@ -177,7 +177,7 @@ def ezproxy_login(config: dict[str, Any]) -> bool:
     except Exception as exc:
         log.info(f"   [EZProxy] stealth browser login failed: {exc}")
 
-    log.error("   [EZProxy] CloakBrowser login failed, no fallback available")
+    log.error("   [EZProxy] browser login failed, no fallback available")
     return False
 
 
@@ -212,7 +212,7 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
         from ..browser_backend import launch
         from ..browser_backend import is_available as _browser_backend_available
         from ..browser_engine import _build_browser_args
-        if not _browser_backend_available():
+        if not _browser_backend_available(config=config):
             log.info("   [EZProxy] no browser backend available")
             return None
     except ImportError:
@@ -236,7 +236,7 @@ def try_ezproxy(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
         except Exception:
             pass
 
-    browser = launch(headless=False, humanize=True, args=args)
+    browser = launch(headless=False, humanize=True, args=args, config=config)
     try:
         context = browser.new_context()
         page = context.new_page()

@@ -1,4 +1,4 @@
-"""Profile-driven CloakBrowser batch downloader with retryable machine states."""
+"""Profile-driven browser batch downloader with retryable machine states."""
 
 from __future__ import annotations
 
@@ -3174,7 +3174,7 @@ class PublisherBatchDownloader:
         return sum(1 for word in title_words if word in lower) >= required_title_hits
 
 
-class ACSCloakBatchDownloader(PublisherBatchDownloader):
+class ACSBatchDownloader(PublisherBatchDownloader):
     """Compatibility wrapper for the original ACS/EST downloader API."""
 
     def __init__(

@@ -107,39 +107,6 @@ def _installed_package_version(name: str) -> str:
         return ""
 
 
-# Minimum recommended cloakbrowser version. cloakbrowser iterates on
-# fingerprint patches and anti-detection fixes very frequently; older versions
-# fall behind bot-detection heuristics and start failing silently. This is a
-# soft floor surfaced by `doctor`/`check`/`browser-doctor` (offline, no network),
-# not a hard install requirement. Bump it whenever you pin a new floor in
-# pyproject.toml.
-CLOAKBROWSER_RECOMMENDED_MIN = "0.5.9"
-
-
-def _parse_version_tuple(v: str) -> tuple[int, ...]:
-    parts: list[int] = []
-    for token in (v or "").split("."):
-        digits = "".join(ch for ch in token if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
-
-
-def _cloakbrowser_version_status() -> tuple[str, str]:
-    """Return (status, detail) for the installed cloakbrowser.
-
-    status is one of: not_installed / outdated / ok. detail carries the version
-    (and an upgrade hint when outdated). Kept offline: anti-detection tooling
-    version checks should not phone home.
-    """
-    version = _installed_package_version("cloakbrowser")
-    if not version:
-        return ("not_installed", "not installed (pip install 'scansci-pdf[cloakbrowser]')")
-    if _parse_version_tuple(version) < _parse_version_tuple(CLOAKBROWSER_RECOMMENDED_MIN):
-        hint = f"{version} (outdated, recommend >={CLOAKBROWSER_RECOMMENDED_MIN}: pip install -U cloakbrowser)"
-        return ("outdated", hint)
-    return ("ok", version)
-
-
 def _doctor_checks() -> list[tuple[str, str, str]]:
     import shutil
     checks: list[tuple[str, str, str]] = [
@@ -148,22 +115,31 @@ def _doctor_checks() -> list[tuple[str, str, str]]:
     for command in ("scansci-pdf", "scansci-pdf-mcp"):
         path = shutil.which(command)
         checks.append((command, "ok" if path else "warning", path or "not found on PATH"))
-    # scansci-pdf + pymupdf: simple installed/missing check
-    for package in ("scansci-pdf", "pymupdf"):
+    for package in ("scansci-pdf", "pymupdf", "patchright"):
         version = _installed_package_version(package)
         checks.append((f"package: {package}", "ok" if version else "warning", version or "not installed"))
-    # cloakbrowser: also flag stale versions (anti-detection patches age fast)
-    cb_status, cb_detail = _cloakbrowser_version_status()
-    checks.append(("package: cloakbrowser", cb_status if cb_status != "not_installed" else "warning", cb_detail))
+    camoufox_version = _installed_package_version("camoufox")
+    checks.append(
+        (
+            "package: camoufox",
+            "ok" if camoufox_version else "info",
+            camoufox_version or "not installed (optional fallback)",
+        )
+    )
     try:
-        from .cloakbrowser_compat import configure_builtin_cloakbrowser
-        cache_dir = configure_builtin_cloakbrowser(create_dir=False)
-        status = "ok" if cache_dir.exists() else "warning"
-        detail = str(cache_dir) if cache_dir.exists() else f"not downloaded yet: {cache_dir}"
-    except Exception as exc:
-        status = "warning"
-        detail = f"cache check failed: {exc}"
-    checks.append(("CloakBrowser cache", status, detail))
+        from .browser_backend import ego_lite_cdp_url
+        from .config import load_config
+
+        cdp_url = ego_lite_cdp_url(load_config())
+    except Exception:
+        cdp_url = ""
+    checks.append(
+        (
+            "ego-lite CDP",
+            "ok" if cdp_url else "info",
+            cdp_url or "not detected (optional; start ego lite with --remote-debugging-port)",
+        )
+    )
     return checks
 
 
@@ -506,12 +482,12 @@ def est_batch(
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
 ):
-    """Download recent Environmental Science & Technology articles through ACS/CloakBrowser."""
-    from .acs_batch import ACSCloakBatchDownloader, fetch_est_records
+    """Download recent Environmental Science & Technology articles through ACS/browser."""
+    from .acs_batch import ACSBatchDownloader, fetch_est_records
 
     cfg = load_config()
     institution = _resolve_subscription_institution(cfg, institution)
-    run_dir = Path(output) if output else Path("downloads") / f"est_{year}_{limit}" / f"acs_cloak_{datetime.now():%Y%m%d_%H%M%S}"
+    run_dir = Path(output) if output else Path("downloads") / f"est_{year}_{limit}" / f"acs_{datetime.now():%Y%m%d_%H%M%S}"
     console.print(f"[bold]Fetching EST metadata:[/bold] year={year}, limit={limit}")
     records = fetch_est_records(year=year, limit=limit, email=cfg.get("email", ""))
     if not records:
@@ -520,9 +496,9 @@ def est_batch(
 
     console.print(f"[green]Found {len(records)} DOI records.[/green]")
     console.print(f"[bold]Output:[/bold] {run_dir}")
-    console.print("[dim]If a CloakBrowser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
+    console.print("[dim]If a browser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
 
-    downloader = ACSCloakBatchDownloader(
+    downloader = ACSBatchDownloader(
         cfg,
         institution_query=institution,
         login_timeout_sec=login_timeout,
@@ -551,7 +527,7 @@ def publisher_batch(
     file: Path = typer.Argument(help="File containing DOI values (one per line)."),
     publisher: str = typer.Option("acs", "--publisher", "-p", help="Publisher profile key, e.g. acs, elsevier, wiley, or ieee."),
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
-    browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent CloakBrowser profile directory."),
+    browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent browser profile directory."),
     retry_failed: bool = typer.Option(True, "--retry/--no-retry", help="Retry transient failures in a fresh browser context."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
     login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/2FA completion."),
@@ -560,7 +536,7 @@ def publisher_batch(
     attempt_cache: str = typer.Option("", "--attempt-cache", help="JSONL attempt cache path. Defaults to attempts.jsonl in the run directory."),
     skip_attempted: bool = typer.Option(False, "--skip-attempted", help="Skip DOIs already present in the attempt cache."),
 ):
-    """Download a DOI list through a named publisher profile and CloakBrowser."""
+    """Download a DOI list through a named publisher profile and browser."""
     from .publisher_batch import PaperRecord, PublisherBatchDownloader
     from .publisher_profiles import get_publisher_profile
 
@@ -585,13 +561,13 @@ def publisher_batch(
         cfg["chrome_profile_dir"] = browser_profile
     institution = _resolve_subscription_institution(cfg, institution)
     profile_key = publisher.strip().lower().replace(" ", "-")
-    run_dir = Path(output) if output else Path("downloads") / f"{profile_key}_{len(records)}" / f"cloak_{datetime.now():%Y%m%d_%H%M%S}"
+    run_dir = Path(output) if output else Path("downloads") / f"{profile_key}_{len(records)}" / f"publishers_{datetime.now():%Y%m%d_%H%M%S}"
     console.print(f"[bold]Publisher profile:[/bold] {profile.name}")
     console.print(f"[bold]Found {len(records)} DOI records.[/bold]")
     console.print(f"[bold]Output:[/bold] {run_dir}")
     _bp = cfg.get("chrome_profile_dir", "")
     console.print(f"[bold]Browser profile:[/bold] {_bp}")
-    console.print("[dim]If a CloakBrowser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
+    console.print("[dim]If a browser window stops on SSO or 2FA, complete it there and leave the window open.[/dim]")
 
     downloader = PublisherBatchDownloader(
         cfg,
@@ -621,7 +597,7 @@ def papers(
     file: Path = typer.Argument(help="File containing DOI values (one per line)."),
     publisher: str = typer.Option("auto", "--publisher", "-p", help="Publisher profile, or 'auto' to infer from DOI prefixes."),
     output: str = typer.Option("", "--output", "-o", help="Run output directory."),
-    browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent CloakBrowser profile directory."),
+    browser_profile: str = typer.Option("", "--browser-profile", help="Override the persistent browser profile directory."),
     institution: str = typer.Option("", "--institution", help="Subscription institution search text. Omit to use configured institution or prompt."),
     login_timeout: int = typer.Option(900, "--login-timeout", help="Seconds to wait for manual SSO/CAPTCHA completion."),
     pdf_timeout: int = typer.Option(90, "--pdf-timeout", help="Seconds to wait for each PDF navigation."),
@@ -1046,7 +1022,7 @@ def identity_policy(
         f"{webvpn['persistence_limits']['cookie_store']['notes']}"
     )
     console.print(
-        "[yellow]Use visible CloakBrowser:[/yellow] "
+        "[yellow]Use visible browser:[/yellow] "
         "keep the same live context for SSO, CAPTCHA, Cloudflare, and PDF-token flows."
     )
 

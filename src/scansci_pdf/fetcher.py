@@ -21,9 +21,12 @@ from .publisher_profiles import infer_publisher_profile, infer_publisher_profile
 
 try:
     from .browser_backend import is_available as _browser_backend_available
-    _HAS_CLOAKBROWSER = _browser_backend_available()
+    from .browser_backend import BACKEND_EGO_LITE
+    _HAS_BROWSER = _browser_backend_available()
 except ImportError:
-    _HAS_CLOAKBROWSER = False
+    BACKEND_EGO_LITE = "ego-lite"
+    _browser_backend_available = lambda *a, **k: False  # noqa: E731
+    _HAS_BROWSER = False
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +444,7 @@ class PaperFetcher:
         return None
 
     def _try_browser_pdf_download(self, doi: str, resolved_url: str, paper: Paper) -> Paper | None:
-        if not _HAS_CLOAKBROWSER:
+        if not _HAS_BROWSER and not _browser_backend_available(BACKEND_EGO_LITE, self.config):
             return None
 
         pdf_url = self._build_publisher_pdf_url(doi, resolved_url)

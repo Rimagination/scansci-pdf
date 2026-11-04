@@ -29,11 +29,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # camoufox and cloakbrowser are optional extras, but the backend
+          # camoufox and patchright are optional extras, but the backend
           # selection/launch tests import them and fail with
-          # ModuleNotFoundError when they are absent. Neither extra downloads
-          # a browser, so this stays cheap.
-          pip install -e ".[dev,vpnsci,fast,camoufox,cloakbrowser]"
+          # ModuleNotFoundError when they are absent.
+          pip install -e ".[dev,vpnsci,fast,camoufox,patchright]"
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

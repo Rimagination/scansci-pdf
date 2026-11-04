@@ -18,7 +18,7 @@ directories listed below.
 ```bash
 python -m pip install -e .
 # Optional: institutional browsers / WebVPN crypto
-python -m pip install -e ".[cloakbrowser,vpnsci]"
+python -m pip install -e ".[patchright,vpnsci]"
 scansci-pdf check
 ```
 

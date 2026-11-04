@@ -12,7 +12,7 @@ DSH 与 Claude Code、Codex、ZCode 共用同一份 Python 包与同一个 MCP s
 需要 Python 3.11+，并在同一个 Python 环境里安装 ScanSci PDF：
 
 ```bash
-python -m pip install "scansci-pdf[cloakbrowser,vpnsci]"
+python -m pip install "scansci-pdf[patchright,vpnsci]"
 # 从本仓库开发时：
 python -m pip install -e <本仓库路径>
 ```

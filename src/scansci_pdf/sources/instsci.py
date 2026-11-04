@@ -238,7 +238,7 @@ def instsci_login(config: dict[str, Any]) -> bool:
 
 
 def _browser_login(config: dict[str, Any]) -> bool:
-    """Open browser for CAS login via CloakBrowser."""
+    """Open browser for CAS login via browser."""
     try:
         from ..browser_login import webvpn_login
         if webvpn_login(config):
@@ -719,11 +719,11 @@ def _download_pdf_socks5(
 
 
 def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, Any] | None:
-    """Download via visible stealth browser browser. Login + download in same session."""
+    """Download via the visible browser backend. Login + download in same session."""
     try:
         from ..browser_backend import launch
         from ..browser_backend import is_available as _browser_backend_available
-        if not _browser_backend_available():
+        if not _browser_backend_available(config=config):
             log.info("   [WebVPN-Browser] no browser backend available")
             return None
     except ImportError:
@@ -745,7 +745,8 @@ def _try_instsci_browser(doi: str, output_path: Path, config: dict[str, Any]) ->
 
     try:
         browser = launch(headless=False, humanize=True,
-                     args=["--disable-features=CrossOriginOpenerPolicy"])
+                     args=["--disable-features=CrossOriginOpenerPolicy"],
+                     config=config)
         context = browser.new_context()
         page = context.new_page()
 
@@ -1012,7 +1013,7 @@ def try_instsci(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str
 
     Strategy:
     1. If SOCKS5 campus connector (EasyConnect/aTrust) is configured, try direct access
-    2. Try CloakBrowser download (handles CAS auth + Cloudflare)
+    2. Try browser download (handles CAS auth + Cloudflare)
     3. Try WebVPN HTTP approach (if session cookies valid)
 
     Note: CARSI is now a standalone source tier (carsi_source.try_carsi),
@@ -1177,7 +1178,7 @@ def _save_pdf_response(resp: requests.Response, output_path: Path, doi: str, sou
 
 
 def _try_browser_via_webvpn(url: str, config: dict[str, Any]) -> str | None:
-    """Try fetching a URL through CloakBrowser, using WebVPN proxy."""
+    """Try fetching a URL through browser, using WebVPN proxy."""
     base = _get_webvpn_base(config)
     proxied_url = convert_url(url, base, config)
     try:

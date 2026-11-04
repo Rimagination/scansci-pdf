@@ -1,9 +1,9 @@
-"""Browser engine: CloakBrowser-based replacement for camofox daemon API.
+"""Browser engine: browser-based replacement for camofox daemon API.
 
 Provides the same public API as the old camofox.py (is_available, solve_url,
 get_cookies, get_html, import_cookies, evaluate_js, create_tab, close_tab,
 navigate_tab, get_snapshot, download_pdf_via_browser, fetch_url,
-get_captured_responses, close_all_tabs) but uses CloakBrowser's direct
+get_captured_responses, close_all_tabs) but uses browser's direct
 Playwright API instead of HTTP calls to an external daemon.
 
 Uses a single shared browser instance with multiple tabs (pages). Cookies,
@@ -28,24 +28,18 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Browser backend (patchright default, CloakBrowser opt-in fallback)
+# Browser backend (patchright default, Camoufox fallback)
 # ---------------------------------------------------------------------------
 # patchright is the Apache-2.0 open-source Playwright fork that patches the
 # detectable automation fingerprints and drives the local Chrome (channel).
-# CloakBrowser's free tier is pinned to Chromium 146 (newer 148/150 are
-# Pro-only), so it remains as an opt-in fallback via the `browser_backend`
-# config key. Local browser detection / CLOAKBROWSER_BINARY_PATH logic for
-# the CloakBrowser backend lives in browser_backend.py.
+# Camoufox is the open-source anti-detect Firefox fallback.
 # ---------------------------------------------------------------------------
 
 from .browser_backend import (  # noqa: E402
-    BACKEND_CLOAKBROWSER,
     BACKEND_PATCHRIGHT,
-    find_local_browser,  # noqa: F401  (re-exported for CLI diagnostics)
     launch,
     launch_persistent_context,
     resolve_backend,
-    resolve_browser_binary,  # noqa: F401  (re-exported for CLI diagnostics)
 )
 
 # ---------------------------------------------------------------------------
@@ -59,15 +53,17 @@ def _check_browser_backend(config: dict[str, Any] | None = None) -> bool:
     """Check whether the resolved backend is importable (cached per backend)."""
     from .browser_backend import (
         BACKEND_CAMOUFOX,
-        BACKEND_CLOAKBROWSER,
+        BACKEND_EGO_LITE,
         BACKEND_PATCHRIGHT,
         is_available,
         resolve_backend,
     )
 
     backend = resolve_backend(config)
-    if backend == BACKEND_CLOAKBROWSER:
-        return is_available(BACKEND_CLOAKBROWSER)
+    if backend == BACKEND_EGO_LITE:
+        # ego-lite needs no importable package; launch() raises the actionable
+        # setup message when the CDP endpoint is missing.
+        return True
     if backend == BACKEND_CAMOUFOX:
         # A missing camoufox must not be masked by (or masked as) a patchright
         # check — resolve_backend already guarantees it is the real selection.
@@ -255,25 +251,9 @@ def _get_shared_browser(config: dict[str, Any] | None = None):
 
     if not _check_browser_backend(config):
         raise RuntimeError(
-            "no browser backend available. Run: pip install patchright (or pip install cloakbrowser)"
+            "no browser backend available. Run: pip install patchright "
+            "(or pip install 'scansci-pdf[camoufox]')"
         )
-
-    backend = resolve_backend(config)
-
-    # Platform compat shim + kernel override only apply to CloakBrowser
-    if backend == BACKEND_CLOAKBROWSER:
-        try:
-            from ..institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-            ensure_cloakbrowser_platform_compatible()
-        except Exception:
-            try:
-                from .institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-                ensure_cloakbrowser_platform_compatible()
-            except Exception:
-                pass
-        binary = resolve_browser_binary(config)
-        if binary:
-            os.environ["CLOAKBROWSER_BINARY_PATH"] = binary
 
     # scihub_browser_headless overrides browser_headless for THIS shared
     # browser (the grey-source racing engine). It exists because the racing
@@ -324,20 +304,9 @@ def get_persistent_context(
     """
     if not _check_browser_backend(config):
         raise RuntimeError(
-            "no browser backend available. Run: pip install patchright (or pip install cloakbrowser)"
+            "no browser backend available. Run: pip install patchright "
+            "(or pip install 'scansci-pdf[camoufox]')"
         )
-
-    backend = resolve_backend(config)
-
-    if backend == BACKEND_CLOAKBROWSER:
-        try:
-            from .cloakbrowser_compat import prepare_cloakbrowser_runtime
-            prepare_cloakbrowser_runtime()
-        except Exception:
-            pass
-        binary = resolve_browser_binary(config)
-        if binary:
-            os.environ["CLOAKBROWSER_BINARY_PATH"] = binary
 
     headless = False
     humanize = True
@@ -397,19 +366,6 @@ def shutdown_shared_browser():
         _tls.browser = None
         _tls.context = None
         logger.info("browser_engine: browser shut down")
-
-
-def _ensure_compat():
-    """Ensure CloakBrowser platform compatibility."""
-    try:
-        from ..institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-        ensure_cloakbrowser_platform_compatible()
-    except Exception:
-        try:
-            from .institutional.cloakbrowser_compat import ensure_cloakbrowser_platform_compatible
-            ensure_cloakbrowser_platform_compatible()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +431,7 @@ def solve_url(
     *,
     max_timeout: int = 60000,
 ) -> dict[str, Any] | None:
-    """Fetch URL via CloakBrowser shared browser. Returns dict with status/solution keys."""
+    """Fetch URL via browser shared browser. Returns dict with status/solution keys."""
     page = None
     try:
         _, context = _get_shared_browser(config)
@@ -643,7 +599,7 @@ def download_pdf_via_browser(
     *,
     timeout: float = 60.0,
 ) -> bool:
-    """Download a PDF URL via CloakBrowser shared browser. Returns True on success.
+    """Download a PDF URL via browser shared browser. Returns True on success.
 
     4-strategy cascade:
     1. Network response capture (from page.on("response"))

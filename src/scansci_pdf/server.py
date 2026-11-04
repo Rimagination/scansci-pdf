@@ -64,7 +64,7 @@ def scansci_pdf_download(
             )
         elif error_type == "cloudflare_blocked":
             result["agent_hint"] = (
-                "Cloudflare 防护阻止访问。请提示用户启动 CloakBrowser（端口 9377），"
+                "Cloudflare 防护阻止访问。请提示用户启动可见浏览器（patchright 或 camoufox），"
                 "或配置代理后重试。"
             )
         # Elsevier papers: API fast-path guidance
@@ -1088,10 +1088,10 @@ def scansci_pdf_auto_setup() -> str:
     try:
         from .browser_engine import is_available
         if is_available(config):
-            report["actions"].append("CloakBrowser is running")
+            report["actions"].append("browser backend is running")
             report["status"]["browser"] = "running"
         else:
-            report["actions"].append("CloakBrowser not running (optional, for Cloudflare bypass)")
+            report["actions"].append("browser backend not running (optional, for Cloudflare bypass)")
             report["status"]["browser"] = "not_running"
     except Exception:
         report["status"]["browser"] = "unknown"
@@ -1369,7 +1369,7 @@ def scansci_pdf_springer_setup(test: bool = False) -> str:
 def scansci_pdf_network_diagnose() -> str:
     """Diagnose network connectivity and provide actionable fix suggestions.
 
-    Tests DNS resolution, TCP connectivity, proxy, Tor, and CloakBrowser status.
+    Tests DNS resolution, TCP connectivity, proxy, Tor, and browser backend status.
     Returns specific configuration commands to fix detected issues.
     """
     from .sources.scoring import diagnose_network
@@ -1958,7 +1958,7 @@ def scansci_pdf_import_browser_cookies(
     url: str = "https://www.sciencedirect.com/",
     max_wait: int = 300,
 ) -> str:
-    """Extract publisher cookies via CloakBrowser for institutional access.
+    """Extract publisher cookies via browser backend for institutional access.
 
     Opens a visible stealth browser window. Log in to your institution (university library),
     then close the browser. Cookies are saved and automatically used for all future downloads.
@@ -2002,7 +2002,7 @@ def _publisher_login_impl(
 
 
 def scansci_pdf_browser_status() -> str:
-    """Check CloakBrowser availability and configuration."""
+    """Check browser backend availability and configuration."""
     config = load_config()
     from .browser_engine import is_available
     available = is_available(config)
@@ -2018,7 +2018,7 @@ def scansci_pdf_browser_login(
 ) -> str:
     """Open a stealth browser for institutional login (WebVPN/CARSI/EZProxy/custom).
 
-    Captures cookies after login and auto-imports them into CloakBrowser.
+    Captures cookies after login and auto-imports them into browser backend.
 
     Args:
         login_type: One of "webvpn", "carsi", "ezproxy", "custom"
@@ -2048,7 +2048,7 @@ def scansci_pdf_browser_login(
 
 
 def scansci_pdf_browser_import_cookies(cookie_file: str) -> str:
-    """Import Netscape-format cookies into CloakBrowser.
+    """Import Netscape-format cookies into browser backend.
 
     Args:
         cookie_file: Path to Netscape-format cookie file
@@ -2056,7 +2056,7 @@ def scansci_pdf_browser_import_cookies(cookie_file: str) -> str:
     config = load_config()
     from .browser_engine import import_cookies, is_available
     if not is_available(config):
-        return json.dumps({"error": "CloakBrowser is not running"})
+        return json.dumps({"error": "browser backend is not running"})
     try:
         count = import_cookies(cookie_file, config)
         return json.dumps({"imported": count, "file": cookie_file}, ensure_ascii=False)

@@ -5,7 +5,7 @@ Usage:
     python -m tests.test_sso_publishers --list
     python -m tests.test_sso_publishers --report
 
-Interactive: opens a visible CloakBrowser for each publisher. You must
+Interactive: opens a visible browser for each publisher. You must
 complete the CAS/SSO login in the browser window. The script detects
 success and moves on to the next publisher.
 
