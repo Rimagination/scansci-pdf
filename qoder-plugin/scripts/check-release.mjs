@@ -33,6 +33,12 @@ const fail = (message) => {
   throw new CheckFailed(message)
 }
 
+// Rich/Typer styles each option name, so a PTY can emit `-\x1b[...m-profile`
+// instead of the literal `--profile`. Strip ANSI before matching; NO_COLOR is
+// set on the child as well, but stripping keeps a forced-color environment
+// from turning this gate into a false negative.
+const stripAnsi = (text) => text.replace(/\x1b\[[0-9;]*m/g, '')
+
 async function main() {
   console.log(`Qoder manifest version: ${version}`)
 
@@ -81,8 +87,23 @@ async function main() {
       { stdio: 'inherit' }
     )
 
-    const help = execFileSync(cli, ['run', '--help'], { encoding: 'utf8' })
+    const installed = execFileSync(
+      venvPython,
+      ['-c', 'import scansci_pdf; print(scansci_pdf.__version__)'],
+      { encoding: 'utf8' }
+    ).trim()
+    console.log(`Installed package version: ${installed}`)
+
+    const help = stripAnsi(
+      execFileSync(cli, ['run', '--help'], {
+        encoding: 'utf8',
+        env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
+      })
+    )
     if (!help.includes('--profile')) {
+      console.error('--- scansci-pdf run --help (first 2000 chars) ---')
+      console.error(help.slice(0, 2000))
+      console.error('--- end help ---')
       fail(
         `${pkg} ${version} is on PyPI but its CLI does not expose --profile. ` +
           `Do not upload the Qoder ZIP; release a version that includes the profile first.`
