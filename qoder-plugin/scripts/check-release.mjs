@@ -67,10 +67,19 @@ async function main() {
 
   try {
     console.log(`\nCreating a clean venv: ${venv}`)
-    execFileSync(python, ['-m', 'venv', venv], { stdio: 'inherit' })
-    execFileSync(venvPython, ['-m', 'pip', 'install', '--quiet', `${pkg}==${version}`], {
-      stdio: 'inherit',
-    })
+    // The venv's bundled pip can lag PyPI's index (observed with pip 24.0
+    // immediately after a release). Upgrade it and query PyPI directly so the
+    // gate tests the artifact, not a stale mirror/cache.
+    execFileSync(python, ['-m', 'venv', '--upgrade-deps', venv], { stdio: 'inherit' })
+    execFileSync(
+      venvPython,
+      [
+        '-m', 'pip', 'install', '--quiet', '--no-cache-dir',
+        '--index-url', 'https://pypi.org/simple',
+        `${pkg}==${version}`,
+      ],
+      { stdio: 'inherit' }
+    )
 
     const help = execFileSync(cli, ['run', '--help'], { encoding: 'utf8' })
     if (!help.includes('--profile')) {
