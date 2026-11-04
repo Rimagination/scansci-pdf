@@ -149,6 +149,37 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "carsi_cookie_dir": "",
 }
 
+# Compliance profiles are enforced by the process that serves the MCP connector.
+# They are deliberately NOT user-configurable: a profile is selected on the
+# command line (`scansci-pdf run --profile qoder`) and can only tighten the
+# source set, never widen it.
+_PROFILE_ENV = "SCANSCI_PDF_PROFILE"
+GREY_STRATEGIES = frozenset({"scihub_first", "scihub_only", "grey_only"})
+_COMPLIANCE_PROFILES: dict[str, dict[str, Any]] = {
+    "qoder": {
+        "scihub_enabled": False,
+        "download_strategy": "legal_only",
+    },
+}
+
+
+def active_profile() -> str:
+    """Return the active compliance profile (default: ``default``)."""
+    return os.environ.get(_PROFILE_ENV, "default").strip().lower() or "default"
+
+
+def is_legal_only_profile() -> bool:
+    """True when the active profile forbids grey sources."""
+    overrides = _COMPLIANCE_PROFILES.get(active_profile(), {})
+    return overrides.get("scihub_enabled") is False
+
+
+def _apply_compliance_profile(config: dict[str, Any]) -> dict[str, Any]:
+    profile = active_profile()
+    config["profile"] = profile
+    config.update(_COMPLIANCE_PROFILES.get(profile, {}))
+    return config
+
 
 def load_config() -> dict[str, Any]:
     config = DEFAULT_CONFIG.copy()
@@ -162,13 +193,16 @@ def load_config() -> dict[str, Any]:
             pass
     for key, value in DEFAULT_CONFIG.items():
         config.setdefault(key, value)
-    return config
+    return _apply_compliance_profile(config)
 
 
 def save_config(config: dict[str, Any]) -> None:
+    # `profile` is derived from the process environment, never persisted: the
+    # same config file may be used by the full package and the Qoder edition.
+    persisted = {k: v for k, v in config.items() if k != "profile"}
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with CONFIG_FILE.open("w", encoding="utf-8") as fh:
-        json.dump(config, fh, indent=2, ensure_ascii=False)
+        json.dump(persisted, fh, indent=2, ensure_ascii=False)
 
 
 _VALIDATION_RULES: dict[str, tuple[type, Any, Any]] = {
@@ -194,6 +228,13 @@ def update_config(key: str, value: str) -> dict[str, Any]:
     import warnings as _warnings
 
     config = load_config()
+
+    locked = _COMPLIANCE_PROFILES.get(active_profile(), {})
+    if key in locked:
+        raise ValueError(
+            f"Config key '{key}' is locked by the '{active_profile()}' compliance "
+            f"profile (forced to {locked[key]!r})"
+        )
 
     # Validate: warn on unknown keys
     if key not in DEFAULT_CONFIG:

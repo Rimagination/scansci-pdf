@@ -323,14 +323,16 @@ class PublisherBatchDownloader:
         attempt_cache: str | Path | None = None,
         skip_attempted: bool = False,
         concurrency: int = 1,
+        report_progress: bool = True,
     ) -> dict[str, Any]:
         """Download all records and write summary/manifest artifacts."""
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
-        self._progress_active = True
-        progress_reporter.start_task(
-            f"出版商下载 · {self.profile.name}", total=len(records),
-        )
+        self._progress_active = report_progress
+        if report_progress:
+            progress_reporter.start_task(
+                f"出版商下载 · {self.profile.name}", total=len(records),
+            )
         target = target_verified if target_verified and target_verified > 0 else None
         worker_count = min(max(1, int(concurrency or 1)), MAX_BROWSER_CONCURRENCY)
         if target:
@@ -357,7 +359,7 @@ class PublisherBatchDownloader:
                     missing_reasons[record.doi.lower()] = "skipped_cached_attempt"
                 else:
                     records_to_run.append(record)
-            if cached_skipped:
+            if cached_skipped and report_progress:
                 progress_reporter.update(
                     done=cached_skipped, phase="跳过已尝试",
                 )
@@ -459,7 +461,8 @@ class PublisherBatchDownloader:
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        progress_reporter.finish()
+        if report_progress:
+            progress_reporter.finish()
         self._progress_active = False
         return summary
 

@@ -177,7 +177,7 @@ def fetch(
     use_tor: bool = False,
 ) -> requests.Response:
     domain_rate_limit(url)
-    host_concurrency_acquire(url, config)
+    host_lease = host_concurrency_acquire(url, config)
     try:
         merged_headers = {"User-Agent": USER_AGENT}
         if headers:
@@ -194,7 +194,7 @@ def fetch(
             stream=stream,
         )
     finally:
-        host_concurrency_release(url, config)
+        host_concurrency_release(url, config, host_lease)
 
 
 def fetch_json(
@@ -334,7 +334,45 @@ _DEFAULT_HOST_CONCURRENCY: dict[str, int] = {
     "export.arxiv.org": 2,
 }
 
-_host_semaphores: dict[str, threading.Semaphore] = {}
+class _HostConcurrencyLease:
+    def __init__(self, gate: _HostConcurrencyGate, limit: int):
+        self._gate = gate
+        self._limit = limit
+
+    def release(self) -> None:
+        self._gate.release(self._limit)
+
+
+class _HostConcurrencyGate:
+    """A host gate that respects every active and waiting caller's limit."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._active: list[int] = []
+        self._waiting: list[int] = []
+
+    def acquire(self, limit: int) -> _HostConcurrencyLease:
+        with self._condition:
+            self._waiting.append(limit)
+            try:
+                while len(self._active) >= min(self._active + self._waiting):
+                    self._condition.wait()
+                self._waiting.remove(limit)
+                self._active.append(limit)
+                return _HostConcurrencyLease(self, limit)
+            except BaseException:
+                self._waiting.remove(limit)
+                self._condition.notify_all()
+                raise
+
+    def release(self, limit: int) -> None:
+        with self._condition:
+            self._active.remove(limit)
+            self._condition.notify_all()
+
+
+_host_semaphores: dict[str, _HostConcurrencyGate] = {}
+_host_semaphores_lock = threading.Lock()
 
 
 def _get_host_concurrency(host: str, config: dict[str, Any]) -> int:
@@ -349,23 +387,33 @@ def _get_host_concurrency(host: str, config: dict[str, Any]) -> int:
     return 0
 
 
-def host_concurrency_acquire(url: str, config: dict[str, Any]) -> None:
-    """Acquire a per-host concurrency slot. Blocks if at limit."""
+def host_concurrency_acquire(url: str, config: dict[str, Any]) -> _HostConcurrencyLease | None:
+    """Acquire a per-host concurrency lease. Blocks if at the effective limit."""
     host = _extract_domain(url)
     if not host:
-        return
+        return None
     limit = _get_host_concurrency(host, config)
     if limit <= 0:
+        return None
+    gate = _host_semaphores.get(host)
+    if gate is None:
+        with _host_semaphores_lock:
+            gate = _host_semaphores.get(host)
+            if gate is None:
+                gate = _HostConcurrencyGate()
+                _host_semaphores[host] = gate
+    return gate.acquire(limit)
+
+
+def host_concurrency_release(
+    url: str, config: dict[str, Any], lease: _HostConcurrencyLease | None = None
+) -> None:
+    """Release the acquired lease; the two-argument form remains compatible."""
+    if lease is not None:
+        lease.release()
         return
-    if host not in _host_semaphores:
-        _host_semaphores[host] = threading.Semaphore(limit)
-    _host_semaphores[host].acquire()
-
-
-def host_concurrency_release(url: str, config: dict[str, Any]) -> None:
-    """Release a per-host concurrency slot."""
     host = _extract_domain(url)
-    if not host:
-        return
-    if host in _host_semaphores:
-        _host_semaphores[host].release()
+    limit = _get_host_concurrency(host, config) if host else 0
+    gate = _host_semaphores.get(host)
+    if gate is not None and limit > 0:
+        gate.release(limit)
