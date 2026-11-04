@@ -16,7 +16,7 @@ scansci-pdf check
 
 > 本插件使用 `--profile qoder`，需要包含该参数的 scansci-pdf 版本。如果启动时报 unknown option，先执行上面的 `pip install -U` 升级。
 
-装好后在 Qoder 的「扩展管理 → 连接器」里应能看到 `scansci-pdf`，状态为就绪、20 个工具。若显示启动失败，通常是 CLI 不在 PATH：把 `command` 改成绝对路径即可，例如 Windows 上形如
+装好后在 Qoder 的「扩展管理 → 连接器」里应能看到 `scansci-pdf`，状态为就绪、19 个工具。若显示启动失败，通常是 CLI 不在 PATH：把 `command` 改成绝对路径即可，例如 Windows 上形如
 
 ```text
 C:\Users\<用户名>\AppData\Local\Programs\Python\Python311\Scripts\scansci-pdf.exe

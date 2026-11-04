@@ -1,9 +1,9 @@
 {
   "name": "scansci-pdf",
   "displayName": "ScanSci 文献获取",
-  "version": "1.19.0",
-  "description": "Academic paper search, download, citation export and literature triage through the channels each user has authorized — open access, publisher APIs, university WebVPN/CARSI. This edition is legal-only: grey sources are disabled. Requires Python 3.11+ and the scansci-pdf package on this machine; see CONNECTORS.md.",
-  "descriptionZh": "面向科研与文献工作的学术获取套件：检索与引文追踪、按用户已授权渠道启用的开放获取 / 出版商 API / 高校 WebVPN·CARSI 多通道下载、大型清单的分类摸底与分批续传、BibTeX/RIS/EndNote 引文导出，以及逐渠道失败诊断。此版本固定 legal-only，不启用灰色源。前置条件：本机已安装 Python 3.11+ 与 scansci-pdf 包（详见 CONNECTORS.md）。",
+  "version": "1.20.0",
+  "description": "Academic paper search, download, citation export and batch literature workflows through the channels each user has authorized — open access, publisher APIs, university WebVPN/CARSI. This edition is legal-only: grey sources are disabled. Requires Python 3.11+ and the scansci-pdf package on this machine; see CONNECTORS.md.",
+  "descriptionZh": "面向科研与文献工作的学术获取套件：检索与引文追踪、按用户已授权渠道启用的开放获取 / 出版商 API / 高校 WebVPN·CARSI 多通道下载、大型清单的分批续传、BibTeX/RIS/EndNote 引文导出，以及逐渠道失败诊断。此版本固定 legal-only，不启用灰色源。前置条件：本机已安装 Python 3.11+ 与 scansci-pdf 包（详见 CONNECTORS.md）。",
   "author": {
     "name": "Rimagination",
     "url": "https://github.com/Rimagination"

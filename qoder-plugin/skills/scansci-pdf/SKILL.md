@@ -4,9 +4,9 @@ description: >
   Use this skill whenever the user wants to download academic papers, search for research literature,
   get citations (BibTeX/RIS/EndNote), manage WebVPN institutional proxy for paper access,
   import .bib files, or batch-download papers. This skill orchestrates the scansci-pdf MCP server
-  which exposes 20 high-level tools covering download (OA/grey/institutional channels),
+  which exposes 19 high-level tools covering download (OA/institutional channels),
   discovery, queue preparation, diagnostics, and login.
-  TRIGGER when: user mentions downloading papers, DOI, arXiv ID, Sci-Hub, paper search,
+  TRIGGER when: user mentions downloading papers, DOI, arXiv ID, paper search,
   literature review, citation export, WebVPN, institutional access, "帮我下载论文", "搜索文献",
   "批量下载", "论文下载", "文献检索", or provides a list of DOIs/arXiv IDs.
   SKIP: user is only discussing papers conceptually without intent to download/search/cite,
@@ -20,25 +20,25 @@ description: >
 
 ## ⚠️ 维护者须知（修改源码前）
 
-以下内容只面向 `scansci-pdf` 源码维护者，普通使用无需阅读。修改反爬/嗅探/镜像相关代码前必读：先读 [`references/PLAYBOOK.md`](references/PLAYBOOK.md)：镜像健康唯一存储（domain_db wall_state 表）、
+以下内容只面向 `scansci-pdf` 源码维护者，普通使用无需阅读。修改反爬/嗅探/镜像相关代码前必读：先读 [`docs/PLAYBOOK.md`](https://github.com/Rimagination/scansci-pdf/blob/main/docs/PLAYBOOK.md)：镜像健康唯一存储（domain_db wall_state 表）、
 结构性失败签名表、节奏参数、已知死镜像清单、以及六条铁律（含"造轮子前先 grep 家底"——
 镜像健康存储曾被重复造过三代）。
 
-> 进阶配置（可选增强、浏览器后端、Docker / HTTP 部署、排障速查）见 [`references/REFERENCE.md`](references/REFERENCE.md)。
+> 进阶配置（可选增强、浏览器后端、Docker / HTTP 部署、排障速查）见 [`docs/REFERENCE.md`](https://github.com/Rimagination/scansci-pdf/blob/main/docs/REFERENCE.md)。
 ## 概述
 
-scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 灰色源 / 机构渠道）、Sciverse 语义检索、发现与队列准备、引文导出和诊断排障。下载引擎支持 20+ 数据源并行竞速、100+ 中国高校 WebVPN。
+scansci-pdf 是一个 MCP 服务器，提供 **19 个高层工具**，覆盖学术论文的搜索、下载（开放获取 / 机构渠道）、Sciverse 语义检索、发现与队列准备、引文导出和诊断排障。下载引擎支持 20+ 数据源并行竞速、100+ 中国高校 WebVPN。
 
 > 工具名可能带宿主的 MCP 命名空间前缀（`mcp__<server>__<tool>`）；以当前工具列表中实际注册的名称为准。
 
-## MCP 工具参考（20 个）
+## MCP 工具参考（19 个）
 
 ### 下载
 
 | 工具 | 功能 | 关键参数 |
 |------|------|----------|
-| `scansci_pdf_download` | 单篇下载（OA/灰色源/机构级联） | `identifier`（必需）、`strategy`（可覆盖全局策略）、`markdown`/`bibtex`/`download_si`（可选） |
-| `scansci_pdf_batch_download` | 批量下载 | `identifiers`（必需）、`scihub_enabled`、`batch_id`（断点续传）、`resume`（默认 true） |
+| `scansci_pdf_download` | 单篇下载（OA/机构级联） | `identifier`（必需）、`strategy`（可覆盖全局策略）、`markdown`/`bibtex`/`download_si`（可选） |
+| `scansci_pdf_batch_download` | 批量下载 | `identifiers`（必需）、`batch_id`（断点续传）、`resume`（默认 true） |
 | `scansci_pdf_cache_clear` | 清理下载缓存 | `identifier`（可选，省略清全部） |
 
 **identifier 格式**：DOI（`10.1038/nature12373`）、DOI URL、arXiv ID（`2301.00001`）。
@@ -47,13 +47,11 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 
 | 策略 | 含义 |
 |------|------|
-| `fastest`（默认） | 全部源并行竞速（含灰色源，若 `scihub_enabled=true`） |
-| `oa_first` | OA 源优先，失败后回退灰色源 |
-| `scihub_first` | 灰色源优先，失败后回退合法源 |
-| `scihub_only` | 仅 Sci-Hub |
-| `legal_only` | 仅合法源（Unpaywall/出版商/OpenAIRE 等），不碰 Sci-Hub/LibGen |
+| `fastest`（默认） | 全部合法源并行竞速（本版本固定 legal-only） |
+| `oa_first` | OA 源优先 |
+| `legal_only` | 仅合法源（Unpaywall/出版商/OpenAIRE 等） |
 
-**来源授权不可被调度扩张**：用户显式设置 `scihub_enabled=false` 或 `legal_only` 时，任何批量/车道调度都不会重新启用灰色源；只有显式 `--scihub`/`scihub_enabled=true` 或全局策略允许时才启用。
+**来源授权不可被调度扩张**：本版本固定 `legal_only`，不启用灰色源；批量/车道调度也不会重新启用。
 
 ### 发现与队列准备
 
@@ -80,7 +78,6 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 | `scansci_pdf_channel_status` | 机构渠道状态：`kind=webvpn\|carsi\|ezproxy\|browser\|webvpn_test` | `kind`、`doi`（仅测试） |
 | `scansci_pdf_schools` | 搜索/设置 WebVPN 高校 | `action=search\|set`、`query`、`school` |
 | `scansci_pdf_diagnostics` | 健康/网络/来源/设置诊断 | `check=health\|network\|sources\|setup` |
-| `scansci_pdf_tor` | 内嵌 Tor：`action=install\|start\|stop` | `action`、`use_bridges` |
 
 ### 登录（机构渠道）
 
@@ -180,14 +177,6 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 
 **要点**：不配置不影响现有检索与下载；检索时若未配置，结果会带 `config_hint` 提示。每次 search 默认跑 agentic + meta 两路，配额紧张时 `scansci_pdf_config(key="sciverse_meta_search_enabled", value="false")`。
 
-### 流程 7：内嵌 Tor（灰色源被墙时）
-
-```
-1. scansci_pdf_tor(action="install")   # 首次下载 Tor Expert Bundle
-2. scansci_pdf_tor(action="start")     # 受限网络可 use_bridges=true
-3. scansci_pdf_download(identifier="...", strategy="scihub_only")
-```
-
 ### 流程 7：某学者的 TOP-N 被引论文
 
 ```
@@ -218,7 +207,7 @@ scansci-pdf 是一个 MCP 服务器，提供 **20 个高层工具**，覆盖学�
 
 - **`search` 的 `author=` 曾经会命中同名假档案（2026-10-22 已修）**。传 `author="Shilong Piao"` 时旧版只返回 1 条 figshare 数据集，命中 `A5072538516`（1 篇 / 0 被引）：权威档案 `A5000033522`（999 篇 / 125 224 被引）因为带中间名缩写 `L.` 不算"精确匹配"而被排除，`max()` 于是在假档案里选。现已改为名字 token 兼容（容忍中间名缩写、紧凑缩写 `L.Piao`、姓在前；Jr/Sr/III/IV 不同会被拒绝）后取最大，并在 `_author_match` 里返回 `exact`、`fallback` 与 `alternatives`。**旧版仍会选错**，此时先解析 `author_id` 再用 `author_id=` 调；看到 `exact=false`、`fallback=true` 或 `alternatives` 非空时，核对一下选中的是不是目标学者。
 - **`batch_download` 的 `failed` 计数曾经会骗人（2026-10-22 已修）**。车道模式下重试成功的 DOI 会留两行（先 failed 后 success），旧版按行计数，于是 `total` 大于去重条数（实测 24 > 20）、`failed: 4` 与 `succeeded: 20` 同时出现。现已由 `server._merge_lane_results` 按论文合并（成功覆盖失败，新增 `retried` 计数）。**旧版或其它宿主的返回仍可能这样**，此时以 `failed_dois` 和每条的 `success` 为准。
-- **每篇会落 2–4 个源标记副本**。除自动改名的 `Piao2009_Carbon.pdf` 外，还可能留 `10.xxxx_Sci-Hub.pdf`、`_CrossrefPage.pdf`、`_NatureDirect.pdf`、`_PublisherDirect.pdf`、`_OpenAIRE.pdf`；其中一份与最终改名文件逐字节相同（实测 20 篇留下 34 个多余副本）。**交付前必须去重**，否则文件夹里全是同一篇的多份副本。
+- **每篇会落 2–4 个源标记副本**。除自动改名的 `Piao2009_Carbon.pdf` 外，还可能留 `_CrossrefPage.pdf`、`_NatureDirect.pdf`、`_PublisherDirect.pdf`、`_OpenAIRE.pdf`；其中一份与最终改名文件逐字节相同（实测 20 篇留下 34 个多余副本）。**交付前必须去重**，否则文件夹里全是同一篇的多份副本。
 - **`output_dir` 不要指向宿主运行时新建的子目录**。在 DSH 这类沙箱宿主里，由非沙箱进程（MCP server 自己）创建的子目录拿不到沙箱写权限：`write` 工具能写，但 `pwsh` 之后在同一目录里新建或删除任何文件都报 Access denied，把"删几个副本"拖成一轮权限排查。**先让宿主在自己的目录里建好目标文件夹，再下到那里**。
 - **校验用轻量手段**：大小 ≥ `min_pdf_size_bytes`（默认 10 000）+ 头 5 字节 `%PDF-` 即可判定；要页数就用 `pymupdf` 一次跑完。实测 `_check.py` 第一版把 `doc.close()` 写在 `doc.page_count` 之前，20 篇全报 "document closed"，白跑一轮。
 - **非正式版本要点出来**：机构库存档稿（"Accepted Article"、"archived peer-reviewed author-version"）与 early-online-release 都是合法 PDF，但页数和排版与正式版差别很大（实测 71 页 vs 正式版约 20 页），交付时要说明版本性质。

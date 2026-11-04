@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -71,6 +74,78 @@ def test_qoder_connector_uses_profile():
 
     args = data["mcpServers"]["scansci-pdf"]["args"]
     assert args == ["run", "--profile", "qoder"]
+
+
+def _server_has_tor(env: dict[str, str]) -> bool:
+    code = (
+        "from scansci_pdf import server; "
+        "print('HAS_TOR=' + str(hasattr(server, 'scansci_pdf_tor')))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], env=env, text=True, capture_output=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    return "HAS_TOR=True" in proc.stdout
+
+
+def test_qoder_profile_omits_tor_tool():
+    env = os.environ.copy()
+    env["SCANSCI_PDF_PROFILE"] = "qoder"
+    env["PYTHONWARNINGS"] = "ignore"
+
+    assert _server_has_tor(env) is False
+
+
+def test_qoder_profile_registers_19_tools():
+    env = os.environ.copy()
+    env["SCANSCI_PDF_PROFILE"] = "qoder"
+    env["PYTHONWARNINGS"] = "ignore"
+    code = (
+        "import asyncio; "
+        "from scansci_pdf.server import mcp_app; "
+        "print('COUNT=' + str(len(asyncio.run(mcp_app.list_tools()))))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], env=env, text=True, capture_output=True
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "COUNT=19" in proc.stdout
+
+
+def test_default_profile_exposes_tor_tool():
+    env = os.environ.copy()
+    env.pop("SCANSCI_PDF_PROFILE", None)
+    env["PYTHONWARNINGS"] = "ignore"
+
+    assert _server_has_tor(env) is True
+
+
+def test_qoder_skill_copy_has_no_grey_capability():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "qoder-plugin" / "skills" / "scansci-pdf" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    for needle in (
+        "Sci-Hub",
+        "LibGen",
+        "scihub_enabled",
+        "scihub_only",
+        "scihub_first",
+        "scansci_pdf_tor",
+        "内嵌 Tor",
+    ):
+        assert needle not in text, f"Qoder skill copy still advertises {needle}"
+
+
+def test_qoder_bundle_excludes_playbook_and_sort():
+    root = Path(__file__).resolve().parents[1] / "qoder-plugin"
+
+    assert not (root / "skills" / "scansci-pdf" / "references" / "PLAYBOOK.md").exists()
+    assert not (root / "skills" / "scansci-pdf" / "references" / "REFERENCE.md").exists()
+    assert not (root / "skills" / "scansci-sort" / "SKILL.md").exists()
+    assert not (root / "commands" / "scansci" / "sort.md").exists()
 
 
 def test_default_profile_keeps_grey_available():

@@ -18,9 +18,9 @@
 
 | 组件 | 内容 |
 | --- | --- |
-| Skills | `scansci-pdf`（主工作流，附 `references/` 两份进阶文档）、`scansci-sort`（大清单分类摸底） |
-| Commands | `/scansci:paper`、`/scansci:batch`、`/scansci:sort`、`/scansci:doctor` |
-| Connector | `.mcp.json` 声明本地 stdio MCP 服务器 `scansci-pdf`，提供 20 个工具 |
+| Skills | `scansci-pdf`（主工作流；进阶配置见仓库 `docs/REFERENCE.md`） |
+| Commands | `/scansci:paper`、`/scansci:batch`、`/scansci:doctor` |
+| Connector | `.mcp.json` 声明本地 stdio MCP 服务器 `scansci-pdf`，提供 19 个工具 |
 | 前置条件 | 见 `CONNECTORS.md`：本机需要 Python 3.11+ 与 `scansci-pdf` 包 |
 
 ## 安装后自检

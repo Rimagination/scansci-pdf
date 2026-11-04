@@ -13,7 +13,7 @@ except ModuleNotFoundError:  # mcp >= 2.0 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP
 
 from .cache import cache_clear, cache_get
-from .config import SENSITIVE_KEYS, get_config_safe, load_config, mask_config_value, update_config
+from .config import SENSITIVE_KEYS, get_config_safe, is_legal_only_profile, load_config, mask_config_value, update_config
 from .network import fetch_json
 from .paperlist import parse_paper_list
 from .resolver import batch_resolve
@@ -2230,30 +2230,33 @@ def _tor_is_installed() -> bool:
         return False
 
 
-@mcp_app.tool()
-def scansci_pdf_tor(action: str = "start", use_bridges: bool = False, confirmed: bool = False) -> str:
-    """Embedded Tor SOCKS5 proxy: action=install|start|stop; use_bridges enables obfs4. Install, and a start that must download the bundle, need confirmed=true."""
-    if action == "install" and not confirmed:
-        return json.dumps({
-            "success": False,
-            "action": action,
-            "requires_confirmation": True,
-            "error": "installing downloads and executes a third-party bundle; call again with confirmed=true if that is intended",
-        }, ensure_ascii=False)
-    if action == "install":
-        return scansci_pdf_tor_install()
-    if action == "stop":
-        return scansci_pdf_tor_stop()
-    if not confirmed and not _tor_is_installed():
-        # start installs on demand, so gating only action="install" would leave
-        # the same download reachable through this path (#71).
-        return json.dumps({
-            "success": False,
-            "action": action,
-            "requires_confirmation": True,
-            "error": "no tor binary is installed, so starting would download and execute one; call again with confirmed=true if that is intended",
-        }, ensure_ascii=False)
-    return scansci_pdf_tor_start(use_bridges=use_bridges)
+# The Qoder edition is legal-only, so it does not expose the embedded Tor
+# proxy: Tor is only an operational aid for grey-source access here.
+if not is_legal_only_profile():
+    @mcp_app.tool()
+    def scansci_pdf_tor(action: str = "start", use_bridges: bool = False, confirmed: bool = False) -> str:
+        """Embedded Tor SOCKS5 proxy: action=install|start|stop; use_bridges enables obfs4. Install, and a start that must download the bundle, need confirmed=true."""
+        if action == "install" and not confirmed:
+            return json.dumps({
+                "success": False,
+                "action": action,
+                "requires_confirmation": True,
+                "error": "installing downloads and executes a third-party bundle; call again with confirmed=true if that is intended",
+            }, ensure_ascii=False)
+        if action == "install":
+            return scansci_pdf_tor_install()
+        if action == "stop":
+            return scansci_pdf_tor_stop()
+        if not confirmed and not _tor_is_installed():
+            # start installs on demand, so gating only action="install" would leave
+            # the same download reachable through this path (#71).
+            return json.dumps({
+                "success": False,
+                "action": action,
+                "requires_confirmation": True,
+                "error": "no tor binary is installed, so starting would download and execute one; call again with confirmed=true if that is intended",
+            }, ensure_ascii=False)
+        return scansci_pdf_tor_start(use_bridges=use_bridges)
 
 
 @mcp_app.tool()
