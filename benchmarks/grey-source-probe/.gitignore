@@ -1,0 +1,4 @@
+# Probe artifacts: downloaded PDFs and per-run state stay out of git.
+runs/
+*.pdf
+!results/*.json

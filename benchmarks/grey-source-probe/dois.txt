@@ -1,0 +1,24 @@
+# Closed-access grey-source probe — 20 DOIs (one per line).
+# All were classified closed by Unpaywall or OpenAlex on 2026-11-04.
+# Metadata and per-paper notes: papers.json
+# Run: scansci-pdf batch benchmarks/grey-source-probe/dois.txt --scihub
+10.1038/nature14236
+10.1038/nature16961
+10.1109/JPROC.2004.840301
+10.1109/TPAMI.2019.2913372
+10.1145/1294261.1294281
+10.1145/1365815.1365816
+10.1145/1961189.1961199
+10.1016/S0169-7552(98)00110-X
+10.1016/j.jbusres.2021.04.070
+10.1007/BF00344251
+10.1023/A:1009715923555
+10.1037/h0042519
+10.1162/neco.2006.18.7.1527
+10.1046/j.1365-2648.2003.02537.x
+10.1098/rstb.1952.0012
+10.1126/science.162.3859.1243
+10.1086/228943
+10.1039/C8CS00699G
+10.1093/bioinformatics/btz307
+10.1063/1.1699114
