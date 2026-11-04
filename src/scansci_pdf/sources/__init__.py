@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..cache import cache_get, cache_set
-from ..config import load_config, DATA_DIR
+from ..config import DATA_DIR, GREY_STRATEGIES, is_legal_only_profile, load_config
 from ..identifiers import is_arxiv_identifier, is_chinese_doi, normalize_doi, safe_filename
 from ..log import get_logger
 from ..pdf_utils import fail
@@ -411,20 +411,20 @@ def _build_free_sources(doi: str, config: dict[str, Any]) -> list[tuple[Any, str
     if config.get("openalex_api_key"):
         legal_sources.append((try_openalex_content_api, "OpenAlexContent"))
 
-    # Grey / shadow-library sources (Sci-Hub, SciBban, LibGen) are all gated
-    # by scihub_enabled. The fallback mirrors config.DEFAULT_CONFIG (True):
-    # grey sources are a core, default-on capability and a partial config
-    # dict must not silently disable them. Opt-out is explicit
-    # (scihub_enabled=false / strategy=legal_only).
+    # Grey / shadow-library sources (Sci-Hub, SciBban, LibGen) are gated by
+    # scihub_enabled. A compliance profile (e.g. the Qoder edition) is a hard
+    # ceiling and disables them regardless of the config file. Opt-out is
+    # otherwise explicit (scihub_enabled=false / strategy=legal_only).
+    grey_enabled = config.get("scihub_enabled", True) and not is_legal_only_profile()
     grey_sources: list[tuple[Any, str]] = []
-    if config.get("scihub_enabled", True):
+    if grey_enabled:
         grey_sources.append((try_scibban, "SciBban"))
         grey_sources.append((try_libgen, "LibGen"))
         grey_sources.append((try_scihub, "Sci-Hub"))
 
     if strategy == "scihub_only":
         # Only Sci-Hub (not SciBban, not LibGen)
-        return sort_sources([(try_scihub, "Sci-Hub")]) if config.get("scihub_enabled", True) else []
+        return sort_sources([(try_scihub, "Sci-Hub")]) if grey_enabled else []
     elif strategy == "grey_only":
         return sort_sources(grey_sources)
     elif strategy == "legal_only":
@@ -946,6 +946,21 @@ def _download_impl(
 
     if strategy is not None:
         config["download_strategy"] = strategy
+
+    if is_legal_only_profile():
+        # A compliance profile is a hard ceiling on the source set. An explicit
+        # MCP/CLI argument cannot re-enable grey sources in this process.
+        if scihub_enabled is True or (strategy or "").lower() in GREY_STRATEGIES:
+            return fail(
+                identifier,
+                "This edition is legal-only; grey sources are disabled by the "
+                "active compliance profile",
+                error_type="compliance_profile",
+                action="use the full open-source package if you have verified "
+                       "authorization for grey sources",
+            )
+        config["scihub_enabled"] = False
+        config["download_strategy"] = "legal_only"
 
     target_dir = Path(output_dir) if output_dir else Path(config["output_dir"])
     target_dir.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from enum import Enum
 from pathlib import Path
@@ -23,11 +24,25 @@ def run_server(
     mode: ServerMode = typer.Option(ServerMode.STDIO, help="Transport mode"),
     host: str = typer.Option("127.0.0.1", help="HTTP host (default localhost; bind 0.0.0.0 only behind auth)"),
     port: int = typer.Option(8000, help="HTTP port"),
+    profile: str = typer.Option(
+        "default",
+        help="Compliance profile: default, or qoder (legal-only edition)",
+    ),
 ) -> None:
     """Start the ScanSci PDF server."""
+    profile = profile.strip().lower()
+    if profile not in ("default", "qoder"):
+        raise typer.BadParameter("profile must be 'default' or 'qoder'")
+    # Must be set before scansci_pdf.config is imported anywhere below. The
+    # profile only tightens the source set; it never widens it.
+    os.environ["SCANSCI_PDF_PROFILE"] = profile
+
     from .deps import print_status
     from .log import get_logger
     log = get_logger()
+
+    if profile != "default":
+        log.info(f"Compliance profile: {profile} (grey sources disabled)")
 
     # Check dependencies before starting
     print_status()
@@ -106,7 +121,9 @@ def get_paper(
 
     result = download(
         identifier, output,
-        scihub_enabled=True, use_tor=True, use_vpnsci=True,
+        # None = follow the active config/profile. The Qoder edition forces
+        # legal_only, so an explicit True here would break that guarantee.
+        scihub_enabled=None, use_tor=True, use_vpnsci=True,
         bibtex=not no_bibtex,
         strategy=strategy if strategy else None,
     )
@@ -503,6 +520,10 @@ def batch_fetch_cmd(
         print(f"  Auto-switching to Sci-Hub racing engine (download_strategy={_strategy})")
 
     if _auto_scihub:
+        from .config import is_legal_only_profile
+        if is_legal_only_profile():
+            print("  This edition is legal-only; grey-source downloads are disabled.")
+            return
         # Use the source-racing engine (includes Sci-Hub/SciBban/LibGen)
         from .sources import batch_download
         results = batch_download(dois, output_dir=output, scihub_enabled=True, fallbacks=fallbacks)
