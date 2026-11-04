@@ -71,6 +71,7 @@ const generated = [
 // Hand-maintained in this bundle (marketplace-facing copy, not generated):
 //   .qoder-plugin/plugin.json, .mcp.json, README.md, CONNECTORS.md, LICENSE,
 //   icon.png, commands/scansci/*.md
+// Only the manifest version is machine-checked, against pyproject.toml below.
 const check = process.argv.includes('--check')
 const normalize = (text) => text.replace(/\r\n/g, '\n')
 let stale = 0
@@ -104,6 +105,26 @@ for (const entry of generated) {
   writeFileSync(entry.to, text, 'utf8')
   console.log(`generated: ${entry.to}`)
 }
+
+// The manifest version is hand-maintained, so assert it against the package
+// version: a marketplace listing whose version drifts from the pip release
+// promises tools the installed engine may not have.
+const manifestPath = join(packageRoot, '.qoder-plugin', 'plugin.json')
+const declaredVersion = JSON.parse(readFileSync(manifestPath, 'utf8')).version
+const pyproject = normalize(readFileSync(join(repoRoot, 'pyproject.toml'), 'utf8'))
+const [, packagedVersion] = pyproject.match(/^version\s*=\s*"([^"]+)"/m) ?? []
+if (!packagedVersion) {
+  console.error('could not read the package version from pyproject.toml')
+  process.exit(1)
+}
+if (declaredVersion !== packagedVersion) {
+  console.error(
+    `version drift: ${manifestPath} declares ${declaredVersion}, ` +
+      `pyproject.toml has ${packagedVersion}`
+  )
+  process.exit(1)
+}
+console.log(`version ${declaredVersion} matches pyproject.toml`)
 
 if (check) {
   if (stale > 0) process.exit(1)

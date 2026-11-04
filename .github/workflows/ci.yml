@@ -40,6 +40,7 @@ jobs:
 
   # The Qoder plugin bundle ships generated copies of the skills; a stale copy
   # would be submitted to the marketplace as-is, so fail the pull request here.
+  # The same check asserts the manifest version still matches the pip release.
   qoder-bundle:
     runs-on: ubuntu-latest
     steps:
