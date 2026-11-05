@@ -1,7 +1,7 @@
 {
   "version": 1,
   "last_browser_verification": "2026-06-07",
-  "verdict_source": "InstSci built-in CloakBrowser workflow",
+  "verdict_source": "ScanSci PDF built-in visible browser workflow",
   "scope": "Publisher PDF capability matrix generated from browser-backed runs, not HTTP preflight.",
   "source_runs": [
     "downloads\\browser_pdf_verification_20260606_112028\\browser_verification_report.json",
@@ -193,7 +193,7 @@
       ],
       "diagnostic_path": "",
       "source_run": "downloads\\publisher_pending_visible_annual-reviews_openathens4_142609\\primary\\summary.json",
-      "success_note": "OpenAthens path was selected automatically, Tsinghua SSO/2FA was completed manually in visible CloakBrowser, and the Annual Reviews docserver PDF was captured."
+      "success_note": "OpenAthens path was selected automatically, Tsinghua SSO/2FA was completed manually in visible browser, and the Annual Reviews docserver PDF was captured."
     },
     "aps": {
       "profile_key": "aps",
@@ -324,7 +324,7 @@
       ],
       "diagnostic_path": "",
       "source_run": "downloads\\publisher_pending_reverify_ieee_tsinghua_20260607_reawaken\\primary\\summary.json",
-      "success_note": "IEEE verified through institutional access: article page -> Institutional Sign In -> Tsinghua University(OpenAthens) -> Tsinghua SSO/2FA in visible CloakBrowser -> returned through tlink.lib.tsinghua.edu.cn -> PDF button /stamp/stamp.jsp?tp=&arnumber=11493918 -> PDF captured and text matched the DOI record."
+      "success_note": "IEEE verified through institutional access: article page -> Institutional Sign In -> Tsinghua University(OpenAthens) -> Tsinghua SSO/2FA in visible browser -> returned through tlink.lib.tsinghua.edu.cn -> PDF button /stamp/stamp.jsp?tp=&arnumber=11493918 -> PDF captured and text matched the DOI record."
     },
     "iop": {
       "profile_key": "iop",
@@ -351,7 +351,7 @@
       ],
       "diagnostic_path": "",
       "source_run": "downloads\\publisher_pending_visible_iop_verified3_170849\\primary\\summary.json",
-      "success_note": "Article access wall was routed to myIOPscience deeplink, OpenAthens entityID was set to Tsinghua, user completed Tsinghua SSO/2FA in visible CloakBrowser, and the IOP PDF was captured."
+      "success_note": "Article access wall was routed to myIOPscience deeplink, OpenAthens entityID was set to Tsinghua, user completed Tsinghua SSO/2FA in visible browser, and the IOP PDF was captured."
     },
     "mdpi": {
       "profile_key": "mdpi",

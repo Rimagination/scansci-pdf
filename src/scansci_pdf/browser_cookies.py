@@ -1,6 +1,6 @@
-"""Extract cookies via CloakBrowser for publisher access.
+"""Extract cookies via browser for publisher access.
 
-Opens a visible CloakBrowser window, lets user log in to their institution,
+Opens a visible browser window, lets user log in to their institution,
 then captures and saves publisher cookies for automated downloads.
 """
 
@@ -113,17 +113,17 @@ def extract_via_browser(
     try:
         from .browser_backend import launch
         from .browser_backend import is_available as _browser_backend_available
-        if not _browser_backend_available():
+        if not _browser_backend_available(config=config):
             return {
                 "success": False,
                 "error": "no browser backend available",
-                "fix": "pip install patchright (or pip install cloakbrowser)",
+                "fix": "pip install patchright (or pip install 'scansci-pdf[camoufox]')",
             }
     except ImportError:
         return {
             "success": False,
             "error": "no browser backend available",
-            "fix": "pip install patchright (or pip install cloakbrowser)",
+            "fix": "pip install patchright (or pip install 'scansci-pdf[camoufox]')",
         }
 
     from .config import DATA_DIR
@@ -137,7 +137,7 @@ def extract_via_browser(
     print(f"  登录完成后关闭浏览器窗口即可\n")
 
     try:
-        browser = launch(headless=False, humanize=True)
+        browser = launch(headless=False, humanize=True, config=config)
         context = browser.new_context(viewport={"width": 1440, "height": 900})
         page = context.new_page()
 
@@ -186,7 +186,7 @@ def extract_via_browser(
         _save_cookies_json(save_cookies, cookie_file)
         _save_cookies_netscape(save_cookies, netscape_file)
 
-        # Import into CloakBrowser server if running
+        # Import into browser server if running
         browser_imported = 0
         try:
             from .browser_engine import import_cookies, is_available
@@ -296,7 +296,7 @@ def publisher_login(
     Takes a DOI or publisher name, resolves to the article page, and opens
     a visible stealth browser. User clicks "Access through your institution",
     completes SSO login, then closes the browser. Cookies are captured and
-    imported into CloakBrowser for automated downloads.
+    imported into browser for automated downloads.
 
     Args:
         identifier: DOI (e.g. 10.1126/science.aec6396) or publisher name

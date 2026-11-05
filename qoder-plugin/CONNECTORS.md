@@ -28,7 +28,7 @@ C:\Users\<用户名>\AppData\Local\Programs\Python\Python311\Scripts\scansci-pdf
 | --- | --- |
 | 开放获取、预印本、出版商 API 下载 | 基础安装即可 |
 | 机构通道（WebVPN / CARSI / EZproxy） | `vpnsci` extra（pycryptodome），URL 加密依赖它 |
-| 机构登录与反爬较强的站点 | 可选 `cloakbrowser` / `camoufox` / `patchright` 浏览器后端 |
+| 机构登录与反爬较强的站点 | 可选 `patchright`（默认）/ `camoufox` / `ego-lite` 浏览器后端 |
 | Elsevier / Springer 官方接口提速 | 需你自行申请 API Key（机构邮箱 + 校园网出口创建） |
 | Sciverse 语义证据与元数据 | 可选 Token，见 https://sciverse.space/tokens |
 

@@ -1,8 +1,7 @@
-"""`scansci-pdf est-batch` imports ACSCloakBatchDownloader from .acs_batch.
+"""`scansci-pdf est-batch` imports ACSBatchDownloader from .acs_batch.
 
-The compatibility module re-exported five names and not that one, so the command
-raised `ImportError: cannot import name 'ACSCloakBatchDownloader'` immediately,
-before doing any work (#70).
+The compatibility module must re-export every name the CLI imports; #70 was a
+missing export that raised `ImportError` before the command did any work.
 """
 
 from __future__ import annotations
@@ -14,10 +13,10 @@ from scansci_pdf import _cli_core, acs_batch
 
 
 def test_the_est_batch_import_resolves():
-    from scansci_pdf.acs_batch import ACSCloakBatchDownloader
-    from scansci_pdf.publisher_batch import ACSCloakBatchDownloader as canonical
+    from scansci_pdf.acs_batch import ACSBatchDownloader
+    from scansci_pdf.publisher_batch import ACSBatchDownloader as canonical
 
-    assert ACSCloakBatchDownloader is canonical
+    assert ACSBatchDownloader is canonical
 
 
 def test_every_name_the_cli_imports_from_acs_batch_is_exported():

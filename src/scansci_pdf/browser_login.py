@@ -11,15 +11,17 @@ from urllib.parse import urlparse
 
 try:
     from .browser_backend import launch
-    from .browser_backend import BACKEND_CAMOUFOX, BACKEND_CLOAKBROWSER, BACKEND_PATCHRIGHT
+    from .browser_backend import BACKEND_CAMOUFOX, BACKEND_EGO_LITE, BACKEND_PATCHRIGHT
     from .browser_backend import is_available as _browser_backend_available
-    _HAS_CLOAKBROWSER = any(
+    _HAS_BROWSER = any(
         _browser_backend_available(b)
-        for b in (BACKEND_PATCHRIGHT, BACKEND_CLOAKBROWSER, BACKEND_CAMOUFOX)
+        for b in (BACKEND_PATCHRIGHT, BACKEND_CAMOUFOX)
     )
 except ImportError:
     launch = None  # type: ignore[assignment]
-    _HAS_CLOAKBROWSER = False
+    BACKEND_EGO_LITE = "ego-lite"
+    _browser_backend_available = lambda *a, **k: False  # noqa: E731
+    _HAS_BROWSER = False
 from .log import get_logger
 
 log = get_logger()
@@ -57,12 +59,16 @@ class PersistentBrowser:
 
     def _start(self, config: dict[str, Any] | None = None):
         """Start a new browser instance. Restores saved state if available."""
-        if not _HAS_CLOAKBROWSER:
-            raise RuntimeError("cloakbrowser not installed. Run: pip install cloakbrowser")
+        if not _HAS_BROWSER and not _browser_backend_available(BACKEND_EGO_LITE, config):
+            raise RuntimeError(
+                "no browser backend available. Run: pip install patchright "
+                "(or pip install 'scansci-pdf[camoufox]')"
+            )
         log.info("   [browser] Starting persistent browser...")
         self._browser = launch(
             headless=False, humanize=True,
             args=["--disable-features=CrossOriginOpenerPolicy"],
+            config=config,
         )
         self._context = self._browser.new_context()
         self._page = self._context.new_page()
@@ -209,23 +215,23 @@ def _save_cookies_json(cookies: list[dict[str, Any]], cookie_file: Path) -> None
 
 
 def _save_cookies_netscape(cookies: list[dict[str, Any]], cookie_file: Path) -> None:
-    """Save cookies in Netscape format (CloakBrowser import compatible)."""
+    """Save cookies in Netscape format (browser import compatible)."""
     from .browser_cookies import cookies_to_netscape
     cookie_file.write_text(cookies_to_netscape(cookies), encoding="utf-8")
 
 
 def _import_to_browser(cookie_file: Path, config: dict[str, Any]) -> int:
-    """Import cookies into CloakBrowser. Returns count imported."""
+    """Import cookies into browser. Returns count imported."""
     try:
         from .browser_engine import import_cookies, is_available
         if not is_available(config):
-            log.info("   [browser] CloakBrowser not running, skipping auto-import")
+            log.info("   [browser] browser not running, skipping auto-import")
             return 0
         count = import_cookies(cookie_file, config)
-        log.info(f"   [browser] Imported {count} cookies into CloakBrowser")
+        log.info(f"   [browser] Imported {count} cookies into browser")
         return count
     except Exception as exc:
-        log.info(f"   [browser] Could not auto-import to CloakBrowser: {exc}")
+        log.info(f"   [browser] Could not auto-import to browser: {exc}")
         return 0
 
 
@@ -248,7 +254,7 @@ def open_login_browser(
         cookie_file: Path to save captured cookies (JSON).
         detect_login: Optional callable(browser_context, page) -> bool for custom login detection.
         max_wait: Max seconds to wait for login.
-        auto_import: Whether to auto-import cookies into CloakBrowser.
+        auto_import: Whether to auto-import cookies into browser.
         keep_alive: If True, return (True, context, page) without closing browser.
         publisher: Publisher name for remote assist display.
 
@@ -267,13 +273,14 @@ def open_login_browser(
         remote.start()
         remote.update_url(url)
 
-    if not _HAS_CLOAKBROWSER:
-        log.info("   [browser] cloakbrowser not installed")
+    if not _HAS_BROWSER and not _browser_backend_available(BACKEND_EGO_LITE, config):
+        log.info("   [browser] no browser backend installed")
         return (False, None, None, None) if keep_alive else False
 
     try:
         browser = launch(headless=False, humanize=True,
-                         args=["--disable-features=CrossOriginOpenerPolicy"])
+                         args=["--disable-features=CrossOriginOpenerPolicy"],
+                         config=config)
         context = browser.new_context()
         page = context.new_page()
 

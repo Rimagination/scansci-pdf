@@ -105,7 +105,7 @@ class BrowserRuntimeResolver:
                 "source": "",
                 "available": False,
                 "install_needed": True,
-                "install_hint": "No reusable browser runtime found. Suggested explicit install: pip install cloakbrowser, or configure SCANSCI_BROWSER_COMMAND.",
+                "install_hint": "No reusable browser runtime found. Suggested explicit install: pip install patchright, or configure SCANSCI_BROWSER_COMMAND.",
             }
         result["profile_dir"] = _default_profile_dir()
         result["cache_dir"] = _default_cache_dir()
@@ -143,7 +143,7 @@ class BrowserRuntimeResolver:
             }
         )
         candidates.append(self._current_scansci_pdf())
-        for package in ("cloakbrowser", "playwright"):
+        for package in ("patchright", "camoufox", "playwright"):
             candidates.append(
                 {
                     "selected": f"{package}_package",
@@ -185,19 +185,13 @@ class BrowserRuntimeResolver:
 
 def doctor() -> Dict[str, Any]:
     result = BrowserRuntimeResolver().doctor()
-    # Surface cloakbrowser version freshness. cloakbrowser iterates on
-    # anti-detection patches fast; surfacing staleness here lets users
-    # diagnose silent bot-detection failures via scansci-pdf browser-doctor.
     try:
-        from .cli import _cloakbrowser_version_status, CLOAKBROWSER_RECOMMENDED_MIN
-        cb_status, cb_detail = _cloakbrowser_version_status()
-        result["cloakbrowser_version"] = {
-            "status": cb_status,
-            "detail": cb_detail,
-            "recommended_min": CLOAKBROWSER_RECOMMENDED_MIN,
-        }
+        from .browser_backend import browser_info
+        from .config import load_config
+
+        result["browser_backend"] = browser_info(load_config())
     except Exception as exc:  # pragma: no cover - defensive
-        result["cloakbrowser_version"] = {"status": "unknown", "detail": str(exc)}
+        result["browser_backend"] = {"status": "unknown", "detail": str(exc)}
     return result
 
 

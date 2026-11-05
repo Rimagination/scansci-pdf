@@ -54,7 +54,7 @@ def try_carsi(doi: str, output_path: Path, config: dict[str, Any]) -> dict[str, 
                     scheme="https", netloc=primary_domain))
                 log.info(f"   [CARSI] Redirected to primary domain: {resolved_url[:80]}")
 
-        # Try browser download (CloakBrowser first, Selenium fallback)
+        # Try browser download (Playwright backend, Selenium fallback)
         result = client.download_via_browser(doi, resolved_url, output_path)
         if result:
             return result

@@ -41,7 +41,7 @@ class TestBrowserLoginFailFast:
             launched.append(kwargs)
             raise AssertionError("browser must not be launched when webvpn base is empty")
 
-        monkeypatch.setattr(auth_mod, "_HAS_CLOAKBROWSER", True)
+        monkeypatch.setattr(auth_mod, "_HAS_BROWSER", True)
         monkeypatch.setattr("scansci_pdf.browser_backend.launch_persistent_context", _fake_launch)
         monkeypatch.setattr(auth_mod, "_get_profile_dir", lambda cfg: tmp_path)
 

@@ -24,7 +24,7 @@ OPTIONAL_DEPS = {
     "socks": "SOCKS proxy support (requests[socks])",
     "Crypto": "WebVPN AES encryption (pycryptodome)",
     "patchright": "Stealth browser backend (default; open-source Playwright fork)",
-    "cloakbrowser": "Stealth browser backend (fallback; free tier pinned to Chromium 146)",
+    "camoufox": "Anti-detect Firefox fallback browser backend",
 }
 
 _feature_status: dict[str, bool] = {}
@@ -69,7 +69,7 @@ def is_feature_available(feature: str) -> bool:
 
     feature_deps = {
         "socks_proxy": ["socks"],
-        "instsci": ["Crypto", "cloakbrowser"],
+        "instsci": ["Crypto", "patchright"],
         "html_parse": ["bs4"],
     }
 
@@ -108,17 +108,6 @@ def print_status() -> None:
             status = "optional"
             has_optional = True
         log.info(f"  [{status}] {module} - {info['description']}")
-
-    # cloakbrowser iterates on anti-detection patches fast; flag stale installs
-    # so users know to upgrade even when the package is present.
-    if report["optional"].get("cloakbrowser", {}).get("available"):
-        try:
-            from .cli import _cloakbrowser_version_status
-            cb_status, cb_detail = _cloakbrowser_version_status()
-            if cb_status == "outdated":
-                log.warning(f"  [STALE] cloakbrowser {cb_detail}")
-        except Exception:
-            pass
 
     if has_optional:
         log.info("  Install optional deps: pip install scansci-pdf[fast,vpnsci]")

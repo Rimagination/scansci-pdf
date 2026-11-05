@@ -26,7 +26,7 @@ print(f"Opening: {url}")
 print("Log in with your institution. Script will auto-detect when done.")
 print()
 
-from cloakbrowser import launch
+from scansci_pdf.browser_backend import launch
 
 LOGIN_INDICATORS = [
     'sign out', 'signout', 'log out', 'logout',
@@ -62,7 +62,8 @@ def _save_all(context, config, cookie_file):
 
 
 browser = launch(headless=False, humanize=True,
-                 args=["--disable-features=CrossOriginOpenerPolicy"])
+                 args=["--disable-features=CrossOriginOpenerPolicy"],
+                 config=config)
 context = browser.new_context()
 page = context.new_page()
 page.goto(url, wait_until="domcontentloaded", timeout=60000)

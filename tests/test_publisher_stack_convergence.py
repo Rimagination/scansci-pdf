@@ -41,7 +41,6 @@ PAIRS = [
     ("scansci_pdf.institutional.session_store", "scansci_pdf.session_store"),
     ("scansci_pdf.institutional.session_broker", "scansci_pdf.session_broker"),
     ("scansci_pdf.institutional.flaresolverr", "scansci_pdf.flaresolverr"),
-    ("scansci_pdf.institutional.cloakbrowser_compat", "scansci_pdf.cloakbrowser_compat"),
     (
         "scansci_pdf.institutional.extractors.html_extractor",
         "scansci_pdf.extractors.html_extractor",

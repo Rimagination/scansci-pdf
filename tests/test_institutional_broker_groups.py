@@ -19,7 +19,7 @@ _REAL_SAVE_PROGRESS = sources._save_progress
 def _no_external_state(monkeypatch):
     monkeypatch.setattr(sources, "_save_progress", lambda *args: None)
     monkeypatch.setattr(sources, "_browser_semaphore", threading.Semaphore(2))
-    monkeypatch.setattr(browser_backend, "is_available", lambda: True)
+    monkeypatch.setattr(browser_backend, "is_available", lambda *args, **kwargs: True)
     monkeypatch.setattr(session_broker, "broker_is_running", lambda _key: False)
 
 

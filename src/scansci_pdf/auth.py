@@ -1,4 +1,4 @@
-"""Campus institutional access authentication management using CloakBrowser."""
+"""Campus institutional access authentication management using browser."""
 
 import binascii
 import logging
@@ -16,15 +16,17 @@ from .session_store import CookieStore
 
 try:
     from .browser_backend import launch
-    from .browser_backend import BACKEND_CAMOUFOX, BACKEND_CLOAKBROWSER, BACKEND_PATCHRIGHT
+    from .browser_backend import BACKEND_CAMOUFOX, BACKEND_EGO_LITE, BACKEND_PATCHRIGHT
     from .browser_backend import is_available as _browser_backend_available
-    _HAS_CLOAKBROWSER = any(
+    _HAS_BROWSER = any(
         _browser_backend_available(b)
-        for b in (BACKEND_PATCHRIGHT, BACKEND_CLOAKBROWSER, BACKEND_CAMOUFOX)
+        for b in (BACKEND_PATCHRIGHT, BACKEND_CAMOUFOX)
     )
 except ImportError:
     launch = None  # type: ignore[assignment]
-    _HAS_CLOAKBROWSER = False
+    BACKEND_EGO_LITE = "ego-lite"
+    _browser_backend_available = lambda *a, **k: False  # noqa: E731
+    _HAS_BROWSER = False
 
 logger = logging.getLogger(__name__)
 
@@ -260,8 +262,11 @@ class WebVPNAuth:
                 "Run `scansci-pdf setup <学校全名>` first and check `scansci-pdf schools`."
             )
             return False
-        if not _HAS_CLOAKBROWSER:
-            logger.error("no browser backend available. Run: pip install patchright (or pip install cloakbrowser)")
+        if not _HAS_BROWSER and not _browser_backend_available(BACKEND_EGO_LITE, self.config):
+            logger.error(
+                "no browser backend available. Run: pip install patchright "
+                "(or pip install 'scansci-pdf[camoufox]')"
+            )
             return False
 
         try:
@@ -272,11 +277,12 @@ class WebVPNAuth:
                 user_data_dir=str(profile_dir),
                 headless=False, humanize=True,
                 args=self._browser_launch_args(),
+                config=self.config,
             )
             self._browser = None
             self._page = self._context.new_page()
         except Exception as e:
-            logger.error("Failed to start CloakBrowser: %s", e)
+            logger.error("Failed to start browser: %s", e)
             self._close_browser_quietly()
             return False
 
@@ -483,19 +489,23 @@ class EZProxyAuth:
             return False
 
     def _browser_login(self) -> bool:
-        if not _HAS_CLOAKBROWSER:
-            logger.error("no browser backend available. Run: pip install patchright (or pip install cloakbrowser)")
+        if not _HAS_BROWSER and not _browser_backend_available(BACKEND_EGO_LITE, self.config):
+            logger.error(
+                "no browser backend available. Run: pip install patchright "
+                "(or pip install 'scansci-pdf[camoufox]')"
+            )
             return False
 
         try:
             self._browser = launch(
                 headless=False, humanize=True,
                 args=self._browser_launch_args(),
+                config=self.config,
             )
             self._context = self._browser.new_context()
             self._page = self._context.new_page()
         except Exception as e:
-            logger.error("Failed to start CloakBrowser: %s", e)
+            logger.error("Failed to start browser: %s", e)
             return False
 
         _seed_saved_cookies(_get_cookie_path(self.config), self._context)

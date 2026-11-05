@@ -9,10 +9,6 @@ updates:
       # export on a stock pymupdf 1.x install. Keep the deliberate <2 cap.
       - dependency-name: "pymupdf4llm"
         versions: [">=2.0.0"]
-      # 0.7+ requires a CloakBrowser license key; the <0.7 cap keeps the
-      # extra usable out of the box. Keep the deliberate cap.
-      - dependency-name: "cloakbrowser"
-        versions: [">=0.7.0"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

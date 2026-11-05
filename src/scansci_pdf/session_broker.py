@@ -1,6 +1,6 @@
 """Long-lived publisher browser session broker.
 
-The broker keeps one CloakBrowser context alive per publisher/profile and
+The broker keeps one browser context alive per publisher/profile and
 accepts DOI batch jobs through a small file queue. It intentionally stores no
 cookie values in the broker state.
 """

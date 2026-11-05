@@ -79,7 +79,7 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 
 ⚠️ **两件事占了机构失败的大多数,先确认再谈能不能下:**
 
-**1. 浏览器要用工具自己开的那一个。** `scansci_pdf_login` 打开的是工具自带的可见反检测浏览器,cookie 是从**那个上下文**抓取并落盘的——用户在别的浏览器里登录、或用无头模式,登录态都拿不到。所以:`browser_headless` 保持 `false`(机构登录/CAPTCHA/Cloudflare 都要可见窗口);后端用 `camoufox` 或 `cloakbrowser`(`patchright` 1.56~1.61 有 Turnstile 空白页 bug)。**用户坚持用自己的浏览器时不要硬拦**,有两条兜底:把内核指到他自己装的 Chrome(`config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"`),或导入 cookie(`scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")`;CARSI 还会自动读本机 Chrome 的 cookie 库)。
+**1. 浏览器要用工具自己开的那一个。** `scansci_pdf_login` 打开的是工具自带的可见反检测浏览器,cookie 是从**那个上下文**抓取并落盘的——用户在别的浏览器里登录、或用无头模式,登录态都拿不到。所以:`browser_headless` 保持 `false`(机构登录/CAPTCHA/Cloudflare 都要可见窗口);后端默认 `patchright`,遇到 Turnstile 空白页可切 `camoufox`;`ego-lite` 通过 CDP 连接已运行的 ego lite 桌面浏览器。**用户坚持用自己的浏览器时不要硬拦**,有两条兜底:把内核指到他自己装的 Chrome(`config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"`),或导入 cookie(`scansci_pdf_login(kind="cookie_import", cookie_file="cookies.txt")`;CARSI 还会自动读本机 Chrome 的 cookie 库)。
 
 **2. 出口 IP 决定机构权限。** 出版商(尤其 Elsevier)按请求源 IP 判权益。机器一旦开系统/全局代理,**工具和浏览器看到的出口就变成代理出口,机构授权当场失效**——典型症状是 `pdf.sciencedirectassets.com` 返回 "There was a problem providing the content you requested"(带 CPE 码,页面上会打印它看到的那个 IP)。**拿那个 IP 去核对是否属于机构网段,再下"学校没订阅"的结论。** 工具只认 `network_proxy`/`SCANSCI_PDF_PROXY`,**忽略** `HTTP_PROXY`/`HTTPS_PROXY`。
 
@@ -106,9 +106,9 @@ scansci-pdf search "关键词" --limit 10 --sort cited_by_count   # 13源引擎,
 
 | 症状 | 修复 |
 |---|---|
-| Sci-Hub 返回 Cloudflare/Turnstile 页 | `browser-status` 查后端;Turnstile widget 空白是 patchright 已知 bug(1.56~1.61)→ `config-cmd browser_backend camoufox`(反指纹 Firefox,已装并实测)或 `config-cmd browser_backend cloakbrowser`,或改走机构路径 |
+| Sci-Hub 返回 Cloudflare/Turnstile 页 | `browser-status` 查后端;Turnstile widget 空白时 `config-cmd browser_backend camoufox`(反指纹 Firefox),或改用 ego-lite/机构路径 |
 | camoufox 提示未安装内核 | `python -m camoufox fetch`(需代理);wrapper: `pip install scansci-pdf[camoufox]` |
-| cloakbrowser 内核过老 | `config-cmd browser_executable "C:\Program Files\Google\Chrome\Application\chrome.exe"` |
+| patchright 启动失败 | 安装本机 Chrome，或运行 `patchright install chromium`；也可切 `camoufox`/ego-lite |
 | 所有源超时 | 查 `network_proxy`;本机代理可能没启动,先测端口 |
 | Elsevier 只回 1 页预览 | key 无效/无权限,重新 setup --validate |
 | Sciverse 401 / Token 无效 | `scansci-pdf sciverse-setup --token <token> --test` 重新配置；MCP `scansci_pdf_sciverse_setup(token="...", test=true)` |

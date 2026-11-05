@@ -62,7 +62,7 @@ def _try_institutional_bridge(doi: str, output_path: Path, config: dict) -> dict
 _browser_semaphore: threading.Semaphore | None = None
 _browser_semaphore_lock = threading.Lock()
 
-# Source labels that require launching a browser (CloakBrowser)
+# Source labels that require launching a browser (browser)
 _BROWSER_SOURCE_LABELS = frozenset({
     "ElsevierBrowser", "WileyBrowser", "IEEEBrowser", "ACSBrowser",
     "RSCBrowser", "AIPBrowser", "SpringerBrowser", "APSBrowser",
@@ -73,7 +73,7 @@ _BROWSER_SOURCE_LABELS = frozenset({
     # CNKI/VIP need a visible browser for CARSI login / download clicks;
     # Wanfang and NCPSSD are pure HTTP but share the same lane label.
     "CNDatabase", "CNKI", "Wanfang", "VIP",
-    # Sci-Hub launches CloakBrowser internally (browser-first pass +
+    # Sci-Hub launches browser internally (browser-first pass +
     # Cloudflare/ALTCHA challenge solving), so it must participate in the
     # global browser-source concurrency budget.
     "Sci-Hub",
@@ -1255,11 +1255,11 @@ def _build_failure_guidance(doi: str, config: dict[str, Any]) -> list[str]:
         tips.append("→ 重新运行下载命令即可")
     elif error_type == "cloudflare_blocked":
         tips.append("Cloudflare 防护阻止了访问")
-        tips.append("→ 安装 CloakBrowser (pip install cloakbrowser) 绕过反爬")
+        tips.append("→ 安装可见浏览器后端 (pip install 'scansci-pdf[patchright]') 绕过反爬")
         tips.append("→ 或配置代理: scansci_pdf config_set network_proxy \"socks5://127.0.0.1:1080\"")
     elif error_type == "browser_unavailable":
-        tips.append("CloakBrowser 不可用，无法使用浏览器下载策略")
-        tips.append("→ 运行: pip install cloakbrowser")
+        tips.append("browser 不可用，无法使用浏览器下载策略")
+        tips.append("→ 运行: pip install 'scansci-pdf[patchright]' 或 'scansci-pdf[camoufox]'")
 
     # Check scansci-pdf proxy config
     cfg_proxy = config.get("network_proxy", "")
@@ -1405,7 +1405,7 @@ def _batch_institutional_phase(
     try:
         from ..browser_backend import launch_persistent_context  # noqa: F401
         from ..browser_backend import is_available as _browser_backend_available
-        if not _browser_backend_available():
+        if not _browser_backend_available(config=config):
             log.info("   [Batch] no browser backend available, skipping institutional phase")
             return
     except ImportError:

@@ -175,7 +175,7 @@ def browser_status() -> None:
         return
     info = browser_info(config)
     print(f"  backend: {info.get('backend', '?')}")
-    for pkg in ("patchright", "cloakbrowser"):
+    for pkg in ("patchright", "camoufox"):
         try:
             print(f"  {pkg} package: {_md.version(pkg)}")
         except Exception:
@@ -184,6 +184,8 @@ def browser_status() -> None:
         print(f"  browser kernel: {info['binary']} (version {info.get('version') or '?'})")
     else:
         print(f"  browser kernel: {info.get('binary') or '?'}")
+    if info.get("cdp_url"):
+        print(f"  ego-lite CDP: {info['cdp_url']}")
 
 
 @app.command("browser-doctor")
@@ -204,7 +206,7 @@ def import_cookies_cmd(cookie_file: str = typer.Argument(help="Netscape-format c
 
     config = load_config()
     if not is_available(config):
-        print("Error: CloakBrowser not available")
+        print("Error: browser not available")
         raise typer.Exit(1)
     try:
         count = import_cookies(cookie_file, config)

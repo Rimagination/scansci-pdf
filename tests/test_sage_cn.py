@@ -144,7 +144,7 @@ def test_visible_browser_forwards_selected_backend_config(monkeypatch, tmp_path)
 
     config = {
         "cache_dir": str(tmp_path),
-        "browser_backend": "cloakbrowser",
+        "browser_backend": "patchright",
         "browser_executable": "/example/Chromium",
     }
     seen: dict = {}

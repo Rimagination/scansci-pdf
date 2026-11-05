@@ -23,7 +23,7 @@ DEFAULT_SCIHUB_DOMAINS = [
     # ALTCHA-protected (stable; used as manual-download hint)
     "https://sci-hub.ru",
     "https://sci-hub.ee",
-    # Cloudflare-protected (requires CloakBrowser JS challenge bypass)
+    # Cloudflare-protected (requires browser JS challenge bypass)
     "https://sci-hub.st",
     # Reported intermittent (2026-06); kept but deprioritized
     "https://sci-hub.mksa.top",
@@ -101,9 +101,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_pdf_size_bytes": 10000,
     "browser_headless": False,
     "browser_humanize": True,
-    # 浏览器后端：patchright（默认，Apache-2.0 开源 playwright fork，内核随本机 Chrome 自动更新）
-    # 或 cloakbrowser（免费版内核卡 Chromium 146，作为可选回退）
+    # 浏览器后端：patchright（默认，Apache-2.0 开源 playwright fork，内核随本机 Chrome 自动更新）、
+    # camoufox（反检测 Firefox 回退），或 ego-lite（通过 CDP 连接已运行的 ego lite 桌面浏览器）。
     "browser_backend": "patchright",
+    "ego_lite_cdp_url": "",
+    "ego_lite_executable": "",
+    "ego_lite_auto_launch": False,
+    "ego_lite_user_data_dir": "",
+    "ego_lite_launch_timeout": 20.0,
     # 批量下载时每 N 篇回收一次浏览器上下文（cookie 内存交接，登录态不丢）。
     # 0 = 关闭。长批次（上千篇）建议 100-200，避免 Chrome 长会话内存漂移。
     "browser_restart_every": 0,
@@ -125,11 +130,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # true = 竞速全程零窗口、零任务栏闪烁；指纹安全性由 UA 清洗保证。
     "scihub_browser_headless": False,
     "scihub_browser_first": True,  # false = pure-HTTP Sci-Hub lane (use when the PDF CDN challenges headless browsers but serves plain requests)
-    # 浏览器内核选择（CloakBrowser 免费版内置 Chromium 146 已过老，遇 Cloudflare Turnstile 会反复验证）：
-    #   browser_executable: 显式指定浏览器二进制路径（本机 Chrome/Edge）；留空=自动探测
-    #   browser_auto_upgrade: True 时自动探测本机 Chrome/Edge（版本 > 146 优先于内置 stealth Chromium）
+    # 浏览器内核选择：显式指定浏览器二进制路径（本机 Chrome/Edge）；留空=使用 channel=chrome。
     "browser_executable": "",
-    "browser_auto_upgrade": True,
     "is_campus_network": False,
     "tor_proxy": os.environ.get("TOR_PROXY", ""),
     "tor_binary_path": "",  # Explicit tor binary; empty falls back to the embedded install and then PATH. Pinning it stops lookup order from deciding which binary runs

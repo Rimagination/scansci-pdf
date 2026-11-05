@@ -145,13 +145,13 @@ def get_user_advice(error_type: str, source: str) -> str:
         "forbidden": "访问被拒绝（403）→ 建议：1) 配置代理 config_set network_proxy 2) 启用 WebVPN",
         "rate_limited": "请求过于频繁（429）→ 建议：稍后重试，或配置 openalex_api_key 提升配额",
         "timeout": "连接超时 → 建议：1) 检查网络连通性 2) 配置代理绕过封锁 config_set network_proxy 3) 启用 Tor（tor_start）",
-        "captcha": "触发 Cloudflare 防护 → 建议：1) 安装 CloakBrowser (pip install cloakbrowser) 2) 配置代理",
+        "captcha": "触发 Cloudflare 防护 → 建议：1) 安装浏览器后端 (pip install 'scansci-pdf[patchright]') 2) 配置代理",
         "ssl_error": "SSL 连接错误 → 建议：1) 检查代理是否正确 2) 尝试不同代理协议（socks5/http）3) 更新证书",
         "server_error": "服务器错误（5xx）→ 暂时不可用，稍后重试",
         "dns_blocked": "DNS 解析失败 → 建议：1) 配置代理 config_set network_proxy 2) 更换 DNS（8.8.8.8）3) 启用 Tor",
         "network_blocked": "网络完全不通 → 建议：1) 检查代理配置 config_set network_proxy 2) 使用 WebVPN 机构代理 3) 换用海外网络",
         "paywall": "论文需要机构订阅 → 运行 scansci_pdf_browser_login 或 scansci_pdf_instsci_login 登录机构账号",
-        "cloudflare_blocked": "Cloudflare 反爬封锁 → 安装 CloakBrowser (pip install cloakbrowser) 或配置代理",
+        "cloudflare_blocked": "Cloudflare 反爬封锁 → 安装浏览器后端 (pip install 'scansci-pdf[patchright]') 或配置代理",
         "caj_format": "知网返回 CAJ 格式 → 用 CAJViewer 打开，或用 caj2pdf 转换 PDF；详情页有 PDF 按钮时优先重试 PDF",
     }
     return advice.get(error_type, "未知错误 → 建议：运行 network_diagnose 检查网络状态")
@@ -246,18 +246,18 @@ def diagnose_network(config: dict[str, Any] | None = None) -> dict[str, Any]:
     except Exception:
         report["tests"].append({"target": "Tor SOCKS5", "status": "unknown"})
 
-    # Check CloakBrowser
+    # Check browser
     try:
         from ..browser_engine import is_available as browser_avail
         if browser_avail(config):
-            report["tests"].append({"target": "CloakBrowser", "status": "available"})
+            report["tests"].append({"target": "browser", "status": "available"})
         else:
-            report["tests"].append({"target": "CloakBrowser", "status": "not installed"})
+            report["tests"].append({"target": "browser", "status": "not installed"})
             report["recommendations"].append(
-                "CloakBrowser 不可用 → 如遇 Cloudflare 封锁，运行: pip install cloakbrowser"
+                "浏览器后端不可用 → 如遇 Cloudflare 封锁，运行: pip install 'scansci-pdf[patchright]'"
             )
     except Exception:
-        report["tests"].append({"target": "CloakBrowser", "status": "not installed"})
+        report["tests"].append({"target": "browser", "status": "not installed"})
 
 
     # Summary

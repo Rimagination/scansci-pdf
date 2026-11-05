@@ -252,7 +252,7 @@ def _probe_scihub_domains(config: dict[str, Any]) -> None:
 
 
 def _is_browser_available(config: dict[str, Any]) -> bool:
-    """Check if CloakBrowser is available. Returns False in asyncio context."""
+    """Check if browser is available. Returns False in asyncio context."""
     # A running asyncio loop normally means "user asyncio code — the Playwright
     # sync API cannot serve it". Exception: our persistent pool workers, where
     # the loop was created by the sync API itself (browser_engine tracks it).
@@ -631,7 +631,7 @@ def try_scihub_domain(
                 # Use browser to bypass CAPTCHA
                 browser_resp = _try_browser(landing_url, config, resp)
                 if browser_resp is None:
-                    log.warning(f"   browser bypass failed — is CloakBrowser installed? Run: pip install cloakbrowser")
+                    log.warning(f"   browser bypass failed — is a browser backend installed? Run: pip install 'scansci-pdf[patchright]'")
                     if fail_notes is not None:
                         fail_notes.append("challenge(captcha bypass failed)")
                     return None
@@ -689,7 +689,7 @@ def _try_browser(
     config: dict[str, Any],
     original_resp: requests.Response,
 ) -> requests.Response | None:
-    """Try CloakBrowser to bypass Cloudflare. Returns Response or None."""
+    """Try browser to bypass Cloudflare. Returns Response or None."""
     if not _is_browser_available(config):
         return None
     # solve_url lives in browser_engine (flaresolverr.py only hosts the
@@ -894,7 +894,7 @@ def _try_scihub_impl(doi: str, output_path: Path, config: dict[str, Any], use_to
         return None
 
     # Browser-first pass: race configured domains via browser in parallel.
-    # Opt-in (default off) — opening CloakBrowser for every Sci-Hub attempt
+    # Opt-in (default off) — opening browser for every Sci-Hub attempt
     # is slow and can leave orphan Chromium processes (issue #19). The HTTP
     # path below still works; browser is only tried when explicitly enabled
     # or as a Cloudflare/ALTCHA challenge fallback.

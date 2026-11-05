@@ -105,7 +105,7 @@ def check_docker() -> dict[str, Any]:
 
 
 def check_browser() -> dict[str, Any]:
-    """Check CloakBrowser connectivity."""
+    """Check browser backend availability."""
     result: dict[str, Any] = {"running": False}
     try:
         from .browser_engine import is_available
@@ -193,7 +193,7 @@ def setup_check() -> dict[str, Any]:
     if not docker.get("installed"):
         issues.append("Docker 未安装，无法使用 Tor 容器化部署")
     if not browser["running"]:
-        issues.append("CloakBrowser 未运行，Cloudflare 防护可能无法绕过")
+        issues.append("浏览器后端不可用，Cloudflare 防护可能无法绕过")
 
     readiness = "ready" if not issues else "partial"
     if not tor["running"] and not docker.get("running") and not browser["running"]:

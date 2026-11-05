@@ -6,8 +6,8 @@ Two modes:
 
 Built-in mode integrates:
 - CARSI/Shibboleth federated auth
-- PublisherBatchDownloader (CloakBrowser state machine for SSO+PDF capture)
-- Session broker (persistent CloakBrowser sessions across downloads)
+- PublisherBatchDownloader (browser backend state machine for SSO+PDF capture)
+- Session broker (persistent browser backend sessions across downloads)
 - WebVPN / EZProxy campus gateways
 - Elsevier API
 """
@@ -37,8 +37,8 @@ def try_institutional(
     Stage B source — skips OA/grey checks, goes straight to institutional paths:
     1. External instsci package (if installed — full cascade)
     2. CARSI federated auth (if configured)
-    3. Session broker (persistent CloakBrowser session, if running)
-    4. Browser batch download (CloakBrowser state machine, SSO+PDF capture)
+    3. Session broker (persistent browser backend session, if running)
+    4. Browser batch download (browser backend state machine, SSO+PDF capture)
     5. Campus gateway (WebVPN / EZProxy)
     6. Elsevier API
     """
@@ -179,12 +179,12 @@ def _try_builtin_institutional(
         if result:
             return result
 
-    # Step 3: Try session broker (persistent CloakBrowser session)
+    # Step 3: Try session broker (persistent browser backend session)
     result = _try_session_broker(doi, output_path, config, profile)
     if result:
         return result
 
-    # Step 4: Try browser batch download (CloakBrowser state machine)
+    # Step 4: Try browser batch download (browser backend state machine)
     result = _try_browser_batch_download(doi, output_path, config, profile)
     if result:
         return result
@@ -297,9 +297,9 @@ def _try_browser_batch_download(
     config: dict[str, Any],
     profile: Any | None,
 ) -> dict[str, Any] | None:
-    """Try single-DOI download via PublisherBatchDownloader + CloakBrowser.
+    """Try single-DOI download via PublisherBatchDownloader + browser backend.
 
-    Uses the CloakBrowser state machine: navigate → SSO login → capture PDF → verify.
+    Uses the browser backend state machine: navigate → SSO login → capture PDF → verify.
     This is the most capable built-in path — handles Cloudflare, SSO redirects,
     and publisher-specific PDF extraction.
     """
@@ -315,7 +315,7 @@ def _try_browser_batch_download(
     try:
         from ..browser_backend import launch_persistent_context  # noqa: F401
         from ..browser_backend import is_available as _browser_backend_available
-        if not _browser_backend_available():
+        if not _browser_backend_available(config=config):
             log.info("   [Institutional] no browser backend available, skipping browser download")
             return None
     except ImportError:
