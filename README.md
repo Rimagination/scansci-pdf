@@ -5,211 +5,99 @@
   <a href="https://pypi.org/project/scansci-pdf/"><img alt="PyPI" src="https://img.shields.io/pypi/v/scansci-pdf?style=flat-square" /></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-0F766E?style=flat-square" /></a>
 
-  不用懂代码，也不用记命令。把论文题目、链接或一份清单交给 Agent，它帮你找、帮你下、帮你整理。
-
-  [这是什么](#这是什么) · [能做什么](#能做什么) · [开始使用](#开始使用) · [常见问题](#常见问题) · [使用边界](#使用边界) · [社区](#交流群--community) · [进阶参考](docs/REFERENCE.md)
+  不用懂代码，也不用记命令。把论文题目、链接或清单交给 Agent，它帮你找、帮你下、帮你整理。
 </div>
+
+<p align="center">
+  <a href="#这是什么">这是什么</a> ·
+  <a href="#能做什么">能做什么</a> ·
+  <a href="#开始使用">开始使用</a> ·
+  <a href="#你会得到什么">你会得到什么</a> ·
+  <a href="#使用边界">使用边界</a> ·
+  <a href="#进阶参考">进阶参考</a>
+</p>
 
 ## 这是什么
 
-ScanSci PDF 是一个论文助手。你告诉它想下哪篇论文，或者想做哪个主题，它会自己去试：
+**ScanSci PDF 是面向 AI Agent 的学术文献获取与发现工具。**给它 DOI、arXiv ID、文章链接、文献清单，或一个研究问题；它会按当前配置查找候选来源，并尝试获取可访问的文献，把结果整理为 PDF、引用和附件。
 
-- 先找免费的版本、预印本；
-- 再试你学校订阅的渠道；
-- 找到后自动下载、按“作者_年份_标题”命名；
-- 需要的话，顺手导出引用、抓补充材料、整理成可读的 Markdown。
+它提供 Agent Skill / 插件、MCP Server 和 CLI 三种入口。你可以直接用自然语言提出任务，也可以把命令接入脚本或批处理流程。
 
-**你不需要懂代码，也不需要记命令。** 装好之后，对 Agent 说一句话就行——Qoder、Claude Code、Codex、Cursor、ZCode、DeepSeek Harness 都可以。
-
-> 不知道 DOI 也没关系。DOI 就是论文页面上以 `10.` 开头的那串编号；不知道的话，直接发论文标题或链接即可。
+> 不知道 DOI 也没关系，直接发论文标题或链接即可。
 
 ### 适合谁
 
-- 需要下论文、下整批清单的大学生、研究生、老师和科研人员。
-- 不想在十几个网站之间来回切换的人。
-- 需要学校权限、中文文献、引用整理或综述取证的人。
-- 已经在用 AI Agent，想让它顺手把论文也下了的人。
+- 需要获取单篇论文或处理整份文献清单的学生、研究者和实验室。
+- 希望把论文检索、下载和归档接入 AI Agent 工作流的人。
+- 需要机构通道、中文文献、引用导出或综述证据整理的人。
 
-### 不适合谁
-
-- 只需要 PDF 阅读器或文献管理器——请用 Zotero、ReadPaper 等专门工具。
-- 需要 OCR 扫描版 PDF 全文识别——本工具不内置 OCR。
-- 没有合法访问权限、且不愿意自行确认授权与合规性的人。
+如果你只需要 PDF 阅读器、文献管理器或扫描件 OCR，请选择对应的专用工具；ScanSci PDF 不内置 OCR。
 
 ## 能做什么
 
-| 你想要 | 你可以这样说 | 它会做什么 |
+| 任务 | 输入示例 | 结果 |
 |---|---|---|
-| **下这一篇** | “帮我下 10.1038/nature12373 这篇论文” | 自动找最快能下的来源，得到命名规整的 PDF |
-| **下一整批** | “这个 3000 篇的 xlsx，先分类哪些能直接下、哪些要学校权限，再分批下载” | 去重、补全信息、分批下载，最后给你成功/失败清单 |
-| **先搜再下** | “搜 2023 年以来‘城市热岛’被引最高的 10 篇，然后下载” | 多个学术搜索引擎一起查，结果让你确认后再下 |
-| **用学校权限** | “用北大的学校权限下这篇 Elsevier 论文” | 打开浏览器让你登录一次学校账号，之后自动复用 |
-| **中文论文** | “下这篇 10.3969/j.issn.1674-4993.2024.02.008” | 自动切到中文文献通道（国家哲社文献中心 / 期刊官网 / 知网 / 万方 / 维普） |
-| **找原文证据** | “找几段讨论石墨烯衰减机制的原文，要页码” | 返回带论文、页码和原文位置的证据片段 |
-| **整理引用** | “把这批论文的引用导出来，推到 Zotero” | 导出常用引用格式，或直接推送 Zotero |
-| **下不下来** | “这篇下不下来，帮我看看卡在哪” | 告诉你每个渠道为什么失败，以及下一步怎么做 |
+| **单篇获取** | DOI、arXiv ID 或文章 URL | 按“作者_年份_标题”命名的论文文件，并可导出引用。 |
+| **批量处理** | xlsx、csv、bib、APA、txt 等清单 | 去重、补全元数据、分批处理，并生成成功 / 失败结果清单。 |
+| **检索与发现** | 关键词、作者或研究问题 | 合并 OpenAlex、Crossref、Semantic Scholar、NCPSSD 等结果；可先准备队列再确认。 |
+| **机构与中文来源** | 学校权限或中文论文信息 | 可用通道包括 WebVPN、CARSI、EZProxy、期刊官网、知网、万方、维普等。 |
+| **整理与取证** | 引用、附件或原文证据需求 | BibTeX / RIS / EndNote、补充材料、Markdown；Sciverse 语义证据为可选能力。 |
 
-> 没有说“下载”的请求，它不会自动批量下载；检索结果需要你确认后再保存。
+批量任务可以先分类哪些能直接获取、哪些需要机构权限。下载失败时会返回渠道失败原因和下一步建议。
 
 ## 开始使用
 
-两种方式选一个。装好后，让 Agent 检查一次环境，它会告诉你还缺什么。
+### Agent 插件
 
-### 方式一：DeepSeek Harness（DSH）
+将下面这句话发给 Codex、Claude Code、Cursor、Qoder 或 ZCode 等 Agent：
 
-适合已经在用 DSH 的人，不需要手动配置：
-
-1. 侧边栏 **Plugins** → **Add plugin**
-2. 输入 **`scansci-pdf`**
-3. 安装源保持默认，或按网络情况选 **中国大陆镜像源**
-4. 点击 **Install**，确认插件列表中 bundle 为 **On**
-
-安装后会自动注册论文下载和中文清单整理两个技能，通常不需要重启。
-
-### 方式二：Qoder / ZCode / Claude Code / Codex / Cursor
-
-适合用其他 Agent 的人。分两步：
-
-**第一步：安装或更新**
-
-把下面这句话发给 Agent：
-
-```
+```text
 帮我安装或更新这个插件：https://github.com/Rimagination/scansci-pdf
 ```
 
-Agent 会自己完成安装和注册。
+DeepSeek Harness 可从插件管理界面安装 `scansci-pdf`。安装完成后，先检查本机环境：
 
-**第二步：检查环境**
-
-再发一句：
-
-```
-帮我检查一下论文下载环境
+```bash
+scansci-pdf check
 ```
 
-它会告诉你还缺什么、哪些功能需要补装。
+然后直接描述任务，例如：
+
+```text
+帮我下载这篇 DOI 对应的论文，并把 BibTeX 一起导出。
+```
+
+### CLI / MCP
+
+需要 Python 3.11 或更新版本。基础安装和单篇下载示例：
+
+```bash
+python -m pip install scansci-pdf
+scansci-pdf check
+scansci-pdf get 10.1038/nature12373
+```
+
+也可以通过标准 MCP 配置接入支持 MCP 的客户端。WebVPN、浏览器后端等按使用场景安装可选依赖，见[完整技术参考](docs/REFERENCE.md)。
 
 ## 你会得到什么
 
-- **PDF**：默认按“作者_年份_标题”命名，直接归档。
-- **引用**：常用引用格式，可推送 Zotero。
-- **补充材料**：需要时一起下载。
-- **Markdown**：需要时把 PDF 转成更适合 AI 阅读的文本。
-- **清单**：批量任务结束后，给你一份成功/失败结果。
-- **失败原因**：不会只说“失败”，会告诉你每个来源为什么没成功。
-
-## 需要学校权限时
-
-有些论文需要学校订阅才能下。遇到这种情况：
-
-1. 工具会打开浏览器，让你登录学校账号；
-2. 登录一次后，后续下载会自动复用；
-3. 没有学校账号时，只能获取免费版本、预印本或开放获取版本。
-
-中文的知网、万方、维普通常需要校园网或学校账号；没有权限时，工具会明确告诉你。
-
-## 无订阅权限时访问闭源文献
-
-没有学校订阅，也不代表只能放弃。除了开放获取和预印本，还有一类“灰色源”：
-
-- 不是出版社官方渠道，也不是作者自己发布的开放版本；
-- 而是第三方网站把论文 PDF 收集起来，按 DOI 提供下载，比如 Sci-Hub、LibGen、SciBban；
-- 好处是经典老论文和部分新论文能下到，坏处是镜像经常换、新论文覆盖不稳定，法律上处于灰色地带。
-
-ScanSci PDF 默认把灰色源作为候选之一；你也可以明确要求“只用灰色源”或“只用合法来源”。
-
-下面两个示例只用于测试工具能力，请确保你对目标文献有访问权限。
-
-**示例一：跑一遍基准清单**
-
-```
-使用scansci-pdf下载闭源文献灰色源基准内的文献（20 篇）
-```
-
-清单在[闭源文献灰色源基准](benchmarks/grey-source-probe/README.md)，20 篇都是确认闭源的论文，适合对比不同网络、不同时间的下载能力。
-
-**示例二：随便下三篇**
-
-```
-使用scansci-pdf随便在sci-hub下载三篇文献
-```
-
-> **免责声明**：灰色源可能涉及版权侵权，在部分国家和地区不合法。本项目只提供技术能力，不构成对任何内容的授权或推荐，也不鼓励任何侵权行为；请确认你有权访问目标文献，不要传播下载的 PDF。使用本工具产生的一切后果由使用者自行承担。
-
-## 可选增强（不配置也能用）
-
-- **常用出版商的官方接口**：常下 Elsevier / Springer 论文的话，配置官方 Key 后速度更快，通常 1–2 秒一篇。
-- **更强的语义检索**：开启 Sciverse 后，可以直接找“哪篇论文的哪一段说了什么”，适合写综述和找证据。
-
-这两项都是可选的，不影响基础下载。具体怎么配置见[进阶参考](docs/REFERENCE.md)。
-
-## 常见问题
-
-| 问题 | 回答 |
-|---|---|
-| 要付费吗？ | 软件本身免费、开源（MIT）。Elsevier / Springer / Sciverse 是可选第三方服务，有各自的配额和条款。 |
-| 我不会找 DOI 怎么办？ | 直接发论文标题、网页链接或 PDF 所在页面即可。 |
-| 没有学校账号能下吗？ | 开放获取、arXiv、部分中文免费源可以；付费墙论文需要学校订阅。 |
-| 会不会一下下载很多？ | 不会。批量任务开始前会让你确认清单和范围。 |
-| 下不下来怎么办？ | 让 Agent 诊断；它会告诉你卡在登录、网络、反爬还是权限。 |
-| 支持中文论文吗？ | 支持，包括 NCPSSD、中文期刊官网、知网、万方、维普。 |
-| 会用盗版来源吗？ | 默认配置包含灰色来源；你可以要求“只用合法来源”，它就会只用开放获取和机构渠道。 |
-| 安装后没反应？ | 重启 Agent 或插件；仍然不行就看[进阶参考](docs/REFERENCE.md)里的排障。 |
+- **PDF：**默认按“作者_年份_标题”整理。
+- **引用：**BibTeX、RIS、EndNote；可推送 Zotero。
+- **附件：**需要时获取论文补充材料。
+- **批量结果：**成功 / 失败清单及来源诊断信息。
+- **可选 Markdown：**将有文本层的 PDF 转成便于阅读和检索的文本。
 
 ## 使用边界
 
-- 请在你有权访问的范围内使用。学校订阅论文需要你自己的学校账号或机构网络。
-- 没有订阅或合法开放副本时，付费墙全文无法凭空获得。
-- 灰色来源（Sci-Hub / LibGen）默认按配置启用；如果你只想使用合法来源，直接告诉 Agent“只用合法来源”。
-- 扫描版 PDF 可能没有文本层，Markdown 导出或语义检索效果会受影响。
-
-## 交流群 / Community
-
-扫码加入微信交流群，一起聊 **AI for Science** —— 偏 AI 应用与科研工具，也欢迎讨论 ScanSci PDF 的用法、bug 和需求。
-
-<table>
-  <tr>
-    <td width="250" align="center">
-      <img src="assets/brand/wechat-group-qr.jpg" alt="微信群二维码" width="200">
-      <br>
-      <sub><strong>微信交流群</strong> / WeChat Group<br>群码 7 天有效，过期会更新</sub>
-    </td>
-    <td width="250" align="center">
-      <img src="assets/brand/wechat-contact-qr.jpg" alt="群主微信" width="200">
-      <br>
-      <sub><strong>加群主微信</strong> / Contact<br>群码失效？扫码备注 <em>scansci</em> 拉你进群</sub>
-    </td>
-    <td valign="middle">
-      <p><strong>群聊方向</strong></p>
-      <ul>
-        <li>AI 在科研场景的落地与工具链</li>
-        <li>论文检索、下载、阅读、整理的工作流</li>
-        <li>ScanSci PDF 使用问题与改进建议</li>
-      </ul>
-      <p><sub>二维码过期会更新；着急进群可直接加群主微信。</sub></p>
-    </td>
-  </tr>
-</table>
-
-更偏好异步交流？欢迎直接在 [Issues](https://github.com/Rimagination/scansci-pdf/issues) 或 [Discussions](https://github.com/Rimagination/scansci-pdf/discussions) 区开贴。
-
-<details>
-<summary><strong>贡献者与致谢</strong></summary>
-
-<a href="https://github.com/annsyun"><img src="https://avatars.githubusercontent.com/u/151621087?v=4" width="50" height="50" alt="annsyun" title="annsyun"/></a>
-
-- **[annsyun](https://github.com/annsyun)** — SAGE 中国站机构授权下载通道
-- 感谢 FlareSolverr、ref-downloader、paper-fetch-skill、paper-fetcher、patchright、camoufox 等开源项目
-
-</details>
-
-## 许可证
-
-[MIT License](LICENSE)
+- 付费墙全文需要你自己的学校账号、机构网络或其他授权；没有合法开放副本时，工具无法凭空获取。
+- 默认配置可能包含灰色来源候选；来源是否可用还受宿主策略和本机配置影响。请确认目标文献的访问授权。
+- 只使用合法开放和机构来源时，可明确要求“只用合法来源”，或运行 `scansci-pdf config-cmd download_strategy legal_only`。
+- 扫描版 PDF 可能没有文本层；本工具不负责 OCR。
+- 没有明确下载请求时，不会自动批量下载；检索结果可先确认再保存。
 
 ## 进阶参考
 
-- [完整技术参考](docs/REFERENCE.md)：更细的配置、支持的数据源、机构通道和排障。
-- [反爬与镜像维护手册](docs/PLAYBOOK.md)：给维护者和高级用户。
-- [闭源文献灰色源基准](benchmarks/grey-source-probe/README.md)：20 篇闭源论文的固定清单，用来测试灰色源下载能力，方便跨版本对比。
+- [完整技术参考](docs/REFERENCE.md)：客户端配置、数据源、机构通道与排障。
+- [反爬与镜像维护手册](docs/PLAYBOOK.md)：维护者与高级用户参考。
+- [Issues](https://github.com/Rimagination/scansci-pdf/issues)：报告问题或提出需求。
+- 许可证：[MIT](LICENSE)。
