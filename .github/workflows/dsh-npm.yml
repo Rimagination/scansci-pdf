@@ -28,6 +28,12 @@ jobs:
           node -e "const p = require('./dsh-plugin/package.json'); if (p.version !== process.env.VERSION) { console.error('dsh-plugin/package.json is ' + p.version + ', expected ' + process.env.VERSION); process.exit(1) }"
           node dsh-plugin/scripts/sync-skills.mjs --check
 
+      - name: Verify npm token
+        working-directory: dsh-plugin
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish
         working-directory: dsh-plugin
         run: npm publish --access public
