@@ -142,7 +142,7 @@ pip install scansci-pdf
 | 浏览器登录、CARSI、绕过 Cloudflare | `pip install "scansci-pdf[patchright]"`（默认；驱动本机 Chrome） |
 | 一组装齐（推荐） | `pip install "scansci-pdf[patchright,vpnsci]"` |
 | 换用 Camoufox 内核 | `pip install "scansci-pdf[camoufox]"` |
-| ego-lite 桌面浏览器 | 无需 Python 包；启动 ego lite 并开启 remote debugging port，再设 `browser_backend=ego-lite` |
+| ego-lite 桌面浏览器 | 沿用 `patchright`/`camoufox` 的 Playwright 客户端，无需额外 ego-lite 包；启动 ego lite 并开启 remote debugging port，再设 `browser_backend=ego-lite` |
 
 标准 MCP 配置（Claude Desktop / Cursor / Windsurf / Cline / Cherry Studio…）：
 

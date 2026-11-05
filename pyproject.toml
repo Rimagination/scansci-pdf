@@ -30,7 +30,8 @@ fast = ["lxml>=4.9"]
 vpnsci = ["pycryptodome>=3.20"]
 instsci = ["pycryptodome>=3.20"]
 # patchright is the default browser backend; camoufox is the Firefox fallback.
-# ego-lite is an external desktop browser connected over CDP (no extra).
+# ego-lite is an external desktop browser connected over CDP; it uses the
+# patchright/camoufox Playwright client rather than adding another package.
 camoufox = ["camoufox[geoip]>=0.4.11"]
 patchright = ["patchright>=1.61"]
 dev = ["pytest>=8.0"]

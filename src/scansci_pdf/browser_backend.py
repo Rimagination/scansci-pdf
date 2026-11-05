@@ -525,6 +525,13 @@ def _ego_lite_start(
             from playwright.sync_api import sync_playwright
         pw = sync_playwright().start()
         browser = pw.chromium.connect_over_cdp(url)
+    except ImportError as exc:
+        if process is not None:
+            process.terminate()
+        raise RuntimeError(
+            "ego-lite needs a Playwright client. Install "
+            "'scansci-pdf[patchright]' or 'scansci-pdf[camoufox]'."
+        ) from exc
     except Exception as exc:
         if process is not None:
             process.terminate()

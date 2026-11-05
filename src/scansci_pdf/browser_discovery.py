@@ -187,8 +187,9 @@ def doctor() -> Dict[str, Any]:
     result = BrowserRuntimeResolver().doctor()
     try:
         from .browser_backend import browser_info
+        from .config import load_config
 
-        result["browser_backend"] = browser_info()
+        result["browser_backend"] = browser_info(load_config())
     except Exception as exc:  # pragma: no cover - defensive
         result["browser_backend"] = {"status": "unknown", "detail": str(exc)}
     return result
