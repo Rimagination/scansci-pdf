@@ -376,16 +376,11 @@ def _solve_altcha_and_reload(
         from ..browser_engine import download_pdf_via_browser
 
         lower = html.lower()
-        if "你是机器人吗" in html or "altcha" in lower and "iframe" not in lower:
-            _note_wall(domain, config)
-            log.info("   [altcha] verification wall persists after solve")
-            return None
-
         if any(sig in lower for sig in ["article not found", "статья не найдена", "не найден"]):
             log.info("   [altcha] article not found after verification")
             return None
 
-        # Extract PDF URL
+        # Extract PDF URL first (normal article pages on sci-hub.ru/red also include altcha.min.js)
         pdf_url = extract_pdf_url_from_html(html, landing_url)
         if pdf_url:
             log.info(f"   [altcha] found PDF: {pdf_url[:80]}")
@@ -393,6 +388,11 @@ def _solve_altcha_and_reload(
                 if is_pdf_file(output_path):
                     _note_wall_success(domain, config)
                     return success(doi, output_path, "Sci-Hub(altcha)")
+
+        if "你是机器人吗" in html or "проверка на робота" in lower or ("altcha" in lower and "citation_pdf_url" not in lower and "iframe" not in lower):
+            _note_wall(domain, config)
+            log.info("   [altcha] verification wall persists after solve")
+            return None
 
         log.info("   [altcha] no PDF found after verification")
         return None
@@ -510,8 +510,21 @@ def _browser_first_download(
                         pass
                 lower = html.lower()
 
-        # Check for ALTCHA anti-bot verification (used by sci-hub.ru and other mirrors)
-        if any(sig in lower for sig in ["altcha", "你是机器人吗", "not a robot"]):
+        # Extract PDF URL from HTML first (normal article pages on sci-hub.ru/red also load altcha.min.js)
+        pdf_url = extract_pdf_url_from_html(html, solution.get("url", landing_url))
+        if pdf_url:
+            log.info(f"   [browser-first] found PDF: {pdf_url[:80]}")
+            # Download via browser (handles Cloudflare on PDF host too)
+            if download_pdf_via_browser(pdf_url, output_path, config):
+                # Retry is_pdf_file check — browser may still be flushing to disk
+                for _retry in range(5):
+                    if is_pdf_file(output_path):
+                        return success(doi, output_path, f"Sci-Hub(browser)")
+                    time.sleep(0.2)
+                log.info(f"   [browser-first] downloaded but file not recognized as PDF")
+
+        # Check for ALTCHA anti-bot verification (only when no PDF URL was found on the page)
+        if any(sig in lower for sig in ["你是机器人吗", "проверка на робота", "not a robot"]) or ("altcha" in lower and "citation_pdf_url" not in lower):
             log.info(f"   [browser-first] ALTCHA detected on {domain}, attempting bypass...")
             try:
                 altcha_result = _solve_altcha_and_reload(result, landing_url, doi, output_path, config)
@@ -535,19 +548,6 @@ def _browser_first_download(
             if fail_notes is not None:
                 fail_notes.append("not_in_library")
             return None
-
-        # Extract PDF URL from HTML
-        pdf_url = extract_pdf_url_from_html(html, solution.get("url", landing_url))
-        if pdf_url:
-            log.info(f"   [browser-first] found PDF: {pdf_url[:80]}")
-            # Download via browser (handles Cloudflare on PDF host too)
-            if download_pdf_via_browser(pdf_url, output_path, config):
-                # Retry is_pdf_file check — browser may still be flushing to disk
-                for _retry in range(5):
-                    if is_pdf_file(output_path):
-                        return success(doi, output_path, f"Sci-Hub(browser)")
-                    time.sleep(0.2)
-                log.info(f"   [browser-first] downloaded but file not recognized as PDF")
 
         # Check if the response itself is a PDF
         import base64
