@@ -123,7 +123,7 @@ def get_paper(
         identifier, output,
         # None = follow the active config/profile. The Qoder edition forces
         # legal_only, so an explicit True here would break that guarantee.
-        scihub_enabled=None, use_tor=True, use_vpnsci=True,
+        scihub_enabled=None, use_tor=bool(load_config().get("use_tor_for_scihub", True)), use_vpnsci=True,
         bibtex=not no_bibtex,
         strategy=strategy if strategy else None,
     )
