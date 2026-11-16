@@ -21,12 +21,11 @@ DEFAULT_SCIHUB_DOMAINS = [
     "https://sci-hub.bz",
     "https://sci-hub.mksa.top",
     # ALTCHA-protected (stable; used as manual-download hint)
+    "https://sci-hub.red",
     "https://sci-hub.ru",
     "https://sci-hub.ee",
     # Cloudflare-protected (requires browser JS challenge bypass)
     "https://sci-hub.st",
-    # Reported intermittent (2026-06); kept but deprioritized
-    "https://sci-hub.mksa.top",
     # Legacy (currently down, kept for future recovery)
     "https://sci-hub.se",
     "https://sci-hub.is",
